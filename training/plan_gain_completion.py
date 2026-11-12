@@ -31,6 +31,7 @@ from training.train_plan_gain import (COST_FIELDS, PlanGainModel, _fit_features,
 
 RULE = "terminal_no_committed_QA_has_utility_0; committed_QA_uses_actual_fixed_judge_Q; raw_missing_Q_remains_null"
 LABEL = "actual_completion_weighted_final_utility_minus_direct_utility"
+COST_TARGET_VERSION = "terminal_attempt_incurred_cost_v2"
 
 
 def digest(value):
@@ -136,11 +137,12 @@ def _completion(run, *, observed):
     return None, "attempt_not_terminal"
 
 
-def read_count_profile(records, *, scope):
-    """Mean new READ count in unique delivered branches, from execution receipts."""
+def read_count_profile(records, *, scope, include_terminal_failures=False):
+    """Mean new READ count from unique executed branches in the declared cohort."""
     groups, seen = defaultdict(lambda: defaultdict(list)), set()
+    completions = (0, 1) if include_terminal_failures else (1,)
     for record in records:
-        if (record["observed_state_binding"] is None or record["completion"] != 1
+        if (record["observed_state_binding"] is None or record["completion"] not in completions
                 or record["record_id"] in seen):
             continue
         seen.add(record["record_id"])
@@ -498,6 +500,19 @@ def distinct_action_pairs(records):
     return (row for row in records if not row["equivalent_representation"])
 
 
+def require_terminal_cost_target(model):
+    """Reject success-conditioned assets when evaluating the new cost target.
+
+    Loading a historical asset remains possible for audit. Its old fitted
+    weights cannot acquire terminal-attempt semantics by changing metadata or
+    recalibrating residuals; refit from the recorded successful and failed arms.
+    """
+    if model.cost_models and model.cost_provenance.get("cost_target_version") != COST_TARGET_VERSION:
+        raise ValueError("cost asset is not fitted to terminal_attempt_incurred_cost_v2; "
+            "refit with training.plan_gain_completion using measured successful and confirmed failed "
+            "branches, then recalibrate on held-out conversations; relabelling an old asset is invalid")
+
+
 def fit_effective(training, *, ridge=1.0, quality_head="tree"):
     import numpy as np
     if not training or any(row["split"] != "train" or row["source"] != "actual_completion_weighted_counterfactual"
@@ -518,7 +533,7 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
     domain = (training[0]["observed_state_binding"] or {}).get("action_domain")
     training_domains = [domain]
     samples, direct_seen, cost_kinds, cache_scopes = [], set(), set(), set()
-    seen_costs, paid_cost_outcomes = set(), Counter()
+    seen_costs, paid_cost_outcomes, skipped_cost_outcomes = set(), Counter(), Counter()
     cost_record_ids, cost_branches = [], []
     resident_digests = set()
     for row in training:
@@ -529,14 +544,19 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
         for side in ("direct", "counterfactual"):
             branch = branches[side]
             cost = branch["actual_cost"]
-            if branch["cost_features"] is None or any(value is None for value in cost.values()):
-                continue
             if branch["record_id"] in seen_costs:
                 continue
             seen_costs.add(branch["record_id"])
-            paid_cost_outcomes[branch["completion_reason"]] += 1
-            if branch["completion"] != 1:
+            if branch["completion"] not in (0, 1):
+                skipped_cost_outcomes["unresolved_terminal_outcome"] += 1
                 continue
+            if branch["cost_features"] is None:
+                skipped_cost_outcomes["missing_pre_action_cost_features"] += 1
+                continue
+            if any(not _measured(cost.get(name)) or cost[name] < 0 for name in COST_FIELDS):
+                skipped_cost_outcomes["missing_or_invalid_measured_cost"] += 1
+                continue
+            paid_cost_outcomes[branch["completion_reason"]] += 1
             if side == "direct":
                 direct_seen.add(branch["record_id"])
             samples.append((branch["cost_features"], cost))
@@ -592,15 +612,18 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
         cost_provenance = {"observed_feature_schema": OBSERVED_FEATURE_SCHEMA, "continuation_protocol": BOUNDED_CONTINUATION,
             "completion_reserve_scope": COMPLETION_RESERVE_SCOPE,
             "cost_target_scope": BOUNDED_CONTINUATION,
-            "read_count_profile": read_count_profile(cost_branches, scope="unique_delivered_cost_training_branches"),
-            "source": "actual_observed_delivered_branch_and_paired_direct_costs",
+            "cost_target_version": COST_TARGET_VERSION,
+            "read_count_profile": read_count_profile(cost_branches,
+                scope="unique_measured_terminal_cost_training_branches", include_terminal_failures=True),
+            "source": "actual_observed_terminal_branch_and_paired_direct_costs",
             "prefix_control_scope": "native_excludes_prefix_control",
             "feature_schema": NATIVE_COST_SCHEMA, "feature_names": NATIVE_COST_FEATURE_NAMES,
             "scale": cost_scale,
             "training_cache_starts": sorted(cache_scopes), "training_samples": len(samples),
             "action_samples": len(samples)-len(direct_seen), "unique_direct_samples": len(direct_seen),
             "record_ids": cost_record_ids, "trained_semantic_kinds": sorted(cost_kinds), "cost_fields": COST_FIELDS,
-            "branch_scope": "actual new action through committed ANSWER; excludes common paid state/preparation/cleanup",
+            "branch_scope": "actual new action through terminal attempt (committed ANSWER or confirmed no-QA failure); excludes common paid state/preparation/cleanup",
+            "excluded_cost_records": dict(skipped_cost_outcomes),
             "incremental_scope": "same_observation_predicted_action_absolute_minus_direct_absolute",
             "training_mse": cost_mse}
     return PlanGainModel(training[0]["reader_checkpoint"], training[0]["reader_profile_id"],
@@ -629,10 +652,11 @@ def fit_effective(training, *, ridge=1.0, quality_head="tree"):
 
 
 def calibrate_completion_latency(model, development, *, quantile=.9):
-    """One-sided latency residuals, grouped by independent held-out conversation."""
+    """Terminal-attempt latency residuals grouped by held-out conversation."""
+    require_terminal_cost_target(model)
     if {row["conversation_id"] for row in development} & set(model.provenance["training_conversations"]):
         raise ValueError("completion reserve calibration overlaps fitted training conversations")
-    grouped, seen = defaultdict(dict), set()
+    grouped, seen, outcomes = defaultdict(dict), set(), defaultdict(Counter)
     for row in distinct_action_pairs(development):
         for side in ("direct", "counterfactual"):
             branch = row[side]
@@ -641,12 +665,14 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
             seen.add(branch["record_id"])
             kind = branch["semantic_kind"]
             actual = branch["actual_cost"]["complete_ms"]
-            if (branch["completion"] != 1 or branch["cost_features"] is None or not _measured(actual)
+            if (branch["completion"] not in (0, 1) or branch["cost_features"] is None
+                    or not _measured(actual) or actual < 0
                     or not model.supports_semantic_kind(kind, costs=True)):
                 continue
             estimate = model.predict_costs(branch["cost_features"])["branch_complete_cost"]["complete_ms"]
             conversation = branch["conversation_id"]
             grouped[kind][conversation] = max(grouped[kind].get(conversation, 0.0), actual-estimate)
+            outcomes[kind][str(branch["completion"])] += 1
     calibration = {}
     for kind, residuals in sorted(grouped.items()):
         ordered = sorted(residuals.values())
@@ -656,6 +682,8 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
             if len(other) >= 2:
                 exceeded.append(residual > other[math.ceil(quantile*len(other))-1])
         calibration[kind] = {"conversations": sorted(residuals), "quantile": quantile,
+            "cost_target_version": COST_TARGET_VERSION,
+            "completion_counts": dict(outcomes[kind]),
             "latency_margin_ms": ordered[math.ceil(quantile*len(ordered))-1] if len(ordered) >= 2 else None,
             "uncalibrated_underestimation_rate": sum(value > 0 for value in ordered)/len(ordered),
             "leave_one_conversation_out_exceedance": sum(exceeded)/len(exceeded) if exceeded else None}
@@ -666,6 +694,7 @@ def calibrate_completion_latency(model, development, *, quantile=.9):
 def evaluate_paired_decisions(model, development):
     from controller.action_policy import observed_quality_gain
 
+    require_terminal_cost_target(model)
     states, signs = defaultdict(dict), defaultdict(list)
     untrained = Counter()
     eligible = tuple(distinct_action_pairs(development))

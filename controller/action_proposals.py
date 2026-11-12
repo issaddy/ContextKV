@@ -39,11 +39,13 @@ def observed_answer_options(state, *, joint, finite):
     options = {"layouts": ("existing",), "actions": ("REBUILD",)} if finite else {}
     if joint:
         representations = ["hybrid"]
+        if state.plan.terminal_gaps:
+            representations.append("facts")
         if not answer_evidence_gaps(state):
             roots = {identity for point in state.plan.answer_plan.points for identity in point.claim_ids}
             derived = any(claim.claim_id in roots and claim.kind == "derived" for claim in state.claims)
             representations.append("reduced" if derived else "facts")
-        if not any(need.operation in {"count", "sum", "group"} for need in state.plan.task_state.needs):
+        if not state.plan.terminal_gaps and not any(need.operation in {"count", "sum", "group"} for need in state.plan.task_state.needs):
             representations.append("raw")
         options["representations"] = tuple(representations)
     return options
@@ -53,7 +55,9 @@ def eligible_observed_answers(state, candidates):
     from .request_compiler import unique_answer_inputs
 
     eligible = tuple(candidate for candidate in candidates
-        if candidate.representation not in ALTERNATE_ANSWERS or not answer_evidence_gaps(state, candidate))
+        if candidate.representation not in ALTERNATE_ANSWERS or not answer_evidence_gaps(state, candidate)
+        or state.plan.terminal_gaps and candidate.representation in {"facts", "reduced"}
+            and not answer_evidence_gaps(state, candidate, require_complete_evidence=False))
     duplicates = equivalent_raw_answers(state, eligible)
     return unique_answer_inputs(tuple(candidate for candidate in eligible if candidate.candidate_id not in duplicates))
 
@@ -149,8 +153,14 @@ def observed_reduction_task(frozen):
     typed = {"enumerate", "count", "sum", "group", "compare", "infer"}
     needs = sorted(base.task_state.needs, key=lambda need: need.operation not in typed)
     for need in needs:
+        if need.need_id in {gap.need_id for gap in base.terminal_gaps}:
+            continue
         if need.operation in {"count", "sum"} and need.need_id in unresolved:
             continue
+        if need.operation in {"count", "sum", "group"}:
+            from .context_budget import need_read_complete
+            if not need_read_complete(base, frozen.results, need):
+                continue
         summarize = need.operation not in typed
         selector_id = selector_ids.get(need.need_id)
         shared_numeric = selector_id is not None
@@ -237,7 +247,9 @@ def build_observed_action_plans(frozen, snapshot, template, *, reader_checkpoint
         branches.append(replace(branch, context_plan=full))
 
     add("direct_answer", ())
+    terminal = {gap.need_id for gap in base.terminal_gaps}
     ready = tuple(task for task in base.steps if task.kind == "READ" and task.step_id not in completed
+                  and set(task.need_ids)-terminal
                   and set(task.predecessor_step_ids) <= completed)
     if (ready and base.coverage_scope == "selected_sources"
             and all(need.operation == "lookup" and need.scope == "selected_sources" for need in base.task_state.needs)

@@ -17,7 +17,8 @@ import yaml
 
 from adapters.mtrag import load_rows
 from bench.quality import export_evaluation
-from bench.result_records import retain_metrics
+from bench.result_records import retain_metrics, write_task_metrics
+from bench.study_costs import failed_request_cost
 from bench.study_metrics import _track_specs, paired_comparisons, select_development, summarize_methods
 from controller.config import apply_study_config, create_controller, load_config
 from controller.schema import (Message, OnlineContext, OnlineMessage, OnlineTurn,
@@ -50,6 +51,23 @@ def write_jsonl(path, rows):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(dumps(row)+"\n" for row in rows))
+
+
+async def close_failed_session(service, session_id):
+    """Require durable Native cleanup before a P1 continuation is admitted.
+
+    Controller.close_session may defer RETIRE_PENDING or unknown owner release
+    outcomes to its maintenance outbox. A return from that method alone is not
+    a release receipt, so the benchmark must not immediately reopen the session.
+    """
+    await service.close_session(session_id)
+    retirements = service.store.outbox(session_id)
+    owners = tuple(owner for owner in service.store.prefix_owners(session_id, active_only=True)
+                   if owner.policy == "joint_demand")
+    if retirements or owners:
+        raise RuntimeError("session cleanup unacknowledged: "+dumps({
+            "retirement_ids": [operation.operation_id for operation in retirements],
+            "demand_owners": [{"owner_id": owner.owner_id, "stage": owner.stage} for owner in owners]}))
 
 
 def save_measurement_segment(directory, segment_id, *, batch):
@@ -148,7 +166,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     supplied_catalogue = ({row["source_id"]: {**row, "document_id": row["source_id"], "source": row["source_uri"]}
                            for row in read_jsonl(catalogue_path)} if catalogue_path else None)
     reuse_provider = spec.get("reuse_provider", False)
-    continue_conversation_failures = spec.get("continue_conversation_failures", False)
+    protocol = spec.get("protocol", matrix.get("protocol", "P3"))
+    independent_reference_turns = protocol == "P1" and question_fn is None
+    continue_conversation_failures = spec.get("continue_conversation_failures", independent_reference_turns)
 
     def actual_request_id(task_id):
         return task_id if request_namespace is None else f"{request_namespace}:{task_id}"
@@ -212,7 +232,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     engine_info = await service.engine.info()
     allocator = await service.engine.metrics()
     generation_manifest = {"config": config, "method": method, "measurement_segment_id": segment_id,
-        "dataset": dataset_name, "split": split, "task_ids": [row["task_id"] for row in source_rows],
+        "dataset": dataset_name, "split": split, "protocol": protocol,
+        "task_ids": [row["task_id"] for row in source_rows],
         "scheduled_task_ids": expected, "cohort_declared": declared_tasks is not None,
         "concurrency": concurrency, "retrieval": provider.manifest,
         "concurrency_scope": "request", "request_namespace": request_namespace,
@@ -229,15 +250,20 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     write_json(directory/"generation_manifest.json", generation_manifest)
     capture_training = generation_manifest["capture_training"]
     results, windows, request_starts = dict(old_records), {}, {}
-    failures = {row["conversation_id"]: row
+    failures = {row["task_id"]: row
         for path in (directory/"terminal_read_failures").glob("*.json")
         for row in [json.loads(path.read_text())]} if reuse_provider else {}
     failure_path = directory/"failed_conversations.json"
     if continue_conversation_failures and not reuse_provider and failure_path.exists():
         pending = set(expected)-results.keys()
-        failures = {row["conversation_id"]: row for row in json.loads(failure_path.read_text())
+        failures = {row["task_id"]: row for row in json.loads(failure_path.read_text())
             if row["task_id"] in pending and row["request_id"] == actual_request_id(row["task_id"])
             and (row.get("attempt") or {}).get("stage") == "FAILED"}
+    for failure in failures.values():
+        attempt = service.store.find_request(failure["session_id"],
+            failure.get("request_id", actual_request_id(failure["task_id"])))
+        if attempt is not None and "accounting" not in failure.get("cost", {}):
+            failure["cost"] = {**failure.get("cost", {}), **failed_request_cost(service.store, attempt)}
     semaphore = asyncio.Semaphore(concurrency)
     physical = StudyResourceSampler(devices, process_ids)
     await physical.start()
@@ -245,6 +271,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     dispatcher = WorkloadDispatcher(workload) if workload is not None else None
     if dispatcher is not None:
         dispatcher.restore_completed(results.keys())
+        dispatcher.restore_failed(failures.keys())
 
     async def one_turn(sid, number, row, arrival=None, workload_arrival=None):
         session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
@@ -252,7 +279,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         request_starts[row["task_id"]] = start
         query = row["input"][-1]["text"]
         before = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
-        protocol = spec.get("protocol", matrix.get("protocol", "P3"))
         if protocol == "P1":
             reference_history = from_history_messages(tuple(
                 Message("assistant" if item["speaker"] == "agent" else item["speaker"], item["text"])
@@ -348,64 +374,113 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         with (directory/"results.jsonl").open("a") as stream:
             stream.write(dumps(value)+"\n")
 
-    async def conversation(sid):
+    async def record_failure(sid, row, error, client_started, *, blocked_rows=()):
+        """Settle this request before releasing its session and scheduling another."""
         session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
-        pending = [(number, row) for number, row in grouped[sid] if row["task_id"] not in results]
-        if pending and request_namespace is not None:
+        attempt = service.store.find_request(session_id, actual_request_id(row["task_id"]))
+        start = request_starts.get(row["task_id"], client_started)
+        failure = dict(conversation_id=sid, task_id=row["task_id"], session_id=session_id,
+            request_id=actual_request_id(row["task_id"]), dataset=dataset_name, protocol=protocol,
+            error_type=type(error).__name__, error=str(error),
+            request_window=[start, time.monotonic()],
+            failure_window_scope="failed_request_wall" if row["task_id"] in request_starts else "client_before_submission",
+            measurement_segment_id=segment_id,
+            attempt_id=attempt.attempt_id if attempt is not None else None,
+            state_db=str((directory/"state"/"sessions.sqlite3").resolve()),
+            blocked_task_ids=[value["task_id"] for value in blocked_rows],
+            blocked_tasks=[{name: value[name] for name in ("task_id", "turn")} for value in blocked_rows],
+            reference=row, source_partition=split, split=split, turn=row["turn"],
+            status="failed", method=method["id"], metrics={},
+            measurement_kind=generation_manifest["measurement_kind"],
+            question=attempt.query if attempt is not None else row["input"][-1]["text"],
+            history_origin="author_reference_import" if protocol == "P1" else "model_actual",
+            attempt={"attempt_id": attempt.attempt_id, "stage": attempt.stage} if attempt is not None else None,
+            cost={**failed_request_cost(service.store, attempt),
+                "gpu_capacity_tokens": allocator["pool"]["gpu_capacity_tokens"],
+                "host_capacity_tokens": allocator["pool"]["host_capacity_tokens"],
+                "gpu_gib_seconds": None, "host_gib_seconds": None},
+            **(service.state_observer.cohort if service.state_observer is not None else {}))
+        if not capture_training:
+            failure.pop("reference", None)
+        failures[row["task_id"]] = failure
+        try:
+            await close_failed_session(service, session_id)
+        except Exception as cleanup_error:
+            # An unresolved native request must not be abandoned or replaced
+            # silently. Reference-history independence cannot repair that state.
+            failure["cleanup_error"] = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
+        failure["request_window"][1] = time.monotonic()
+        failure["cost"]["complete_ms"] = (failure["request_window"][1]-start)*1000
+        return failure
+
+    async def conversation(sid, *, isolate_failures=False):
+        session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
+        pending = sorted(((number, row) for number, row in grouped[sid]
+            if row["task_id"] not in results and row["task_id"] not in failures),
+            key=lambda item: item[1]["turn"])
+        if pending and (request_namespace is not None or independent_reference_turns):
             service.store.reopen_session(session_id)
-        for number, row in sorted(pending, key=lambda item: item[1]["turn"]):
-            snapshot = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
-            workload_arrival = (await dispatcher.wait_turn(row, snapshot.raw_history)
-                                if dispatcher is not None else None)
-            arrival = (dispatcher.origin+workload_arrival["actual_arrival_seconds"]
-                       if dispatcher is not None else time.monotonic())
-            request_starts[row["task_id"]] = arrival
-            async with semaphore:
-                await one_turn(sid, number, row, arrival, workload_arrival)
+        for position, (number, row) in enumerate(pending):
+            client_started = time.monotonic()
+            try:
+                snapshot = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
+                workload_arrival = (await dispatcher.wait_turn(row, snapshot.raw_history,
+                    predecessor_terminal=independent_reference_turns) if dispatcher is not None else None)
+                arrival = (dispatcher.origin+workload_arrival["actual_arrival_seconds"]
+                           if dispatcher is not None else time.monotonic())
+                request_starts[row["task_id"]] = arrival
+                async with semaphore:
+                    await one_turn(sid, number, row, arrival, workload_arrival)
+            except Exception as error:
+                if not isolate_failures:
+                    raise
+                later = [value for _, value in pending[position+1:]]
+                failure = await record_failure(sid, row, error, client_started,
+                    blocked_rows=() if independent_reference_turns else later)
+                if dispatcher is not None:
+                    await dispatcher.fail_turn(row["task_id"])
+                if independent_reference_turns and "cleanup_error" not in failure:
+                    service.store.reopen_session(session_id)
+                    continue
+                if independent_reference_turns:
+                    failure.update(blocked_task_ids=[value["task_id"] for value in later],
+                        blocked_tasks=[{name: value[name] for name in ("task_id", "turn")} for value in later],
+                        blocked_reason="session_cleanup_unresolved")
+                if dispatcher is not None:
+                    await dispatcher.cancel_conversation(sid, failure.get("blocked_reason", str(error)))
+                return
             if dispatcher is not None:
                 dispatcher.complete_turn(row["task_id"])
         await service.close_session(session_id)
 
     async def isolated_conversation(sid):
-        if sid in failures:
+        previous = tuple(failure for failure in failures.values() if failure["conversation_id"] == sid)
+        if previous and not independent_reference_turns:
             if dispatcher is not None:
-                await dispatcher.cancel_conversation(sid, failures[sid]["error"])
+                await dispatcher.cancel_conversation(sid, previous[0]["error"])
             return
-        client_started = time.monotonic()
-        try:
-            await conversation(sid)
-        except Exception as error:
-            if dispatcher is not None:
-                await dispatcher.cancel_conversation(sid, str(error))
-            ordered_rows = sorted(grouped[sid], key=lambda item: item[1]["turn"])
-            row = next((row for _, row in ordered_rows if row["task_id"] not in results), ordered_rows[-1][1])
-            session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
-            attempt = service.store.find_request(session_id, actual_request_id(row["task_id"]))
-            failure = dict(conversation_id=sid, task_id=row["task_id"], session_id=session_id,
-                request_id=actual_request_id(row["task_id"]),
-                error_type=type(error).__name__, error=str(error),
-                request_window=[request_starts[row["task_id"]] if row["task_id"] in request_starts else client_started,
-                                time.monotonic()],
-                failure_window_scope="failed_request_wall" if row["task_id"] in request_starts else "client_before_submission",
-                measurement_segment_id=segment_id,
-                attempt_id=attempt.attempt_id if attempt is not None else None,
-                state_db=str((directory/"state"/"sessions.sqlite3").resolve()),
-                blocked_task_ids=[value["task_id"] for _, value in ordered_rows
-                    if value["task_id"] not in results and value["task_id"] != row["task_id"]])
-            failure.update(reference=row, source_partition=split, split=split, turn=row["turn"],
-                status="failed", method=method["id"],
-                measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
-                question=attempt.query if attempt is not None else row["input"][-1]["text"],
-                history_origin="author_reference_import" if spec.get("protocol", matrix.get("protocol", "P3")) == "P1" else "model_actual",
-                attempt={"attempt_id": attempt.attempt_id, "stage": attempt.stage} if attempt is not None else None,
-                **(service.state_observer.cohort if service.state_observer is not None else {}))
-            if not capture_training:
-                failure.pop("reference", None)
-            failures[sid] = failure
+        unresolved = tuple(failure for failure in previous if failure.get("cleanup_error"))
+        if unresolved:
+            # A new measured segment cannot bypass the Native cleanup gate.
+            # Its bounded drain is accounted in this segment's physical window,
+            # without rewriting the original failed-request latency.
+            error = None
             try:
-                await service.close_session(session_id)
+                await close_failed_session(service, unresolved[0]["session_id"])
             except Exception as cleanup_error:
-                failure["cleanup_error"] = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
+                error = {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
+            for failure in unresolved:
+                if error:
+                    failure["cleanup_error"] = error
+                else:
+                    failure.pop("cleanup_error", None)
+                    failure.pop("blocked_reason", None)
+                    failure.update(blocked_task_ids=[], blocked_tasks=[])
+            if error:
+                if dispatcher is not None:
+                    await dispatcher.cancel_conversation(sid, "session_cleanup_unresolved")
+                return
+        await conversation(sid, isolate_failures=True)
 
     dispatch_window = None
     try:
@@ -415,24 +490,27 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             from training.reader_data import digest
             for sid in conversations:
                 number, row = grouped[sid][0]
-                if row["task_id"] in results or sid in failures:
+                if row["task_id"] in results or row["task_id"] in failures:
                     continue
                 session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
                 previous = service.store.find_request(session_id, actual_request_id(row["task_id"]))
                 if previous is not None and previous.stage == "FAILED":
                     if not terminal_budget_text(previous.error):
                         raise ValueError(f"unrecognized prior failed attempt: {previous.error}")
-                    if sid not in failures:
-                        failures[sid] = persist_p3_failure(directory, sid, row["task_id"], session_id,
+                    if row["task_id"] not in failures:
+                        failure = persist_p3_failure(directory, sid, row["task_id"], session_id,
                             previous, previous.error)
-                        failures[sid].update(reference=row, source_partition=split, split=split,
+                        failure.update(reference=row, source_partition=split, split=split,
+                            dataset=dataset_name, protocol=protocol,
                             turn=row["turn"], status="failed", method=method["id"],
                             measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
                             question=previous.query,
                             attempt={"attempt_id": previous.attempt_id, "stage": previous.stage},
                             history_origin="model_actual",
+                            cost=failed_request_cost(service.store, previous),
                             **(service.state_observer.cohort if service.state_observer is not None else {}))
-                        write_json(directory/"terminal_read_failures"/(digest(sid)[:20]+".json"), failures[sid])
+                        failures[row["task_id"]] = failure
+                        write_json(directory/"terminal_read_failures"/(digest(sid)[:20]+".json"), failure)
                     await service.close_session(session_id)
                     continue
                 boundary_start = time.monotonic()
@@ -454,13 +532,15 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     failure = persist_p3_failure(directory, sid, row["task_id"], session_id, attempt, str(error))
                     failure.update(request_window=[request_start, time.monotonic()],
                         measurement_segment_id=segment_id, reference=row, source_partition=split,
+                        dataset=dataset_name, protocol=protocol,
                         split=split, turn=row["turn"], status="failed", method=method["id"],
                         measurement_kind="hardware" if run.engine.kind == "sglang" else "simulation",
                         question=attempt.query if attempt is not None else row["input"][-1]["text"],
                         history_origin="model_actual",
                         attempt={"attempt_id": attempt.attempt_id, "stage": attempt.stage} if attempt else None,
+                        cost=failed_request_cost(service.store, attempt),
                         **(service.state_observer.cohort if service.state_observer is not None else {}))
-                    failures[sid] = failure
+                    failures[row["task_id"]] = failure
                     write_json(directory/"terminal_read_failures"/(digest(sid)[:20]+".json"), failure)
                     await service.close_session(session_id)
         elif continue_conversation_failures:
@@ -494,7 +574,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 if key in failure_windows:
                     window = failure_windows[key]
                     raw_window = integrate_physical(physical.samples, *window)
-                    failure["cost"] = {"complete_ms": (window[1]-window[0])*1000, **memory_costs[key],
+                    failure["cost"] = {**failure.get("cost", {}),
+                        "complete_ms": (window[1]-window[0])*1000, **memory_costs[key],
                         **{name: raw_window.get(name) for name in
                            ("gpu_peak_gib", "host_peak_gib", "complete_window_coverage")}}
                 if reuse_provider:
@@ -507,13 +588,15 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 clock="client_monotonic", observation_window=dispatch_window,
                 actual_arrivals=dispatcher.arrivals, cancelled=dispatcher.cancelled,
                 completion_seconds=dispatcher._completion_times,
+                terminal_seconds=dispatcher._terminal_times,
                 independent_clients=workload.dispatch_semantics == "independent_clients_after_own_prior_commit"))
         ordered = [results[key] for key in expected if key in results]
         write_jsonl(directory/"results.jsonl", ordered)
+        write_task_metrics(directory, ordered, failures=list(failures.values()))
         references = []
         for _, row in (item for sid in conversations for item in grouped[sid]):
             record = results.get(row["task_id"])
-            decision = record["question_policy"] if record is not None else None
+            decision = record.get("question_policy") if record is not None else None
             if decision is None:
                 references.append({key: value for key, value in row.items() if key != "contexts"})
                 continue
@@ -567,6 +650,7 @@ async def evaluate(config, matrix, output, *, split, frozen=None, methods=None, 
             manifest = json.loads((directory/"generation_manifest.json").read_text())
             if not manifest["capture_training"] and all(row["scoring"]["status"] == "scored" for row in rows):
                 retain_metrics(directory, rows)
+        write_task_metrics(directory, rows)
         results.extend(rows)
     write_json(output/"result_sets.json", {"datasets": [str(directory.resolve())
         for _, _, directory, _ in generated]})

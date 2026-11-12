@@ -38,6 +38,14 @@ def aligned_claims(claims):
     return tuple(tuple(group) for group in groups.values())
 
 
+def canonical_quantity(value, unit):
+    canonical, factor = UNIT_FACTORS.get(unit, (unit, Decimal(1)))
+    literal = str(value)
+    if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", literal):
+        literal = literal.replace(",", "")
+    return canonical, Decimal(literal) * factor
+
+
 def reduce_claims(operation, claims, *, claim_id, need_id):
     """Count unique entities and sum one aligned value per entity/condition/version."""
     claims = tuple(claim for claim in claims if claim.serves(need_id))
@@ -51,13 +59,7 @@ def reduce_claims(operation, claims, *, claim_id, need_id):
         total = Decimal(0)
         units = set()
         for group in groups:
-            converted = []
-            for claim in group:
-                canonical, factor = UNIT_FACTORS.get(claim.unit, (claim.unit, Decimal(1)))
-                literal = str(claim.value)
-                if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", literal):
-                    literal = literal.replace(",", "")
-                converted.append((canonical, Decimal(literal) * factor))
+            converted = [canonical_quantity(claim.value, claim.unit) for claim in group]
             if len(set(converted)) != 1:
                 raise ValueError(f"conflicting quantities for {group[0].entity}")
             canonical, number = converted[0]

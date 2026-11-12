@@ -11,6 +11,7 @@ import time
 from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import PoolProfile, SourceDirectory, merge_retrieved_units
 from adapters.history_state import HistoryIndex, TaskInterpreter, TeacherTaskModel, restore_source_metadata
+from adapters.hybrid_retrieval import rank_coverage_scores
 from adapters.retrieval import run_retrieval_worker
 from adapters.retriever_factory import create_retriever
 from adapters.serving_retrieval import ServingRetriever
@@ -128,7 +129,7 @@ class StudyEvidenceProvider:
                 "helper_engine_info": self.helper_engine_info,
                 **({"selection_mode": "ranked"} if self.selection_mode == "ranked" else {}),
                 "selection_utility": self._utility_mode(),
-                "evidence_selection_order": ("published_reranker_dependency_closure_v1"
+                "evidence_selection_order": ("need_rank_coverage_dependency_closure_v2"
                     if self.selection_mode == "ranked" else "utility_complete_needs_bundle_anchor_reranker_tokens_v1"),
                 "material_handoff": "whole_plan_candidates" if self.whole_plan_candidates else "single_material",
                 "rerank_retained_sets": self.selection_mode == "support"
@@ -424,7 +425,8 @@ class StudyEvidenceProvider:
                     token_cost=token_cost, disposition="partial", source_blocks=pool.source_blocks),)
             elif ranked:
                 search_started = time.perf_counter()
-                evidence_sets = (self._relevance_set(state, pool, measure_contexts),)
+                evidence_sets = (self._relevance_set(active_state, pool,
+                    lambda _, groups: measure_contexts(state, groups)),)
                 search_ms = (time.perf_counter()-search_started)*1000
             else:
                 support_config = self.config.get("support_model", {})
@@ -577,39 +579,58 @@ class StudyEvidenceProvider:
         candidates = pool.units if candidates is None else candidates
         by_id = {unit.unit_id: unit for unit in pool.units}
         ranked = sorted(candidates, key=lambda unit: (-unit.retrieval_score, unit.unit_id))
+        ranks = {unit.unit_id: index for index, unit in enumerate(ranked)}
         window_limit = budget.window_tokens-budget.output_tokens if measure_contexts is not None else float("inf")
+        rankings = [tuple(unit.unit_id for unit in ranked)]
+        rankings.extend(tuple(unit.unit_id for unit in ranked if need.need_id in unit.need_ids)
+                        for need in state.needs)
+        rows = rank_coverage_scores(rankings)
+        closures = {unit.unit_id: close_dependencies((unit.unit_id,), by_id) for unit in ranked}
+        values = {identity: tuple(max((row.get(unit.unit_id, 0.0) for unit in closure), default=0.0)
+                                 for row in rows) for identity, closure in closures.items()}
         chosen, token_cost = (), 0
-        cursor, batch_size = 0, 1
-        while cursor < len(ranked):
+        pending = list(ranked)
+        while pending:
             if self.strategy == "B0" and len({item.text for item in chosen}) >= 5:
                 break
-            stop = min(cursor+batch_size, len(ranked))
             chosen_ids = tuple(unit.unit_id for unit in chosen)
             selected = set(chosen_ids)
-            proposals = []
-            for index in range(cursor, stop):
-                unit_id = ranked[index].unit_id
-                if unit_id in selected:
-                    continue
-                units = close_dependencies((*chosen_ids, unit_id), by_id)
-                if ((budget.max_units is None or len(units) <= budget.max_units) and
-                    (budget.max_passages is None or len(_passages(units).difference(passage_exclusions)) <= budget.max_passages)):
-                    proposals.append((index, units))
-            bodies = [render_unit_union(units) for _, units in proposals]
-            encoded = self.template.tokenizer(bodies, add_special_tokens=False,
-                return_attention_mask=False, return_token_type_ids=False)["input_ids"] if bodies else ()
-            feasible = [(index, units, len(ids)) for (index, units), ids in zip(proposals, encoded, strict=True)
-                        if len(ids) <= budget.body_tokens]
-            contexts = (measure_contexts(state, tuple(units for _, units, _ in feasible))
-                        if measure_contexts is not None and feasible else (0,)*len(feasible))
-            for (index, units, size), context in zip(feasible, contexts, strict=True):
-                if context <= window_limit:
-                    chosen, token_cost = units, size
-                    cursor, batch_size = index+1, 1
+            covered = tuple(max((row.get(identity, 0.0) for identity in selected), default=0.0) for row in rows)
+            # Keep the first relevant source as the anchor. Subsequent choices
+            # maximize additional Need coverage; ties retain retrieval order.
+            if chosen and self.strategy != "B0":
+                pending.sort(key=lambda unit: (-sum(max(0.0, score-best)
+                    for score, best in zip(values[unit.unit_id], covered, strict=True)), ranks[unit.unit_id]))
+            remaining, batch_size = list(pending), 1
+            while remaining:
+                batch, remaining = remaining[:batch_size], remaining[batch_size:]
+                proposals = []
+                for unit in batch:
+                    if unit.unit_id in selected:
+                        pending.remove(unit)
+                        continue
+                    units = close_dependencies((*chosen_ids, unit.unit_id), by_id)
+                    if ((budget.max_units is None or len(units) <= budget.max_units) and
+                        (budget.max_passages is None or len(_passages(units).difference(passage_exclusions)) <= budget.max_passages)):
+                        proposals.append((unit, units))
+                bodies = [render_unit_union(units) for _, units in proposals]
+                encoded = self.template.tokenizer(bodies, add_special_tokens=False,
+                    return_attention_mask=False, return_token_type_ids=False)["input_ids"] if bodies else ()
+                feasible = [(unit, units, len(ids)) for (unit, units), ids in zip(proposals, encoded, strict=True)
+                            if len(ids) <= budget.body_tokens]
+                contexts = (measure_contexts(state, tuple(units for _, units, _ in feasible))
+                            if measure_contexts is not None and feasible else (0,)*len(feasible))
+                accepted = [(unit, units, size) for (unit, units, size), context in zip(feasible, contexts, strict=True)
+                            if context <= window_limit]
+                rejected = {unit.unit_id for unit in batch}-{unit.unit_id for unit, _, _ in accepted}
+                pending = [unit for unit in pending if unit.unit_id not in rejected]
+                if accepted:
+                    unit, chosen, token_cost = accepted[0]
+                    pending.remove(unit)
                     break
+                batch_size = 8
             else:
-                # A rejected batch leaves the chosen prefix unchanged.
-                cursor, batch_size = stop, 8
+                break
         keys = {span.source_key for unit in chosen for span in unit.source_spans}
         blocks = tuple(block for block in pool.source_blocks if block.key in keys)
         return EvidenceSet(f"{state.task_id}:relevance", chosen, token_cost=token_cost, source_blocks=blocks)

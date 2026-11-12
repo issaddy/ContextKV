@@ -45,6 +45,10 @@ Loong 的资料准备见 [Loong 接入](guides/loong.md)。输入完整保留资
 
 每个 job 对应一个数据集、一个方法和一个并发。默认沿会话前后依赖推进，思考间隔为零；已有真实固定到达轨迹时用 `--arrival-plan` 复用。调度方式及端到端计时口径保存在运行清单，不为凑出缓存重访添加延时。
 
+P1 每题自带作者历史，记录失败费用并确认会话清理后可继续下一题。P3 依赖实际已提交的回答，失败后缺少真实历史的后题记为 blocked。Native 退役或需求租约释放未确认时，保留状态库供原请求恢复。
+
+`results.jsonl` 保留已交付答案，`failed_conversations.json` 按 task ID 保存失败；`task_metrics.jsonl` 合并完整队列的逐题指标。失败费用在清理前从实际调用账本去重结算，缺失总量留空并保留 `accounting.known_lower_bound`。未提交 blocked 题的调用费用为零，响应时间为空。
+
 `bench.study_scoring` 按数据集调用对应评分。原指标与完整题目分母、完成率一起报告；评分缺失不冒充零分，确认没有交付的任务在完整队列指标中计零。不同数据集不合成加权 Q，构造任务也不参与公开成绩。
 
-最终指标由 `bench.capacity_workflow` 汇总，`profiling.final_study_index` 生成对比表。GPU/Host 采样只在内存中积分，长期保存积分结果。评分结束后清理答案、原文副本、judge 明细和状态库。训练采集只保存形成训练输入与标签所需的数据。执行命令见[运行手册](study/final_runbook.md)。
+最终指标由 `bench.capacity_workflow` 汇总，`profiling.final_study_index` 生成对比表。GPU/Host 采样只在内存中积分，长期保存积分结果。评分结束后清理答案、原文副本、judge 明细和已安全关闭的状态库；清理失败的状态库保留用于恢复。训练采集只保存形成训练输入与标签所需的数据。执行命令见[运行手册](study/final_runbook.md)。

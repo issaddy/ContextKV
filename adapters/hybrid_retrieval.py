@@ -101,6 +101,17 @@ def select_ranked_evidence(ranked, *, top_k=5, group_key=None):
     return result, trace
 
 
+def rank_coverage_scores(rankings):
+    """Best reciprocal rank per item and query aspect."""
+    rows = []
+    for ranking in rankings:
+        row = {}
+        for rank, identity in enumerate(ranking, 1):
+            row.setdefault(identity, 1/rank)
+        rows.append(row)
+    return tuple(rows)
+
+
 def select_requirement_evidence(primary, rankings, *, top_k=5, group_key=None):
     """Greedy coverage of explicit information needs on a distinct-content pool.
 
@@ -119,13 +130,7 @@ def select_requirement_evidence(primary, rankings, *, top_k=5, group_key=None):
     for context in primary:
         representative = representatives.setdefault(group_key(context), context.document_id)
         groups[context.document_id] = representative
-    rows = []
-    for ranking in (ids, *rankings):
-        row = {}
-        for rank, pid in enumerate(ranking, 1):
-            representative = groups[pid]
-            row[representative] = max(row.get(representative, 0.0), 1/rank)
-        rows.append(row)
+    rows = rank_coverage_scores(tuple(groups[pid] for pid in ranking) for ranking in (ids, *rankings))
     selected = {ids[0]}
     covered = [row[ids[0]] for row in rows]
     gains = [{"passage_id": ids[0], "gain": sum(covered), "reason": "primary_task_anchor"}]

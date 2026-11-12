@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import lru_cache
 from hashlib import sha256
 import json
 
@@ -44,10 +43,9 @@ class RequestCompiler:
         self._render_read = template.render
 
     def with_read_memo(self):
-        """Reuse identical rendered READ inputs within one rolling turn."""
-        compiler = RequestCompiler(self.template, self.index)
-        compiler._render_read = lru_cache(maxsize=None)(self.template.render)
-        return compiler
+        """Bound prompt memory and reuse exact input lengths within one turn."""
+        from .render_memo import TurnTemplateMemo
+        return RequestCompiler(TurnTemplateMemo(self.template), self.index)
 
     def _scope(self, cache_scope: EngineInfo | CacheQuoteBatch):
         if not isinstance(cache_scope, (EngineInfo, CacheQuoteBatch)):

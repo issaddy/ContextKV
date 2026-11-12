@@ -23,7 +23,11 @@ ContextPilot 复用作者 CPU 索引与排列：
 python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 ```
 
-`execution.cache_compilation` 使用 `{mode: contextpilot, checkout: vendor/contextpilot}`；`prefix_retention` 使用 `mode: demand`。默认分配器为 `next_use`，期限候选 15/60/180 秒，保护容量 8192 token；源配置可以声明实际取值。`paired_value` 通过 `pricing_asset` 加载已有配对估值。
+`execution.cache_compilation` 使用 `{mode: contextpilot, checkout: vendor/contextpilot}`；`prefix_retention` 使用 `mode: demand`。默认分配器为 `next_use`，期限候选 15/60/180 秒，保护容量 8192 token；源配置可以声明实际取值。`next_use` 与 `paired_value` 均通过 `pricing_asset` 加载配对估值，没有有效净收益定价时使用 Native。
+
+joint observed 动作默认使用 `action_policy: rule`，不加载收益资产。配置 `action_policy: learned` 显式启用学习策略，资产须匹配 reader、输入协议和成本目标；不兼容时直接报错。新输入协议需要重新采集 frozen branches。更新 Native overlay 后再运行并发软配额实验。
+
+数值 READ 使用 Need 的显式时间条件或局部补读的目标时期，在带明确列头的 Markdown／制表符表格中定位数值，保留原文与表头来源。局部修复按实体、字段和时期分别关闭缺口；提取与恢复确认共用时期判断，财报版本与数据时期分别处理。
 
 ## 数据与选题
 
@@ -58,7 +62,7 @@ python3 -m bench.capacity_workflow \
 
 按数据集分批执行上述命令。默认每种并发运行一次。多轮实际历史使用 `configs/study_system_matrix.yaml`，构造任务使用 `configs/study_mechanisms.yaml --split dev`。MTRAG-UN 按需使用独立配置。
 
-默认调度沿会话前后依赖推进、思考间隔为零；已有真实固定到达记录时传 `--arrival-plan`。只运行普通基线、LlamaIndex 或规则决策时提供 `--reader-profile-id`，完整方案使用 `--gain-asset` 绑定 reader、输入协议和输出额度。
+默认调度沿会话前后依赖推进、思考间隔为零；已有真实固定到达记录时传 `--arrival-plan`。规则决策及普通基线、LlamaIndex 使用 `--reader-profile-id`。未在配置中指定 `action_policy` 时，`capacity_workflow --gain-asset` 显式选择学习策略，绑定 reader、输入协议和输出额度；未传资产则使用规则策略。配置中的显式策略优先。
 
 ## 机制对照
 
@@ -94,7 +98,7 @@ python3 -m training.plan_gain_completion fit \
   --output GAIN.json
 ```
 
-样本保留预测特征、真实质量与费用标签、预算及训练划分。完整上下文和执行记录只用于采集与标注，完成后清理。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按唯一交付分支拟合；线上执行一个动作后重规划。
+样本保留预测特征、真实质量与费用标签、预算及训练划分。完整上下文和执行记录只用于采集与标注，完成后清理。动作、分包或输入语义改变时补采对应分支。质量按决策状态等权拟合，成本按具有完整实测费用的唯一终止分支拟合，包含成功与失败、未知费用不补零；线上执行一个动作后重规划。`fit --dev` 单独输出开发报告，仍需独立 test 复验。
 
 | 需要解决的问题 | 入口 |
 |---|---|
@@ -104,7 +108,7 @@ python3 -m training.plan_gain_completion fit \
 | 当前真实状态的动作配对 | `training.collect_plan_gains`、`training.plan_gain_workflow --mode observed_actions` |
 | 固定输入的证据策略对照 | `training.a_workflow compare`、`bench.evidence_policy_comparison` |
 
-辅助训练按会话隔离，沿当前 cohort 复用真实历史。任务学生尚未输出跨轮 READ 合同；只接入查询编码器时使用 `retrieval.task_query_asset` 并保留 teacher 解释。支持模型只由 `selection.mode: support` 加载，缓存配对估值只由 `allocation: paired_value` 加载。
+辅助训练按会话隔离，沿当前 cohort 复用真实历史。任务学生尚未输出跨轮 READ 合同；只接入查询编码器时使用 `retrieval.task_query_asset` 并保留 teacher 解释。支持模型只由 `selection.mode: support` 加载，需求保留通过 `pricing_asset` 加载缓存配对估值。
 
 ## 结果与记录
 
@@ -114,7 +118,7 @@ python3 -m training.plan_gain_completion fit \
 
 每个 job 对应数据集、方法和并发。`capacity-plan.json` 保存本次配置，`workflow.json` 保存最终指标。
 
-生成与评分共用一个 `results.jsonl`，评分后仅保留每题分数和必要耗时/token 指标。完整历史、候选池、计划、token 序列和评分原文只在执行或实际训练采集中使用。正式工作流汇总完毕后删除 job 临时目录。
+生成与评分共用一个 `results.jsonl`；`task_metrics.jsonl` 按 task_id 合并成功、失败与未提交阻塞题，保留每题分数、耗时和费用；不完整费用保留已知下界。完整历史、候选池、计划、token 序列和评分原文只在执行或实际训练采集中使用。Native 退役或需求租约释放尚未确认时保留恢复状态，确认清理后再删除 job 临时目录。
 
 ```bash
 python3 -m profiling.final_study_index --artifact NAME=WORKFLOW.json --output RESULTS

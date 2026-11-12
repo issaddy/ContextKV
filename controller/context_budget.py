@@ -127,23 +127,24 @@ def completion_reserve(plan, results, task, candidate=None, *, read_all=False,
 
     full_scope = plan.coverage_scope == "all_supplied_documents"
     typed = plan.reading_mode == "typed_reduce"
+    terminal = {gap.need_id for gap in plan.terminal_gaps}
     numeric = {need.need_id: need.operation for need in plan.task_state.needs
-               if typed and need.operation in {"count", "sum", "group"}}
+               if typed and need.operation in {"count", "sum", "group"} and need.need_id not in terminal}
     exhaustive = set(numeric) | {need.need_id for need in plan.task_state.needs
-                                 if need.scope == "all_supplied_documents"}
+                                 if need.scope == "all_supplied_documents" and need.need_id not in terminal}
     completed = {result.step_id for result in results}
     reductions = tuple(result.reduction for result in results if result.reduction is not None)
     completed.update(item.step_id for item in reductions)
     current_id = task.step_id if task is not None else None
     outstanding = tuple(step for step in plan.steps if step.step_id not in completed
                         and step.step_id != current_id)
-    reads = tuple(step for step in outstanding if step.kind == "READ"
-                  and (read_all or full_scope or numeric or exhaustive.intersection(step.need_ids)))
+    reads = tuple(step for step in outstanding if step.kind == "READ" and set(step.need_ids)-terminal
+                  and (read_all or full_scope or exhaustive.intersection(step.need_ids)))
     if full_scope and typed:
         numeric.update((need.need_id, "union") for need in plan.task_state.needs
-                       if need.operation == "enumerate")
+                       if need.operation == "enumerate" and need.need_id not in terminal)
     required_ops = {*numeric.values(), "numeric_select"} if numeric else set()
-    scheduled = tuple(step for step in outstanding if step.kind == "REDUCE"
+    scheduled = tuple(step for step in outstanding if step.kind == "REDUCE" and set(step.need_ids)-terminal
                       and (read_all or step.operation in required_ops))
     scheduled_ops = {(need, step.operation) for step in (*scheduled, *((task,) if task is not None else ()))
                      if step.kind == "REDUCE" for need in step.need_ids}
@@ -333,7 +334,9 @@ def _completion_content_inputs(plan, results, current, reads, scheduled, pending
     # has not appeared in a fact yet. It is shared by the entire final frontier.
     metadata = plan.answer_allocation.source_metadata_tokens if new_sources else 0
     final_room = max(0, plan.budget.window_tokens-plan.budget.output_tokens-final_input)
-    compiled_inputs = sum(len(prompt.input_ids) for prompt in template.render_many(tuple(pending_messages)))
+    length_reader = getattr(template, "token_lengths", None)
+    compiled_inputs = (sum(length_reader(tuple(pending_messages))) if length_reader is not None else
+        sum(len(prompt.input_ids) for prompt in template.render_many(tuple(pending_messages))))
     return read_tokens+reduction_inputs+compiled_inputs+final_input+min(min(future_content, available)+metadata, final_room)
 
 
@@ -498,11 +501,13 @@ def need_read_complete(plan, results, need):
     return bool(required) and completed_source_coverage(plan, need_read_results(plan, results, need.need_id), required)
 
 
-def incomplete_full_coverage(plan, results):
+def incomplete_full_coverage(plan, results, *, allow_terminal_gaps=False):
+    terminal = {gap.need_id for gap in plan.terminal_gaps} if allow_terminal_gaps else set()
     return any(not completed_source_coverage(plan, need_read_results(plan, results, need.need_id),
                                               required_source_units(plan, need))
                for need in plan.task_state.needs
-               if plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents")
+               if need.need_id not in terminal and
+               (plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"))
 
 
 def direct_answer_reason(state, candidate, *, require_complete_evidence=True):
@@ -526,8 +531,15 @@ def answer_evidence_gaps(state, candidate=None, *, require_complete_evidence=Tru
     results = tuple(state.results)
     open_need_ids = {gap.need_id for gap in state.open_needs}
     raw = candidate is not None and candidate.representation == "raw"
+    terminal = {gap.need_id for gap in plan.terminal_gaps}
     gaps = {}
     for need in plan.task_state.needs:
+        if need.need_id in terminal:
+            # This is an explicit partial/IDK answer, never sufficient evidence
+            # for a correctness claim or permission to skip necessary reading.
+            if require_complete_evidence or raw:
+                gaps[need.need_id] = "terminal_evidence_gap"
+            continue
         full_scope = plan.coverage_scope == "all_supplied_documents" or need.scope == "all_supplied_documents"
         numeric = need.operation in {"count", "sum", "group"}
         if not require_complete_evidence and not full_scope and not numeric:

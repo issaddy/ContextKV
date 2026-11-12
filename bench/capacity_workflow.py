@@ -22,6 +22,7 @@ import yaml
 
 from bench.metrics import occupancy_integral
 from bench.native_metrics import NativePoolSampler, pool_series
+from bench.result_records import execution_metric_rows
 from bench.study import declare_cohorts, dataset_rows, saved_study_rows, write_json
 from bench.study_metrics import _track_specs, declared_queue_summary
 from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
@@ -59,7 +60,7 @@ def full_queue_method_specs(selected, gain_settings, compilation, *, rule_settin
             retention.update({name: deepcopy(declared[name]) for name in (
                 "allocation", "ttl_seconds", "horizon_seconds_choices", "protection_budget_tokens",
                 "lambda_gpu", "lambda_host") if name in declared})
-            if retention["allocation"] == "paired_value" and declared.get("pricing_asset"):
+            if declared.get("pricing_asset"):
                 retention["pricing_asset"] = str(Path(declared["pricing_asset"]).resolve())
         overrides = {"execution": {"dialogue_mode": dialogue, "plan_gain": rolling,
             "cache_compilation": deepcopy(compilation) if contextpilot else {"mode": "native"},
@@ -67,7 +68,8 @@ def full_queue_method_specs(selected, gain_settings, compilation, *, rule_settin
             "reading": {"fact_reuse": context and method != "context_no_fact_reuse",
                         "numeric_record_projection": context}}
         specs.append(dict(id=method, strategy="B7" if context else "B6", overrides=overrides,
-            evaluation_factors=dict(B="gain" if gain else "rule" if rule else "fixed",
+            evaluation_factors=dict(B=("gain" if rolling["action_policy"] == "learned" else "rule")
+                if context else "fixed",
                 compilation="contextpilot" if contextpilot else "native",
                 representation="finite" if context else "existing", retention=retention["mode"],
                 retention_allocation=retention.get("allocation"), numeric_record_projection=context,
@@ -90,7 +92,7 @@ def full_queue_gap_limits(execution, gain=None, *, max_units=None, max_passages=
 def prepare(args, root):
     from controller.config import load_config
     from controller.context_schema import DEFAULT_FULL_SCOPE_OUTPUT_TOKENS
-    from training.train_plan_gain import PlanGainModel
+    from controller.plan_profiles import load_action_gain_asset
 
     config = yaml.safe_load(Path(args.config).read_text())
     config.setdefault("scoring", {})["gpu_devices"] = list(args.online_gpu_devices)
@@ -134,11 +136,22 @@ def prepare(args, root):
     run = load_config(run_path)
     config["generation"]["run_config"] = str(run_path)
     selected_methods = tuple(dict.fromkeys(args.methods or registered["main_methods"]))
-    needs_gain = any(method in CONTEXT_METHODS for method in selected_methods)
-    gain_path = Path(args.gain_asset).resolve() if needs_gain else None
-    profile = json.loads(gain_path.read_text())["reader_profile_id"] if needs_gain else args.reader_profile_id
-    gain = (PlanGainModel.load(gain_path, reader_checkpoint=run.model.revision, reader_profile_id=profile)
-        if needs_gain else None)
+    declared_gain = config["execution"].get("plan_gain") or {}
+    context_selected = any(method in CONTEXT_METHODS for method in selected_methods)
+    action_policy = declared_gain.get("action_policy", "learned" if args.gain_asset else "rule")
+    gain_path, gain, profile = None, None, args.reader_profile_id
+    if context_selected:
+        if action_policy == "learned":
+            if not args.gain_asset:
+                raise ValueError("learned action policy requires --gain-asset")
+            gain_path = Path(args.gain_asset).resolve()
+            profile = profile or json.loads(gain_path.read_text())["reader_profile_id"]
+        gain = load_action_gain_asset({"action_policy": action_policy,
+            "gain_asset": str(gain_path) if gain_path is not None else None,
+            "reader_checkpoint": run.model.revision, "reader_profile_id": profile,
+            "mode": "observed_actions", "joint_context": True})
+    if not profile:
+        raise ValueError("execution without a gain asset requires --reader-profile-id")
     roots = args.online_process_roots
     if not roots:
         endpoints = [run.engine.base_url]
@@ -165,7 +178,7 @@ def prepare(args, root):
                      prefix_retention={"mode": "native"}, cache_compilation={"mode": "native"},
                      dialogue_mode="contextkv")
     read_outputs = args.read_outputs or (2048,)
-    if needs_gain:
+    if gain is not None:
         from controller.action_proposals import finite_action_domain
         domain = gain.provenance["action_domain"]
         read_outputs = args.read_outputs or domain["output_budgets"]
@@ -176,7 +189,9 @@ def prepare(args, root):
         output_tokens_per_fact=config["reading"]["output_tokens_per_fact"], gap_limits=gap_limits, read_choices=2)
     if completion_timing is not None:
         rolling_settings["completion_timing_asset"] = str(Path(completion_timing).resolve())
-    gain_settings = dict(rolling_settings, gain_asset=str(gain_path)) if needs_gain else None
+    gain_settings = dict(rolling_settings, action_policy=action_policy) if context_selected else None
+    if gain is not None:
+        gain_settings["gain_asset"] = str(gain_path)
     rule_settings = dict(rolling_settings, action_policy="rule")
     checkout = args.contextpilot_checkout or declared_compilation.get("checkout")
     needs_compilation = any(method in (*CONTEXT_METHODS[1:], RULE_CONTEXT_METHOD) for method in selected_methods)
@@ -252,7 +267,7 @@ def prepare(args, root):
         execution_commit=revision, source_config=source_file(args.config), source_matrix=source_file(args.matrix),
         source_cohorts=source_file(args.cohorts) if args.cohorts is not None else None,
         reader_profile_id=profile, reader_run=source_file(run_path), resource_scope=scope,
-        assets={"gain": source_file(gain_path) if needs_gain else None,
+        assets={"gain": source_file(gain_path) if gain_path is not None else None,
                 "demand_pricing": source_file(pricing_asset) if pricing_asset is not None else None,
                 "completion_timing": source_file(rolling_settings["completion_timing_asset"])
                 if completion_timing is not None else None},
@@ -270,32 +285,22 @@ def prepare(args, root):
     return manifest
 
 
-def delivery_summary(dataset_rows, failed, dispatch):
-    return {"completed": len(dataset_rows), "failed": len(failed),
-            "blocked": len(dispatch["cancelled"]) if dispatch is not None else 0}
-
-
 def declared_execution_rows(job):
     rows, delivery = [], {}
     for dataset in job["datasets"]:
         track = Path(job["output"])/job["method"]/dataset
-        results = {str(row["task_id"]): row for row in saved_study_rows(track)}
+        completed = saved_study_rows(track)
         path = track/"failed_conversations.json"
         failed = json.loads(path.read_text()) if path.exists() else []
-        failed = [row for row in failed if str(row["task_id"]) not in results]
-        for row in failed:
-            results[str(row["task_id"])] = {**row, "status": "failed"}
-            for identity in row.get("blocked_task_ids", ()):
-                results.setdefault(str(identity), {"task_id": identity,
-                    "conversation_id": row["conversation_id"], "status": "blocked"})
+        completed_ids = {str(row["task_id"]) for row in completed}
+        failed = [row for row in failed if str(row["task_id"]) not in completed_ids]
         dispatch_path = track/"workload_dispatch.json"
         dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else None
-        if dispatch is not None:
-            for identity, row in dispatch["cancelled"].items():
-                results.setdefault(str(identity), {**row, "status": "blocked"})
-        delivery[dataset] = delivery_summary(
-            [row for row in results.values() if row["status"] == "completed"], failed, dispatch)
-        rows.extend({**row, "dataset": dataset} for row in results.values())
+        merged = execution_metric_rows(track, completed, failures=failed, dispatch=dispatch)
+        delivery[dataset] = {"completed": sum(row["status"] == "completed" for row in merged),
+            "failed": sum(row["status"] == "failed" for row in merged),
+            "blocked": sum(row["status"] == "blocked" for row in merged)}
+        rows.extend({**row, "dataset": dataset} for row in merged)
     return rows, delivery
 
 
@@ -499,12 +504,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.repetitions < 1:
         parser.error("--repetitions must be positive")
-    methods = args.methods or FULL_QUEUE_METHODS
-    if any(method in CONTEXT_METHODS for method in methods):
-        if not args.gain_asset:
-            parser.error("learned ContextKV methods require --gain-asset")
-    elif not args.reader_profile_id:
-        parser.error("methods without a gain asset require --reader-profile-id")
     return asyncio.run(run(args))
 
 

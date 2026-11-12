@@ -112,17 +112,23 @@ def _cost_summary(rows):
     complete_timings = bool(timings) and all(value is not None for value in timings)
     result = {"mean_complete_ms": statistics.fmean(timings) if complete_timings else None,
         "p95_complete_ms": _quantile(timings, .95) if complete_timings else None}
+    accounting = {}
     for name in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds", "host_gib_seconds",
                  "online_compute_ms", "auxiliary_input_tokens", "auxiliary_output_tokens",
                  "reader_input_tokens", "reader_output_tokens", "actual_prefill_tokens",
                  "actual_device_hit_tokens", "actual_host_loaded_tokens"):
         result[name] = _cost_total(rows, name)
+        accounting[name] = {"known_lower_bound": sum((_number(row.get("cost", {}).get(name))
+                if _number(row.get("cost", {}).get(name)) is not None else
+                _number(row.get("cost", {}).get("accounting", {}).get("known_lower_bound", {}).get(name)) or 0)
+                for row in rows)}
     token_fields = (result["total_input_tokens"], result["total_output_tokens"])
     result["online_tokens"] = sum(token_fields) if all(v is not None for v in token_fields) else None
     result["token_accounting"] = "all_online_models"
+    result["accounting"] = accounting
     for name in ("gpu_capacity_tokens", "host_capacity_tokens", "gpu_peak_tokens", "host_peak_tokens",
                  "gpu_peak_gib", "host_peak_gib"):
-        values = [_number(row.get("cost", {}).get(name)) for row in rows]
+        values = [_number(row.get("cost", {}).get(name)) for row in rows if row["status"] != "blocked"]
         result[name] = max(values) if values and all(value is not None for value in values) else None
     return result
 
@@ -168,6 +174,10 @@ def declared_queue_summary(rows, spec, task_ids):
         if values:
             benchmark_metrics[name] = {"mean": statistics.fmean(values), "scored": len(values)}
     cost = _cost_summary(selected)
+    if missing_execution:
+        for name in cost["accounting"]:
+            cost[name] = None
+        cost["online_tokens"] = None
     cost["p95_delivered_ms"] = cost["p95_complete_ms"]
     timings = sorted(row["cost"]["complete_ms"] for row in completed
                      if _number(row.get("cost", {}).get("complete_ms")) is not None)
@@ -188,7 +198,7 @@ def declared_queue_summary(rows, spec, task_ids):
         "benchmark_metrics": benchmark_metrics,
         "cost": cost,
         "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
-        "cost_rule": "all saved requests including failures; observed totals retain unmeasured task IDs"}
+        "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"}
 
 
 def _budget_reasons(matrix, cost):

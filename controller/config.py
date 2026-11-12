@@ -155,7 +155,11 @@ class RunConfig:
                 raise ValueError("plan_gain.mode must be whole_plan or observed_actions")
             if self.plan_gain.get("read_choices", 1) not in {1, 2}:
                 raise ValueError("plan_gain.read_choices must be 1 or 2")
-            action_policy = self.plan_gain.get("action_policy", "learned")
+            horizon = self.plan_gain.get("quote_lookahead", 2)
+            if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 0:
+                raise ValueError("plan_gain.quote_lookahead must be a nonnegative integer")
+            action_policy = self.plan_gain.get("action_policy", "rule" if
+                self.plan_gain.get("joint_context") and self.plan_gain["mode"] == "observed_actions" else "learned")
             if action_policy not in {"learned", "rule"}:
                 raise ValueError("plan_gain.action_policy must be learned or rule")
             rule = action_policy == "rule"

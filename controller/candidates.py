@@ -195,6 +195,11 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
     state, selected = plan.task_state, plan.selected_set
     claims = () if outcome is None else outcome.claims
     answer_plan = plan.answer_plan if outcome is None else outcome.plan.answer_plan
+    if plan.terminal_gaps:
+        terminal = {gap.need_id for gap in plan.terminal_gaps}
+        answer_plan = replace(answer_plan, points=tuple(
+            replace(point, claim_ids=()) if point.need_id in terminal else point
+            for point in answer_plan.points))
     if representation == "raw":
         claims, answer_plan = (), AnswerPlan(())
     blocks = {b.key: b for b in (*snapshot.archive, *selected.source_blocks)}
@@ -232,6 +237,13 @@ def _plan_candidate_builder(snapshot, query, plan, template, *, policy=None, out
     if representation != "raw":
         context += ("\nReading conclusions (shared scopes and complete source paths):\n" + dumps(conclusions)
             + "\nComputed results for the complete reading scope:\n" + computed)
+    if plan.terminal_gaps:
+        context += ("\nThe controller has exhausted bounded evidence recovery for these requested points: "
+            + dumps(plan.terminal_gaps)
+            + "\nFor each of these points explicitly say that the supplied evidence is insufficient to determine "
+              "the requested result. Do not infer a missing value, report a partial sum/count as a complete "
+              "aggregate, treat missing values as zero, or substitute another field/entity/period. "
+              "Answer any other supported points with their sources.")
 
     def compile_sources(ordered, message_index):
         if source_first:

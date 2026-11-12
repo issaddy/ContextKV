@@ -434,25 +434,38 @@ class ObservedNativeObserver:
                 "resident_model_manifest_digest": self.resident_digest}), {}
 
 
+def load_action_gain_asset(settings, *, reader_fingerprint=None):
+    """Load an explicitly selected learned policy; rule mode needs no asset."""
+    default = "rule" if settings.get("joint_context") and settings.get("mode") == "observed_actions" else "learned"
+    policy = settings.get("action_policy", default)
+    if policy not in {"rule", "learned"}:
+        raise ValueError("action policy must be learned or rule")
+    if policy == "rule":
+        return None
+    from training.train_plan_gain import PlanGainModel
+    from training.plan_gain_completion import require_terminal_cost_target
+
+    model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=settings["reader_checkpoint"],
+        reader_profile_id=settings["reader_profile_id"], reader_fingerprint=reader_fingerprint)
+    provenance = model.provenance
+    if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
+            "actual_completion_weighted_final_utility_minus_direct_utility"}
+            or provenance["training_split"] != "train" or provenance["training_records"] < 1):
+        raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
+    if provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility":
+        if provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"]:
+            raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
+        require_terminal_cost_target(model)
+    return model
+
+
 def load_rolling_runtime(settings, *, template, store, sampling, answer_system_prompt, engine_base_url):
     from bench.study_resources import StudyResourceSampler
-    from training.train_plan_gain import PlanGainModel
     from .plan_policy import PolicyLimits
     from .rolling_policy import RollingPlanRuntime
     from .completion_timing import CompletionTiming
     checkpoint, profile = settings["reader_checkpoint"], settings["reader_profile_id"]
-    model = None
-    if settings.get("action_policy", "learned") == "learned":
-        model = PlanGainModel.load(settings["gain_asset"], reader_checkpoint=checkpoint, reader_profile_id=profile,
-            reader_fingerprint=template.fingerprint)
-        provenance = model.provenance
-        if (provenance["label"] not in {"actual_final_quality_minus_actual_direct_answer_quality",
-                "actual_completion_weighted_final_utility_minus_direct_utility"}
-                or provenance["training_split"] != "train" or provenance["training_records"] < 1):
-            raise ValueError("enabled rolling gains require the actual train-split counterfactual asset")
-        if (provenance["label"] == "actual_completion_weighted_final_utility_minus_direct_utility"
-                and (provenance["no_answer_utility"] != 0 or not provenance["raw_missing_quality_preserved"])):
-            raise ValueError("effective utility assets retain missing raw judge Q and their declared no-QA rule")
+    model = load_action_gain_asset(settings, reader_fingerprint=template.fingerprint)
     mode = settings.get("mode", "whole_plan")
     if checkpoint != template.fingerprint.model_revision:
         raise ValueError("rolling gains must bind the actual reader checkpoint")
@@ -477,7 +490,7 @@ def load_rolling_runtime(settings, *, template, store, sampling, answer_system_p
         output_tokens_per_fact=settings.get("output_tokens_per_fact", 64),
         mode=mode, observation_path=settings.get("observation_path"),
         gap_retriever_identity=settings.get("gap_retriever_identity"), gap_limits=settings.get("gap_limits"),
-        joint_context=joint, read_choices=reads,
+        joint_context=joint, read_choices=reads, quote_lookahead=settings.get("quote_lookahead", 2),
         completion_timing=CompletionTiming.load(timing_path) if timing_path else None)
 
 
