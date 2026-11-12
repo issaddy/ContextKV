@@ -284,3 +284,52 @@ diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/en
  @app.api_route("/flush_cache", methods=["GET", "POST"])
  @auth_level(AuthLevel.ADMIN_OPTIONAL)
  async def flush_cache(timeout: float = Query(0.0, ge=0.0)):
+diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -608,22 +608,11 @@
+         return max_num_tokens
+
+     def _forks_draft_metadata_prep(self) -> bool:
+-        from sglang.srt.layers.attention.deepseek_v4_backend import (
+-            DeepseekV4AttnBackend,
+-        )
+-        from sglang.srt.layers.attention.dsv4.unified_kv_gate import (
+-            is_unified_kv_triton,
+-        )
+-
+-        return (
++        if not (
+             envs.SGLANG_OPT_DSV41_DSPARK_DRAFT_PREP_FORK.get()
+-            # The unified-KV store location is not a join point.
+-            and not is_unified_kv_triton()
+             and self.model_runner.spec_algorithm.is_dspark()
+             and self.model_runner.is_draft_worker
+             and self.capture_forward_mode == ForwardMode.TARGET_VERIFY
+-            # Its KV store-location reads are where the forked prep joins.
+-            and isinstance(self.attn_backend, DeepseekV4AttnBackend)
+             and self.device_module is torch.cuda
+             and not get_exec().graph.debug_cuda_graph
+             and not self.enable_torch_compile
+@@ -631,6 +620,21 @@
+             and not self.enable_two_batch_overlap
+             and not self.enable_pdmux
+             and self.model_runner.lora_manager is None
++        ):
++            return False
++
++        from sglang.srt.layers.attention.deepseek_v4_backend import (
++            DeepseekV4AttnBackend,
++        )
++        from sglang.srt.layers.attention.dsv4.unified_kv_gate import (
++            is_unified_kv_triton,
++        )
++
++        return (
++            # The unified-KV store location is not a join point.
++            not is_unified_kv_triton()
++            # Its KV store-location reads are where the forked prep joins.
++            and isinstance(self.attn_backend, DeepseekV4AttnBackend)
+         )
+
+     def _run_in_graph_metadata_prep(self, attn_backend, forward_batch) -> None:
