@@ -135,7 +135,7 @@ def task_loss(encoder, row):
     batch = encoder.tokenizer(["Instruct: Retrieve evidence for the question.\nQuery: "+text for text in targets],
                               padding=True, return_tensors="pt").to(encoder.model.device)
     with torch.no_grad(), encoder.model.disable_adapter():
-        base = encoder.model(**batch).last_hidden_state[:, -1].float()
+        base = encoder.model(**batch, use_cache=False).last_hidden_state[:, -1].float()
         base = F.normalize(base, dim=-1)
     losses.append(1-F.cosine_similarity(states[-1], base[0], dim=0))
     if len(base) > 1:

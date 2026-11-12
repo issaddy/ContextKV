@@ -275,13 +275,13 @@ class SharedQueryEncoder:
             batch = batch.to(self.model.device)
             adapter_context = self.model.disable_adapter() if self.asset_path is not None else nullcontext()
             with adapter_context:
-                states = self.model(**batch).last_hidden_state
+                states = self.model(**batch, use_cache=False).last_hidden_state
             return torch.nn.functional.normalize(states[:, -1].float(), dim=-1).cpu().numpy(), tokens
 
     def forward_input(self, encoded):
         torch = self.torch
         batch = {key: torch.tensor([value], device=self.model.device) for key, value in encoded.items()}
-        states = self.model(**batch).last_hidden_state[0].float()
+        states = self.model(**batch, use_cache=False).last_hidden_state[0].float()
         return states, self.heads(states, states[-1])
 
     def encode(self, history, question, task_id, current_turn_id, *, catalogue=(), source_scope=(), history_turns=()):
@@ -296,7 +296,7 @@ class SharedQueryEncoder:
             row.get("catalogue", ()), history_tokens=self.history_tokens, history_turns=row.get("history_turns", ())) for row in requests]
         batch = self.tokenizer.pad([item[0] for item in prepared], padding=True, return_tensors="pt").to(self.model.device)
         with self.backbone_lock, torch.no_grad():
-            states = self.model(**batch).last_hidden_state.float()
+            states = self.model(**batch, use_cache=False).last_hidden_state.float()
             results = [self._encode(**row, _prepared=item, _states=states[index, -len(item[0]["input_ids"]):])
                        for index, (row, item) in enumerate(zip(requests, prepared))]
         elapsed = (time.perf_counter()-started)*1000
