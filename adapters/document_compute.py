@@ -102,6 +102,7 @@ class _Record:
 
 _COMPARISONS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt,
                 "le": operator.le, "gt": operator.gt, "ge": operator.ge}
+_NUMERIC_AGGREGATES = frozenset({"sum", "mean", "min", "max"})
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 
@@ -308,7 +309,7 @@ class DocumentIndex:
             unit = ""
             if program.operation == "count":
                 value = len(selected)
-            elif program.operation in {"sum", "mean", "min", "max"}:
+            elif program.operation in _NUMERIC_AGGREGATES:
                 quantities = [quantity(record.fields[program.value_field]) for record in selected]
                 units = {unit for unit, _ in quantities}
                 if len(units) > 1:
@@ -372,7 +373,7 @@ def build_programs(query, evidence, index):
     programs = []
     conditions = {condition.condition_id: condition for condition in query.task.conditions}
     for need in query.task.needs:
-        if need.operation not in {"count", "sum", "group"}:
+        if need.operation not in {"count", "group", *_NUMERIC_AGGREGATES}:
             continue
         bindings = [binding for binding in evidence.bindings if binding.need_id == need.need_id]
         joining = need.need_id in query.join_needs
@@ -397,7 +398,7 @@ def build_programs(query, evidence, index):
                 measure_column = next((column for column in period if column != 0), None)
             else:
                 measure_column = next(iter(measures), None)
-            if need.operation == "sum" and measure_column is None and not joining:
+            if need.operation in _NUMERIC_AGGREGATES and measure_column is None and not joining:
                 continue
             if measure_column is not None:
                 fields["measure"] = measure_column
@@ -464,7 +465,7 @@ def build_programs(query, evidence, index):
         unresolved = tuple(identity for identity in need.condition_ids
             if conditions[identity].relation_type != "VERSION" and identity not in mapped_conditions)
         programs.append(DocumentProgram(need.need_id, tuple(projections), population,
-            operation=need.operation, value_field="measure" if need.operation == "sum" else "",
+            operation=need.operation, value_field="measure" if need.operation in _NUMERIC_AGGREGATES else "",
             entity_fields=entities, joins=tuple(joins), group_by=grouping,
             distinct=entities if need.need_id in query.distinct_needs else (),
             condition_ids=need.condition_ids, unresolved_conditions=unresolved))
@@ -649,7 +650,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
         if need_id not in data["unresolved_need_ids"]:
             programs.append(DocumentProgram(need_id, tuple(projections),
                 tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
-                operation=need.operation, value_field="measure" if need.operation == "sum" else "",
+                operation=need.operation, value_field="measure" if need.operation in _NUMERIC_AGGREGATES else "",
                 entity_fields=("entity",), group_by=tuple(headers[2:]),
                 distinct=("entity",) if need_id in query.distinct_needs else (),
                 condition_ids=need.condition_ids))

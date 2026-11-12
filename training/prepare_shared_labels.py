@@ -12,6 +12,7 @@ from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import SourceDirectory
 from adapters.retrieval import BM25SRetriever
 from adapters.shared_encoding import query_input
+from controller.schema import Message, from_history_messages
 from controller.serialization import to_jsonable
 from training.shared_collection import source_bindings
 
@@ -103,16 +104,13 @@ def prepare_states(args, tokenizer):
         split = "dev" if row["conversation_id"] in dev_sessions else "train"
         if counts[split] >= limits[split]:
             continue
-        history, turn = [], 0
-        for item in row["input"][:-1]:
-            if item["speaker"] == "user":
-                turn += 1
-            speaker = "assistant" if item["speaker"] == "agent" else item["speaker"]
-            if history and (history[-1]["turn_id"], history[-1]["speaker"]) == (turn, speaker):
-                history[-1]["text"] += "\n\n"+item["text"]
-            else:
-                history.append({"turn_id": turn, "speaker": speaker, "text": item["text"]})
-        turn += 1
+        turns = from_history_messages(tuple(Message(
+            "assistant" if item["speaker"] == "agent" else item["speaker"], item["text"])
+            for item in row["input"][:-1]))
+        history = [{"turn_id": item.turn_id, "speaker": speaker, "text": text}
+            for item in turns for speaker, text in (("user", item.user_text), ("assistant", item.assistant_text))
+            if text is not None]
+        turn = len(turns)+1
         question = row["input"][-1]["text"]
         _, refs, _, _ = query_input(tokenizer, [(item["turn_id"], item["speaker"], item["text"]) for item in history],
                                     question, turn, history_tokens=args.history_tokens)
