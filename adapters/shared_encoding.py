@@ -145,7 +145,7 @@ class EvidenceEncoding:
                 gains = values[1:]-values[0]
                 if cost > body_tokens:
                     freed = np.asarray([sum(by_id[key].body_tokens for key in chosen-group)
-                                        for group in candidates])
+                                        for group in candidates], dtype=values.dtype)
                     index = int((gains/freed).argmax())
                 else:
                     index = int(gains.argmax())
