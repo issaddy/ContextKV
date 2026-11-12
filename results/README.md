@@ -1,6 +1,6 @@
 # 实测指标
 
-[本轮完整报告](../docs/study/final_results.md)包含四个 benchmark 各自 50 题的普通问答、ContextKV、LlamaIndex 比较，实际多轮历史、各场景、辅助训练、物理资源及缓存配对。
+[本轮完整报告](../docs/study/final_results.md)按四个 benchmark 分别汇报各自 50 题的普通问答、ContextKV、LlamaIndex 比较，以及实际多轮历史、辅助训练、物理资源和缓存配对。
 
 | 文件 | 内容 |
 |---|---|
