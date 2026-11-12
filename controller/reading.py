@@ -1112,18 +1112,60 @@ def _header_unit(text, reported_unit):
     return next(iter(matches)) if len(matches) == 1 else None
 
 
-def _field_quantity(excerpt, entity, relation, unit, context=""):
+def _period_key(value):
+    return re.sub(r"(?<=\d)年", "", re.sub(r"[\W_]+", "", str(value)).casefold())
+
+
+def _table_quantity(excerpt, relation, unit, context, period):
+    """Select a numeric cell by its literal field row and explicit period header."""
+    if period in {"", "current"}:
+        return None
+
+    def cells(line):
+        separator = "|" if "|" in line else "\t" if "\t" in line else None
+        return tuple(cell.strip() for cell in line.strip().strip("|").split(separator)) if separator else ()
+
+    headers, inside = [], False
+    for line in (context+"\n"+excerpt).splitlines():
+        row = cells(line)
+        if row and not inside:
+            headers.append(row)
+        inside = bool(row)
+    matches = set()
+    inherited = _header_unit(context+"\n"+excerpt, unit)
+    for line in excerpt.splitlines():
+        row = cells(line)
+        fields = [i for i, cell in enumerate(row) if _period_key(cell) == _period_key(relation)]
+        for field in fields:
+            for header in headers:
+                columns = [i for i, label in enumerate(header)
+                           if _period_key(label) == _period_key(period)]
+                if len(columns) != 1 or not field < columns[0] < len(row):
+                    continue
+                column = columns[0]
+                quantity = _excerpt_quantity(row[column], "", "")
+                if quantity is None and re.fullmatch(NUMERIC_LITERAL, row[column]) and (inherited or not unit):
+                    quantity = row[column], inherited or ""
+                if quantity is not None:
+                    matches.add((column, quantity))
+    return next(iter(matches))[1] if len(matches) == 1 else None
+
+
+def _field_quantity(excerpt, entity, relation, unit, context="", period="current"):
     """Bind a field to exactly one local source quantity; never choose by value.
 
     A broad excerpt may contain other fields.  Only the clause containing the
-    literal requested relation is eligible, and multiple values in that clause
-    (for example different reporting periods) remain unresolved.  Entity and
-    unit headers can come from explicit same-source dependencies.
+    literal requested relation is eligible. Explicit table headers can select
+    the requested period; otherwise multiple quantities remain unresolved.
+    Entity and unit headers can come from same-source dependencies.
     """
     entities = _literal_matches(excerpt, entity)
     header_entity = bool(_literal_matches(context, entity))
     if not entities and not header_entity:
         return None
+    table = _table_quantity(excerpt, relation, unit, context, period)
+    if table is not None:
+        return table
     fields = _literal_matches(excerpt, relation)
     candidates = []
     # A simple table row may put its label and one value in adjacent cells.
@@ -1171,7 +1213,7 @@ def _field_quantity(excerpt, entity, relation, unit, context=""):
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _ground_numeric_fact(fact, cited, units):
+def _ground_numeric_fact(fact, cited, units, period="current"):
     """Resolve a numeric fact to its cited entity/field/quantity source binding.
 
     Source-wide number enums only constrain spelling.  They cannot license a
@@ -1189,14 +1231,14 @@ def _ground_numeric_fact(fact, cited, units):
         return key.corpus_id, key.document_id, key.version
 
     keys = {document_version(span) for span in source.source_spans}
-    context = "\n".join(dependency.text for dependency in units
+    context = "\n\n".join(dependency.text for dependency in units
         if dependency.unit_id in source.dependencies
         and keys.intersection(document_version(span) for span in dependency.source_spans))
     if not _literal_matches(text, entity) and not _literal_matches(context, entity):
         return None
     if value is None:
         return source, text, entity, None, ""
-    quantity = _field_quantity(text, entity, fact["r"], unit, context)
+    quantity = _field_quantity(text, entity, fact["r"], unit, context, period)
     if quantity is not None:
         return source, text, entity, *quantity
 
@@ -1213,19 +1255,25 @@ def _repair_target_matches(claim, gap, dependency_text=""):
         return False
     if gap.temporal_scope in {"", "current"}:
         return True
-    # Source versions bind provenance, but a report may itself contain several
-    # reporting periods.  A contrary explicit year in the selected fact cannot
-    # be overwritten by that report's publication/version identifier.
+    quantity = _table_quantity(claim.text, claim.relation, claim.unit, dependency_text, gap.temporal_scope)
+    if quantity is not None:
+        from decimal import Decimal
+        from .reduction import UNIT_FACTORS
+        return (claim.value is not None
+                and Decimal(str(quantity[0]).replace(",", "")) == Decimal(str(claim.value).replace(",", ""))
+                and UNIT_FACTORS.get(quantity[1], quantity[1]) == UNIT_FACTORS.get(claim.unit, claim.unit))
+    # The selected fact establishes its data period; source version remains provenance.
     years = set(re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", gap.temporal_scope))
-    text = claim.text+"\n"+dependency_text
+    text = claim.text if re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", claim.text) else dependency_text
     quantities = _quantity_matches(text, claim.unit)
     observed = {match.group() for match in re.finditer(r"(?<!\d)(?:19|20)\d{2}(?!\d)", text)
         if not any(quantity.start() <= match.start() < quantity.end() for quantity in quantities)
         and not (match.group() == str(claim.value) and not re.match(r"\s*年", text[match.end():]))}
     if years and observed:
+        if _period_key(gap.temporal_scope) not in years:
+            return _period_key(gap.temporal_scope) in _period_key(text) and observed <= years
         return bool(years.intersection(observed)) and observed <= years
-    return normalize(gap.temporal_scope) in normalize(claim.version) or bool(years.intersection(
-        re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", claim.version)))
+    return not years and normalize(gap.temporal_scope) in normalize(claim.version)
 
 
 def _delimited_numeric_records(units):
@@ -1319,7 +1367,20 @@ def project_named_numeric_records(plan, snapshot):
     return ReadingOutcome(replace(plan, steps=(step,)), results=(result,), claims=claims)
 
 
-def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0):
+def read_need_periods(state, history):
+    view = resolved_task_view(state, history)
+    times = {item["id"]: " ".join(item["values"]) for item in view["conditions"]
+             if item["relation"] == "TIME" and item["values"]}
+    periods = {}
+    for need in state.needs:
+        values = {times[key] for key in need.condition_ids if key in times}
+        if len(values) == 1:
+            periods[need.need_id] = next(iter(values))
+    return periods
+
+
+def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_tokens=0, output_tokens=0,
+                      need_periods=None):
     data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError("reading output must be a JSON object")
@@ -1350,14 +1411,22 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
     units_by_id = {unit.unit_id: unit for unit in units}
     parents = {claim.claim_id: claim for claim in claims}
     grounding_gaps = []
+    periods = dict(need_periods or {})
+
+    def period_for(need_ids, entity, relation):
+        targets = {gap.temporal_scope for gap in task.repair_gaps
+            if gap.need_id in need_ids and (not gap.bound_entities or entity in gap.bound_entities)
+            and _period_key(relation) == _period_key(
+                gap.missing_relation.removeprefix(NUMERIC_GROUNDING_GAP_PREFIX).split(" (requires", 1)[0])}
+        values = targets or {periods[need] for need in need_ids if need in periods}
+        return next(iter(values)) if len(values) == 1 else "current"
 
     def grounding_failed(need_ids, relation, entity, span_ids, parent_ids=()):
-        versions = {spans[identity].source_key.version for identity in span_ids}
-        temporal_scope = next(iter(versions)) if len(versions) == 1 else "current"
         grounding_gaps.extend(OpenNeed(need_id,
             NUMERIC_GROUNDING_GAP_PREFIX+relation+
                 " (requires an unambiguous source entity, field, period and unit)",
-            (entity,) if entity else (), temporal_scope, tuple(parent_ids)) for need_id in need_ids)
+            (entity,) if entity else (), period_for((need_id,), entity, relation),
+            tuple(parent_ids)) for need_id in need_ids)
     if wire_version in {READ_PROTOCOL_VERSION, SHARED_NUMERIC_PROTOCOL_VERSION}:
         aliases, source_aliases, parent_aliases = numeric_aliases(task, units, claims)
         conditions = condition_aliases(task, claims)
@@ -1403,7 +1472,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
                                  if not source.need_ids or set(memberships) <= set(source.need_ids))
                 cited_ids = {span_units[sid].unit_id for sid in span_ids}
                 grounded = _ground_numeric_fact(fact,
-                    tuple(source for source in eligible if source.unit_id in cited_ids), eligible)
+                    tuple(source for source in eligible if source.unit_id in cited_ids), eligible,
+                    period_for(memberships, entity, fact["r"]))
                 if number is None and any(operation == "sum" and need in memberships
                         for need, operation in zip(scope.need_ids, scope.operations, strict=True)):
                     grounded = None
@@ -1442,7 +1512,8 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
         if task.kind == "READ" and task.operation == "sum" and not task.shared_numeric_scopes:
             grounded = _ground_numeric_fact({"t": value["text"], "e": value["entity"],
                 "r": value["relation"], "v": value["value"], "u": value["unit"]},
-                tuple(dict.fromkeys(span_units[identity] for identity in value["span_ids"])), units)
+                tuple(dict.fromkeys(span_units[identity] for identity in value["span_ids"])), units,
+                period_for((value["need_id"],), value["entity"], value["relation"]))
             if grounded is None or grounded[3] is None:
                 grounding_failed((value["need_id"],), value["relation"], value["entity"],
                     value["span_ids"], value["parent_claim_ids"])
@@ -1480,10 +1551,14 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
             value["unit"], tuple(value["conditions"]), tuple(claim_spans.values()),
             task.operation, parent_ids, value["entity"], value["relation"], version,
             tuple(value.get("shared_need_ids", ())))
-        if task.kind == "READ" and task.operation == "repair_extract":
-            targets = tuple(gap for gap in task.repair_gaps if claim.serves(gap.need_id))
-            dependency_text = "\n".join(span_units[identity].text for identity in claim_spans
-                if identity not in value["span_ids"] and identity in span_units)
+        if task.kind == "READ":
+            targets = (tuple(gap for gap in task.repair_gaps if claim.serves(gap.need_id))
+                if task.operation == "repair_extract" else
+                tuple(OpenNeed(need, claim.relation, (claim.entity,), periods[need])
+                      for need in task.need_ids if claim.serves(need) and need in periods
+                      and (task.shared_numeric_scopes or task.operation in {"count", "sum"})))
+            dependency_text = "\n\n".join(dict.fromkeys(span_units[identity].text
+                for identity in claim_spans if identity in span_units))
             if targets and not any(_repair_target_matches(claim, gap, dependency_text) for gap in targets):
                 grounding_gaps.extend(targets)
                 continue

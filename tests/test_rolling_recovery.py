@@ -120,18 +120,20 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(answer_evidence_gaps(state, require_complete_evidence=False))
 
     def test_field_repair_closes_only_matching_entity_and_period(self):
-        plan, task, unit = fixture()
-        repaired = OpenNeed("n", "流动资产合计", ("公司0",), "2024")
+        text = "公司0：2023年流动资产合计1万元。\n公司1：2023年流动资产合计未披露。"
+        plan, task, unit = fixture(text=text)
+        repaired = OpenNeed("n", "流动资产合计", ("公司0",), "2023")
         remaining = replace(repaired, bound_entities=("公司1",))
         result = ReadResult(task.step_id, covered_units=("u",), open_needs=(repaired, remaining))
         state = ReadingOutcome(plan, (result,), (StepRecord("a", task.step_id, task, result=result),),
                                open_needs=(repaired, remaining))
         state = schedule_field_repair(state, self.template.tokenizer)
         repair = state.plan.steps[-1]
-        claim = EvidenceClaim("c", "n", "extract", value="1", unit="万元", entity="公司0",
+        claim = EvidenceClaim("c", "n", "extract", text=text.splitlines()[0], value="1", unit="万元", entity="公司0",
                               relation="流动资产合计", version="2024", source_spans=unit.source_spans)
         record = StepRecord("a", repair.step_id, repair,
-            result=ReadResult(repair.step_id, claims=(claim,), covered_units=repair.input_unit_ids))
+            result=ReadResult(repair.step_id, claims=(claim,), covered_units=repair.input_unit_ids,
+                              open_needs=(remaining,)))
         state = reconcile_recovery(_replace_records(state, (record,)))
         self.assertEqual(state.open_needs, (remaining,))
 

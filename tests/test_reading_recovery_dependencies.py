@@ -115,14 +115,25 @@ class RecoveryDependencyTests(unittest.TestCase):
         self.assertEqual("100", result.claims[0].value)
         self.assertFalse(result.open_needs)
 
-    def test_table_row_with_two_period_columns_stays_unresolved(self):
+    def test_table_period_column_is_selected_and_closes_its_gap(self):
+        from controller.read_recovery import _replace_records, reconcile_recovery
+
         excerpt = "流动资产合计 | 100 | 80"
         text = "甲公司 | 2024年 | 2023年 | 单位：万元\n"+"无关说明\n"*700+excerpt+"\n"
         plan, task = fixture(text)
-        state = schedule_field_repair(state_for(plan, task), self.tokenizer)
-        result = parse_target(state.plan, state.plan.steps[-1], excerpt)
-        self.assertFalse(result.claims)
-        self.assertTrue(result.open_needs)
+        for period, expected in (("2024", "100"), ("2023", "80")):
+            with self.subTest(period=period):
+                state = state_for(plan, task)
+                gap = replace(state.open_needs[0], temporal_scope=period)
+                original = replace(state.steps[0], result=replace(state.results[0], open_needs=(gap,)))
+                state = _replace_records(state, (original,))
+                state = schedule_field_repair(state, self.tokenizer)
+                repair = state.plan.steps[-1]
+                result = parse_target(state.plan, repair, excerpt)
+                self.assertEqual(expected, result.claims[0].value)
+                self.assertFalse(result.open_needs)
+                record = StepRecord("attempt", repair.step_id, repair, result=result)
+                self.assertFalse(reconcile_recovery(_replace_records(state, (record,))).open_needs)
 
 
 if __name__ == "__main__":

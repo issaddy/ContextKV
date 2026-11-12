@@ -12,7 +12,7 @@ import re
 
 from .context_schema import NumericReadScope, ReadTask
 from .context_budget import completed_source_coverage
-from .reading import unresolved_needs
+from .reading import _period_key, _repair_target_matches, unresolved_needs
 from .serialization import dumps
 
 
@@ -174,17 +174,19 @@ def recover_failed_reads(state, tokenizer):
     return state
 
 
-def _repairs_gap(gap, result):
-    if any(item.need_id == gap.need_id for item in result.open_needs):
+def _repairs_gap(gap, result, units=()):
+    if any(item.need_id == gap.need_id and _norm(_field(item)) == _norm(_field(gap))
+           and (not item.bound_entities or not gap.bound_entities
+                or set(map(_norm, item.bound_entities)) & set(map(_norm, gap.bound_entities)))
+           and (item.temporal_scope in {"", "current"} or gap.temporal_scope in {"", "current"}
+                or _period_key(item.temporal_scope) == _period_key(gap.temporal_scope))
+           for item in result.open_needs):
         return False
-    field = _norm(_field(gap))
+    texts = {span.span_id: unit.text for unit in units for span in unit.source_spans}
     claims = tuple(claim for claim in result.claims if claim.serves(gap.need_id)
-                   and _norm(claim.relation) == field and claim.value is not None)
-    if not claims:
-        return False
-    if gap.temporal_scope not in {"", "current"}:
-        claims = tuple(claim for claim in claims if _norm(gap.temporal_scope) in _norm(claim.version)
-            or any(_norm(gap.temporal_scope) in _norm(span.source_key.version) for span in claim.source_spans))
+        and claim.value is not None and _repair_target_matches(claim, gap,
+            "\n\n".join(dict.fromkeys(texts[span.span_id] for span in claim.source_spans
+                                      if span.span_id in texts))))
     return bool(claims) and all(any(_norm(entity) == _norm(claim.entity) for claim in claims)
                                 for entity in gap.bound_entities)
 
@@ -196,7 +198,8 @@ def reconcile_recovery(state):
     for task in state.plan.steps:
         result = results.get(task.step_id)
         if result is not None and task.operation == "repair_extract":
-            resolved.update(gap_key(gap) for gap in task.repair_gaps if _repairs_gap(gap, result))
+            resolved.update(gap_key(gap) for gap in task.repair_gaps
+                if _repairs_gap(gap, result, state.plan.selected_set.selected_units))
     updates = []
     by_id = {unit.unit_id: unit for unit in state.plan.selected_set.selected_units}
     records = {record.step_id: record for record in state.steps}

@@ -600,10 +600,13 @@ class ReadingExecutor:
                 raise EngineError("READ_STEP_OUTPUT_TRUNCATED", task.step_id)
             else:
                 try:
+                    from .reading import read_need_periods
                     result = (record.result if text_callback else
                         parse_read_result(task, generation.text, units, claims,
                             elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(candidate.input_ids),
-                            output_tokens=len(generation.output_ids)))
+                            output_tokens=len(generation.output_ids),
+                            need_periods=read_need_periods(plan.task_state, snapshot.raw_history)
+                                if task.kind == "READ" else None))
                 except (ValueError, KeyError, TypeError) as exc:
                     if task.kind != "READ" or text_callback:
                         raise

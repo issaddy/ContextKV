@@ -27,6 +27,8 @@ python3 scripts/prepare_contextpilot.py --checkout vendor/contextpilot
 
 joint observed 动作默认使用 `action_policy: rule`，不加载收益资产。配置 `action_policy: learned` 显式启用学习策略，资产须匹配 reader、输入协议和成本目标；不兼容时直接报错。新输入协议需要重新采集 frozen branches。更新 Native overlay 后再运行并发软配额实验。
 
+数值 READ 使用 Need 的显式时间条件或局部补读的目标时期，在带明确列头的 Markdown／制表符表格中定位数值，保留原文与表头来源。局部修复按实体、字段和时期分别关闭缺口；提取与恢复确认共用时期判断，财报版本与数据时期分别处理。
+
 ## 数据与选题
 
 优先复用已有原始数据、语料和索引。MultiDoc2Dial 任务按当前 user 紧接的一条有效 agent 回复导出，见[接入说明](../guides/doc2dial.md)；MT-RAG Cloud、VersionQA 和 Loong 使用[数据与评价](../data_and_evaluation.md)所列入口。

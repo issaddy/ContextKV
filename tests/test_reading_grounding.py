@@ -112,6 +112,22 @@ class NumericSourceBindingTests(unittest.TestCase):
         self.assertFalse(result.claims)
         self.assertTrue(result.open_needs)
 
+    def test_initial_read_uses_the_requested_time_condition_for_table_columns(self):
+        from controller.context_schema import Condition, Need, TaskState, TextRef
+        from controller.reading import read_need_periods
+
+        question = "求2023年流动资产合计"
+        state = TaskState("t", question, current_turn_id=1,
+            needs=(Need("need:0", operation="sum", condition_ids=("period",)),),
+            conditions=(Condition("period", relation_type="TIME", value_spans=(TextRef(1, "user", 1, 6),)),))
+        row = "|流动资产合计|100|80|"
+        unit = source("甲公司 单位：万元\n|项目|2024年|2023年|\n|---|---|---|\n"+row)
+        periods = read_need_periods(state, ())
+        result = parse_read_result(numeric_task((unit,)), json.dumps(numeric_output(unit.text)),
+            (unit,), need_periods=periods)
+        self.assertEqual("80", result.claims[0].value)
+        self.assertFalse(result.open_needs)
+
     def test_null_sum_is_a_gap_while_count_can_preserve_missing_quantity(self):
         unit = source("甲公司：流动资产合计 未披露。")
         task = numeric_task((unit,), operations=("count", "sum"))
