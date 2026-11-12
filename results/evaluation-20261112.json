@@ -8369,7 +8369,12 @@
         "task_id": "f056fcf9-2ae7-4a8a-aafc-c0473a58fcbc",
         "status": "failed",
         "error": "no observed action satisfies its measured training scope and cumulative budgets",
-        "elapsed_ms": 3784.05424579978
+        "elapsed_ms": 3784.05424579978,
+        "observed_extract_mismatch": {
+          "requested_field": "流动资产合计",
+          "other_fields_in_claims": ["总资产（元）", "货币资金"],
+          "remaining_gap": "numeric_fields_incomplete"
+        }
       }
     ],
     "scoring": {
