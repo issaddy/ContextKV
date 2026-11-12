@@ -9,20 +9,48 @@ def candidate_sets(unit_ids):
     return tuple(dict.fromkeys(variants))
 
 
-def source_bindings(row, annotations):
-    """Translate literal source selections into the shared field-head labels."""
-    units = {unit["unit_id"]: unit for unit in row["units"]}
+def numbered_text(text):
+    import re
+    words = tuple(re.finditer(r"[\u3400-\u9fff]|\w+|[^\w\s]", text))
+    return [f"{index}:{word.group()}" for index, word in enumerate(words)], tuple(word.span() for word in words)
+
+
+def numbered_sources(units):
+    shown, locations = [], {}
+    for index, unit in enumerate(units):
+        identity = f"S{index+1}"
+        words, offsets = numbered_text(unit["text"])
+        shown.append({"source_id": identity, "title": unit["heading"],
+                      "version": unit["source_spans"][0]["source_key"]["version"], "words": words})
+        locations[identity] = unit, offsets
+    return shown, locations
+
+
+def word_reference_schema(locations, id_field):
+    return {"oneOf": [{"type": "object", "properties": {
+        id_field: {"const": identity},
+        "start_word": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1},
+        "end_word": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}},
+        "required": [id_field, "start_word", "end_word"], "additionalProperties": False}
+        for identity, (_, offsets) in locations.items() if offsets]}
+
+
+def word_offsets(reference, offsets):
+    first, last = reference["start_word"], reference["end_word"]
+    if first > last:
+        raise ValueError("word reference must have start_word <= end_word")
+    return offsets[first][0], offsets[last][1]
+
+
+def source_bindings(locations, annotations):
+    """Restore exact source offsets from the teacher's numbered word selections."""
     result = []
     for annotation in annotations:
-        unit = units[annotation["unit_id"]]
+        unit, offsets = locations[annotation["source"]["source_id"]]
+        start, end = word_offsets(annotation["source"], offsets)
         source = unit["source_spans"][0]
-        quoted = annotation["text"]
-        start = 0
-        for _ in range(annotation.get("occurrence", 0)+1):
-            found = unit["text"].index(quoted, start)
-            start = found+len(quoted)
-        span = {"span_id": f"{unit['unit_id']}:{found}:{start}", "source_key": source["source_key"],
-                "start": source["start"]+found, "end": source["start"]+start}
+        span = {"span_id": f"{unit['unit_id']}:{start}:{end}", "source_key": source["source_key"],
+                "start": source["start"]+start, "end": source["start"]+end}
         result.append({"need_id": annotation["need_id"], "role": annotation["role"], "source_span": span,
-            "condition_id": annotation.get("condition_id", ""), "relation_group": annotation.get("relation_group", "")})
+            "condition_id": annotation["condition_id"], "relation_group": annotation["relation_group"]})
     return result
