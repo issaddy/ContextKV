@@ -134,7 +134,7 @@ async def collect(args):
                 warmup = await answer(row, units, f"warm:{row['task_id']}", future=units, mode="infoflow")
                 native = warmup["native"]
                 answers.remove(warmup)
-            encoded, states, paid = None, [], 0
+            encoded, states = None, []
             batch_size = min(args.batch_size, max(1, len(units) // 2))
             for start in range(0, len(units), batch_size):
                 first = time.monotonic()
@@ -158,7 +158,7 @@ async def collect(args):
                     "remaining_sources": len(units)-len(observed),
                     "open_needs": sum(need.operation in {"infer", "compare"} for need in query.task.needs),
                     "required_rows": 0, "processed_rows": 0, "input_tokens": count,
-                    "remaining_tokens": config["execution"]["max_total_tokens"]-paid,
+                    "remaining_tokens": config["execution"]["max_total_tokens"],
                     "elapsed_seconds": paid_seconds,
                     **{name: native.get(name, 0) for name in ("queue_depth", "gpu_ready_tokens", "host_ready_tokens",
                         "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
@@ -166,7 +166,6 @@ async def collect(args):
                 item = await answer(row, selected, f"stop:{row['task_id']}:{start}",
                     future=units if start+len(fresh) < len(units) else (), mode="infoflow" if warm else "exact")
                 states.append({"features": features, "complete_scope": True, "answer": item})
-                paid += sum(unit.body_tokens for unit in fresh)
             outputs.append((row, states))
 
     try:
