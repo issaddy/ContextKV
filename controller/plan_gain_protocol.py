@@ -23,7 +23,7 @@ def input_protocol(fingerprint):
         "shared_source_protocol": SOURCE_ENCODING,
         "task_projection": "resolved_conditions_and_effective_version_scope_v1",
         "numeric_selection": "source_field_period_column_and_atomic_gap_repair_v3",
-        "need_dependencies": "need_local_read_selection_and_reduce_prerequisites_v2",
+        "need_dependencies": "source_membership_read_packets_and_need_local_dependencies_v3",
         "completion_admission": "answerable_direct_or_mandatory_need_closure_v2",
         "read_recovery": {"protocol": "durable_bounded_source_split_and_field_repair_v1",
             "max_split_depth": MAX_SPLIT_DEPTH, "max_field_repairs": MAX_FIELD_REPAIRS,

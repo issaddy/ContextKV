@@ -6,10 +6,32 @@ from controller.context_schema import (
     ContextPlan, EvidenceClaim, EvidenceKey, EvidenceSet, EvidenceUnit, Need,
     NumericReadScope, ReadResult, ReadTask, SourceSpan, TaskState,
 )
-from controller.reading import advance_read_plan, numeric_selection_step_ids, numeric_selection_tasks
+from controller.reading import advance_read_plan, build_read_plan, numeric_selection_step_ids, numeric_selection_tasks
 
 
 class NeedDependencyTests(unittest.TestCase):
+    def test_packing_preserves_need_membership_through_shared_headers(self):
+        from controller.schema import SessionSnapshot
+        from controller.templates import ByteTemplate
+
+        plan, result, claim = self.fixture()
+        numeric, lookup = plan.selected_set.selected_units
+        header = replace(numeric, unit_id="header", need_ids=(), text="shared heading",
+            source_spans=(replace(numeric.source_spans[0], span_id="header:span", start=20, end=34),))
+        selected = replace(plan.selected_set, selected_units=(
+            replace(numeric, dependencies=("header",)), lookup, header))
+        built = build_read_plan(plan.task_state, selected, "selected_sources", plan.budget,
+            template=ByteTemplate(), snapshot=SessionSnapshot("s"),
+            preferred_groups=(("numeric",), ("lookup",)))
+        first, second = built.steps
+        self.assertEqual(("sum",), first.need_ids)
+        self.assertEqual(("lookup",), second.need_ids)
+        self.assertEqual(("sum",), first.shared_numeric_scopes[0].need_ids)
+        self.assertFalse(second.shared_numeric_scopes)
+        completed = replace(result, step_id=first.step_id, covered_units=first.input_unit_ids)
+        selection, = numeric_selection_tasks(built, (completed,), (claim,))
+        self.assertEqual((first.step_id,), selection.predecessor_step_ids)
+
     def fixture(self):
         units = tuple(EvidenceUnit(identity,
             (SourceSpan(identity+":span", EvidenceKey("c", identity, "p", "v1", "hash"), 0, len(text)),),

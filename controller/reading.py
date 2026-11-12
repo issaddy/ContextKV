@@ -597,21 +597,24 @@ def read_output_reservation(state, task, units, tokenizer, *, dependency_ids=(),
         envelope["facts"] = []
     total = len(encode(json.dumps(envelope), add_special_tokens=False))
     for unit in units:
-        if unit.unit_id in dependency_ids:
+        if unit.unit_id in dependency_ids and not unit.need_ids:
             continue
         if task.shared_numeric_scopes:
             entries = max(1, len({line for line in unit.text.splitlines() if line.strip()}))
             excerpt_tokens = min(len(encode(unit.text, add_special_tokens=False)),
                                  entries*output_tokens_per_fact)
             for scope in task.shared_numeric_scopes:
+                memberships = set(scope.need_ids).intersection(unit.need_ids or scope.need_ids)
+                if not memberships:
+                    continue
                 fact = {"s": [alias for alias, identity in sources.items()
                             if identity in {span.span_id for span in unit.source_spans}],
                         "t": "", "g": scope.scope_id, "n": [alias for alias, identity in aliases.items()
-                            if identity in scope.need_ids], "e": "", "r": "", "v": None, "u": "", "p": []}
+                            if identity in memberships], "e": "", "r": "", "v": None, "u": "", "p": []}
                 total += entries*(len(encode(json.dumps(fact), add_special_tokens=False))
                                   +output_tokens_per_fact+1)+excerpt_tokens
         for need in needs:
-            if need.need_id in shared_ids:
+            if need.need_id in shared_ids or unit.need_ids and need.need_id not in unit.need_ids:
                 continue
             entries = max(1, len({line for line in unit.text.splitlines() if line.strip()}))
             fact = {"n": next(alias for alias, identity in aliases.items() if identity == need.need_id),
@@ -707,6 +710,24 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     dependency_ids = {dependency for unit in source_units.values() for dependency in unit.dependencies}
     packs, pack, assigned = [], [], set()
 
+    def packet_task(units, index):
+        roots = tuple(unit for unit in units if unit.need_ids or unit.unit_id not in dependency_ids) or units
+        active = {need for unit in roots for need in (unit.need_ids or prototype.need_ids)}
+        members = tuple(need for need in prototype.need_ids if need in active)
+        scopes = tuple(replace(scope,
+            need_ids=tuple(need for need in scope.need_ids if need in members),
+            operations=tuple(operation for need, operation in zip(scope.need_ids, scope.operations)
+                             if need in members)) for scope in prototype.shared_numeric_scopes
+            if set(scope.need_ids).intersection(members))
+        conditions = {key for need in state.needs if need.need_id in members for key in need.condition_ids}
+        return replace(prototype, step_id=f"{_step_prefix}read:{index}", need_ids=members,
+            input_unit_ids=tuple(unit.unit_id for unit in units), shared_numeric_scopes=scopes,
+            condition_ids=tuple(key for key in prototype.condition_ids if key in conditions),
+            retained_conclusion_tokens=tuple(item for item in prototype.retained_conclusion_tokens
+                                             if item[0] in members),
+            requires_reduction=any(need.need_id in members and need.operation in {
+                "enumerate", "compare", "count", "sum", "group", "infer"} for need in state.needs))
+
     def pack_closure(units):
         from .evidence_planner import close_dependencies
         lookup = {**source_units, **{unit.unit_id: unit for unit in units}}
@@ -716,12 +737,12 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
             if read_packing == "source_windows" else closed)
 
     def input_size(units):
-        task = replace(prototype, step_id=f"{_step_prefix}read:{len(packs)}")
+        task = packet_task(units, len(packs))
         return len(template.render(step_messages(plan, task, units, input_claims,
                                                  snapshot=snapshot)).input_ids)
 
     def output_size(units):
-        return read_output_reservation(state, prototype, units, template.tokenizer,
+        return read_output_reservation(state, packet_task(units, len(packs)), units, template.tokenizer,
             dependency_ids=dependency_ids, output_tokens_per_fact=output_tokens_per_fact,
             reading_mode=reading_mode)
 
@@ -806,8 +827,7 @@ def build_read_plan(state, evidence_set, coverage_scope, budget, *, template=Non
     units = tuple({unit.unit_id: unit for closed in packs for unit in closed}.values())
     steps = []
     for index, pack in enumerate(packs):
-        task = replace(prototype, step_id=f"{_step_prefix}read:{index}",
-                       input_unit_ids=tuple(unit.unit_id for unit in pack))
+        task = packet_task(pack, index)
         steps.append(replace(task, output_schema=output_schema(task, pack, input_claims,
             reading_mode=reading_mode, numeric_identity=numeric_identity)))
     if len(steps) + 1 > budget.max_steps:
@@ -1112,8 +1132,16 @@ def _header_unit(text, reported_unit):
     return next(iter(matches)) if len(matches) == 1 else None
 
 
+def normalized_fact_text(value):
+    return re.sub(r"[\W_]+", "", str(value)).casefold()
+
+
+def numeric_gap_field(gap):
+    return gap.missing_relation.removeprefix(NUMERIC_GROUNDING_GAP_PREFIX).split(" (requires", 1)[0]
+
+
 def _period_key(value):
-    return re.sub(r"(?<=\d)年", "", re.sub(r"[\W_]+", "", str(value)).casefold())
+    return re.sub(r"(?<=\d)年", "", normalized_fact_text(value))
 
 
 def _table_quantity(excerpt, relation, unit, context, period):
@@ -1135,7 +1163,8 @@ def _table_quantity(excerpt, relation, unit, context, period):
     inherited = _header_unit(context+"\n"+excerpt, unit)
     for line in excerpt.splitlines():
         row = cells(line)
-        fields = [i for i, cell in enumerate(row) if _period_key(cell) == _period_key(relation)]
+        fields = [i for i, cell in enumerate(row)
+                  if normalized_fact_text(cell) == normalized_fact_text(relation)]
         for field in fields:
             for header in headers:
                 columns = [i for i, label in enumerate(header)
@@ -1245,23 +1274,17 @@ def _ground_numeric_fact(fact, cited, units, period="current"):
 
 def _repair_target_matches(claim, gap, dependency_text=""):
     """A local repair may only publish the field/entity/period it was assigned."""
-    def normalize(text):
-        return re.sub(r"[\W_]+", "", str(text)).casefold()
-
-    relation = gap.missing_relation.removeprefix(NUMERIC_GROUNDING_GAP_PREFIX).split(" (requires", 1)[0]
-    if normalize(claim.relation) != normalize(relation):
+    if normalized_fact_text(claim.relation) != normalized_fact_text(numeric_gap_field(gap)):
         return False
-    if gap.bound_entities and normalize(claim.entity) not in {normalize(entity) for entity in gap.bound_entities}:
+    if gap.bound_entities and normalized_fact_text(claim.entity) not in set(map(normalized_fact_text, gap.bound_entities)):
         return False
     if gap.temporal_scope in {"", "current"}:
         return True
     quantity = _table_quantity(claim.text, claim.relation, claim.unit, dependency_text, gap.temporal_scope)
     if quantity is not None:
-        from decimal import Decimal
-        from .reduction import UNIT_FACTORS
+        from .reduction import canonical_quantity
         return (claim.value is not None
-                and Decimal(str(quantity[0]).replace(",", "")) == Decimal(str(claim.value).replace(",", ""))
-                and UNIT_FACTORS.get(quantity[1], quantity[1]) == UNIT_FACTORS.get(claim.unit, claim.unit))
+                and canonical_quantity(*quantity) == canonical_quantity(claim.value, claim.unit))
     # The selected fact establishes its data period; source version remains provenance.
     years = set(re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", gap.temporal_scope))
     text = claim.text if re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", claim.text) else dependency_text
@@ -1273,7 +1296,7 @@ def _repair_target_matches(claim, gap, dependency_text=""):
         if _period_key(gap.temporal_scope) not in years:
             return _period_key(gap.temporal_scope) in _period_key(text) and observed <= years
         return bool(years.intersection(observed)) and observed <= years
-    return not years and normalize(gap.temporal_scope) in normalize(claim.version)
+    return not years and normalized_fact_text(gap.temporal_scope) in normalized_fact_text(claim.version)
 
 
 def _delimited_numeric_records(units):
@@ -1367,8 +1390,8 @@ def project_named_numeric_records(plan, snapshot):
     return ReadingOutcome(replace(plan, steps=(step,)), results=(result,), claims=claims)
 
 
-def read_need_periods(state, history):
-    view = resolved_task_view(state, history)
+def read_need_periods(state, history, *, need_ids=None):
+    view = resolved_task_view(state, history, need_ids=need_ids)
     times = {item["id"]: " ".join(item["values"]) for item in view["conditions"]
              if item["relation"] == "TIME" and item["values"]}
     periods = {}
@@ -1415,9 +1438,9 @@ def parse_read_result(task, text, units=(), claims=(), *, elapsed_ms=0, input_to
 
     def period_for(need_ids, entity, relation):
         targets = {gap.temporal_scope for gap in task.repair_gaps
-            if gap.need_id in need_ids and (not gap.bound_entities or entity in gap.bound_entities)
-            and _period_key(relation) == _period_key(
-                gap.missing_relation.removeprefix(NUMERIC_GROUNDING_GAP_PREFIX).split(" (requires", 1)[0])}
+            if gap.need_id in need_ids and (not gap.bound_entities
+                or normalized_fact_text(entity) in set(map(normalized_fact_text, gap.bound_entities)))
+            and normalized_fact_text(relation) == normalized_fact_text(numeric_gap_field(gap))}
         values = targets or {periods[need] for need in need_ids if need in periods}
         return next(iter(values)) if len(values) == 1 else "current"
 

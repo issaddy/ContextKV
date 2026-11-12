@@ -605,7 +605,7 @@ class ReadingExecutor:
                         parse_read_result(task, generation.text, units, claims,
                             elapsed_ms=generation.elapsed_ms or 0, input_tokens=len(candidate.input_ids),
                             output_tokens=len(generation.output_ids),
-                            need_periods=read_need_periods(plan.task_state, snapshot.raw_history)
+                            need_periods=read_need_periods(plan.task_state, snapshot.raw_history, need_ids=task.need_ids)
                                 if task.kind == "READ" else None))
                 except (ValueError, KeyError, TypeError) as exc:
                     if task.kind != "READ" or text_callback:

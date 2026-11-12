@@ -12,7 +12,8 @@ import re
 
 from .context_schema import NumericReadScope, ReadTask
 from .context_budget import completed_source_coverage
-from .reading import _period_key, _repair_target_matches, unresolved_needs
+from .reading import (_period_key, _repair_target_matches, normalized_fact_text as _norm,
+                      numeric_gap_field as _field, unresolved_needs)
 from .serialization import dumps
 
 
@@ -28,14 +29,6 @@ def _id(*values):
 
 def gap_key(gap):
     return gap.need_id, gap.missing_relation, gap.bound_entities, gap.temporal_scope
-
-
-def _field(gap):
-    return gap.missing_relation.removeprefix("numeric_grounding_failed: ").split(" (requires", 1)[0]
-
-
-def _norm(text):
-    return re.sub(r"[\W_]+", "", str(text)).casefold()
 
 
 def _slices(unit, plan, tokenizer, *, targeted=None, split=False):
