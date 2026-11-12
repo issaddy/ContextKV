@@ -12,7 +12,7 @@ def candidate_sets(unit_ids):
 def numbered_text(text):
     import re
     words = tuple(re.finditer(r"[\u3400-\u9fff]|\w+|[^\w\s]", text))
-    return [f"{index}:{word.group()}" for index, word in enumerate(words)], tuple(word.span() for word in words)
+    return " ".join(f"{index}:{word.group()}" for index, word in enumerate(words)), tuple(word.span() for word in words)
 
 
 def numbered_sources(units):

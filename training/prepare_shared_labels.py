@@ -48,7 +48,7 @@ entity identifiers, periods, units and constraints required to compute the reque
 Use condition_id to link filter/period columns to a declared query condition.
 relation_group identifies matching join keys across tables; leave it empty for non-join fields.
 Label supporting evidence, necessary complementary evidence and explicit computation fields.
-The reference answer and author source spans are offline labeling aids. Every output span must exist in a supplied unit."""
+The reference answer is an offline labeling aid. Bind only words in the supplied numbered sources."""
 
 
 def numbered_messages(row):
@@ -193,16 +193,19 @@ async def prepare_labels(args):
     endpoints = cycle(args.endpoint)
     async with httpx.AsyncClient(timeout=None) as client:
         async def complete(instruction, value, schema):
-            async with semaphore:
-                response = await client.post(next(endpoints).rstrip("/")+"/v1/chat/completions", json={
-                    "model": args.teacher_model, "messages": [{"role": "system", "content": instruction},
-                        {"role": "user", "content": json.dumps(value, ensure_ascii=False)}],
-                    "temperature": 0, "max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": False},
-                    "response_format": {"type": "json_schema", "json_schema": {"name": "labels", "schema": schema}}})
-                response.raise_for_status()
-                return json.loads(response.json()["choices"][0]["message"]["content"])
+            response = await client.post(next(endpoints).rstrip("/")+"/v1/chat/completions", json={
+                "model": args.teacher_model, "messages": [{"role": "system", "content": instruction},
+                    {"role": "user", "content": json.dumps(value, ensure_ascii=False)}],
+                "temperature": 0, "max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": False},
+                "response_format": {"type": "json_schema", "json_schema": {"name": "labels", "schema": schema}}})
+            response.raise_for_status()
+            return json.loads(response.json()["choices"][0]["message"]["content"])
 
         async def annotate(row):
+            async with semaphore:
+                await label_state(row)
+
+        async def label_state(row):
             messages, message_locations = numbered_messages(row)
             task = await complete(TASK_INSTRUCTION, {"messages": messages,
                 "current_message_id": messages[-1]["message_id"], "catalogue": row["catalogue"]},
