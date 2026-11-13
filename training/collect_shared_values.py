@@ -102,6 +102,15 @@ async def collect(args):
         await sampler.start()
     outputs, answers, windows = [], [], {}
     limit = asyncio.Semaphore(args.concurrency)
+    path = Path(args.output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    records = []
+
+    def save_record(record):
+        records.append(record)
+        with path.open("a") as output:
+            output.write(json.dumps(record, ensure_ascii=False)+"\n")
 
     def state_for(query, encoded, observed, all_units, identity):
         blocks = source_blocks(observed)
@@ -148,7 +157,10 @@ async def collect(args):
                     branch = replace(state, selected_ids=chosen, cache_scope=identity, cache_namespace=identity)
                     item = await answer(row, branch, snapshot, identity, totals)
                     observations.append((chosen, item))
-                outputs.append(({**row, "completed_needs": sorted(state.completed_needs)}, observations))
+                await score_answers([item for _, item in observations], run.engine.base_url,
+                    model=run.model.name, concurrency=args.concurrency)
+                save_record({**row, "completed_needs": sorted(state.completed_needs),
+                    "sets": [{"unit_ids": chosen, "quality": item["quality"]} for chosen, item in observations]})
                 return
             from controller.value_policy import StopValueHead
             paid_seconds = time.monotonic()-started
@@ -203,28 +215,19 @@ async def collect(args):
         attributed = attribute_physical(sampler.samples, windows)
         for item in answers:
             item["costs"].update(attributed[item["call_id"]])
-    await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
-    records = []
+        await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
     for row, observed in outputs:
-        if args.stage == "sets":
-            sets = [{"unit_ids": chosen, "quality": item["quality"]}
-                    for chosen, item in observed]
-            records.append({**row, **({"sets": sets} if sets else {})})
-        else:
-            states = []
-            for state in observed:
-                item = state["answer"]
-                value = {"features": state["features"],
-                         "stop": {"quality": item["quality"], **item["costs"]}}
-                if "transition_id" in state:
-                    identity = state["transition_id"]
-                    value["transition"] = {"seconds": windows[identity][1]-windows[identity][0], **attributed[identity]}
-                states.append(value)
-            records.append({"task_id": row["task_id"], "conversation_id": row["conversation_id"],
-                            "split": row["split"], "states": states})
-    path = Path(args.output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in records))
+        states = []
+        for state in observed:
+            item = state["answer"]
+            value = {"features": state["features"],
+                     "stop": {"quality": item["quality"], **item["costs"]}}
+            if "transition_id" in state:
+                identity = state["transition_id"]
+                value["transition"] = {"seconds": windows[identity][1]-windows[identity][0], **attributed[identity]}
+            states.append(value)
+        save_record({"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+                     "split": row["split"], "states": states})
     return {"states": len(records), "answers": len(answers), "output": str(path)}
 
 
