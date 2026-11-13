@@ -1,6 +1,6 @@
 # ContextKV 运行手册
 
-当前版本使用共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。共享索引及 190 个训练状态、39 个开发状态的查询训练已完成，字段与收益资产正在绑定更新。普通 RAG 四项 benchmark 各 10 题已完成生成与评分，ContextKV 与 LlamaIndex 对照尚未完成。SGLang 精确生成、独立块构建、GPU 热复用及 Host 备份已实际跑通。
+当前版本已接通共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。查询 LoRA 与任务头完成 190 个训练状态的训练，字段/集合头完成 54 个训练状态的训练，停止头完成 34 个训练轨迹的训练；对应开发集分别为 39、23、13。新资产下，ContextKV 四项 benchmark 各 2 题以及真实历史 2 轮全部交付，LlamaIndex 各 2 题也已交付。普通 RAG 复用已完成的各 10 题结果。SGLang 精确生成、独立块构建、GPU 热复用及 Host 备份已实际跑通。
 
 ## 路径与环境
 
@@ -24,7 +24,7 @@
 | VersionQA | `data/evaluation/versionqa/references.jsonl`、`corpus.jsonl` | 作者二值 rubric |
 | Loong Set1 | `data/loong/set1-v2/tasks.jsonl`，每题附带文档 | 作者百分制 rubric、Perfect Rate |
 
-导入入口为 `adapters.doc2dial`、`adapters.prepare_data`、`bench.versionqa`、`adapters.loong`。已有原始资料与标准题目直接复用。稠密索引使用冻结 Qwen Embedding，需要与本版骨干重新建立；Loong 的随题资料在注册后建立来源索引。
+导入入口为 `adapters.doc2dial`、`adapters.prepare_data`、`bench.versionqa`、`adapters.loong`。已有原始资料与标准题目直接复用。三项公开 corpus 的冻结 Qwen Embedding 索引已建立，查询 LoRA 更新不需要重建文档索引；Loong 的随题资料在注册后建立来源索引。
 
 ## 辅助训练
 
@@ -116,4 +116,4 @@ python3 -m bench.study evaluate \
 
 Qwen token 仅统计固定生成模型的调用；辅助编码费用计入完整响应、辅助耗时与物理占用。评分结束后清理临时原文评分输入和会话数据库，不保存候选计划、逐步恢复日志或重复归档。
 
-[已有实测结果](final_results.md)及 `results/` 两份 JSON 保留重构前实验结论。本轮效果以以上新资产运行后产生的结果为准。
+[本轮小跑结果](shared_smoke.md)包含同题质量、完整响应及批次资源。[已有实测结果](final_results.md)及对应 JSON 保留重构前实验结论。

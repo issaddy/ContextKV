@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import statistics
 import subprocess
 import sys
 from threading import Lock, Thread
@@ -286,6 +287,10 @@ def _record_metrics(record, spec, settings):
         for suffix in ("", "_idk", "_idk_underspecified"):
             if "RB_agg"+suffix in metrics:
                 metrics["RB_alg"+suffix] = metrics["RB_agg"+suffix]
+        retained = {name+suffix for name in ("RL_F", "RB_llm", "RB_alg")
+                    for suffix in ("", "_idk", "_idk_underspecified")}
+        metrics = {key: statistics.fmean(value) if isinstance(value, (list, tuple)) else value
+                   for key, value in metrics.items() if key in retained}
     if primary in {"loong_reference_score", "versionqa_accuracy"} and observed(record.get("score")):
         metrics[primary] = record["score"]
         if primary == "loong_reference_score":
