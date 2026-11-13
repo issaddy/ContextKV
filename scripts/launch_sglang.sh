@@ -6,10 +6,6 @@ export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
 export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
 export SGLANG_HICACHE_TMA_TRANSFER="${SGLANG_HICACHE_TMA_TRANSFER:-0}"
 HICACHE_ARGS=()
-JSON_ARGS=()
-if [[ "${CONTEXTKV_JSON_FORMAT:-compact}" == compact ]]; then
-  JSON_ARGS=(--constrained-json-disable-any-whitespace)
-fi
 if [[ "${CONTEXTKV_ENABLE_HICACHE:-1}" == 1 ]]; then
   HICACHE_ARGS=(--enable-hierarchical-cache
     --hicache-size "${CONTEXTKV_HICACHE_GB:-16}" --hicache-write-policy "${CONTEXTKV_WRITE_POLICY:-write_through}"
@@ -24,4 +20,4 @@ exec python3 "$PROJECT_ROOT/engine_patches/contextkv_model_scope.py" \
   --radix-eviction-policy priority \
   --page-size "${CONTEXTKV_PAGE_SIZE:-64}" \
   --enable-metrics ${HICACHE_ARGS[@]+"${HICACHE_ARGS[@]}"} \
-  ${JSON_ARGS[@]+"${JSON_ARGS[@]}"} "$@"
+  --constrained-json-disable-any-whitespace "$@"

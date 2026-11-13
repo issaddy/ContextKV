@@ -458,7 +458,7 @@ class CooperativeController:
                 system_prompt=self.policy.system_prompt or SYSTEM)
             full_selection = {identity: list(range(spec["maxItems"]))
                               for identity, spec in projection.schema["properties"].items()}
-            output_tokens = len(encode(json.dumps(full_selection, separators=(",", ":")),
+            output_tokens = len(encode(json.dumps(full_selection),
                                        add_special_tokens=False))+1
             allowance = self._reading_allowance(state, snapshot, request, output_tokens)
             if not allowance:
