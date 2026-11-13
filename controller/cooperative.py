@@ -145,7 +145,7 @@ class CooperativeController:
                 computations = list(state.reused_claims)
                 computed_needs = {item["need_id"] for item in computations if item["complete"]}
                 required = {need.need_id for need in state.query.task.needs
-                            if need.operation in {"count", "sum", "group", "mean", "min", "max"}}
+                            if need.operation in {"count", "sum", "mean", "min", "max"}}
                 population = state.query.task.coverage_scope == "all_supplied_documents"
                 while True:
                     if not population:

@@ -520,6 +520,8 @@ def build_programs(query, evidence, index):
                 remaining.remove(connected)
             if not joins:
                 continue
+        if need.operation == "group" and not grouping:
+            continue
         population = tuple(index.tables) if need.scope == "all_supplied_documents" else tuple(
             projection.table_id for projection in projections)
         unresolved = tuple(identity for identity in need.condition_ids

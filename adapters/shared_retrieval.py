@@ -229,7 +229,8 @@ class SharedEvidenceProvider:
                     pending_dependencies.append(identity)
         initial = tuple(unit for unit in units if unit.unit_id in initial_ids)
         pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
-        evidence = self.evidence_encoder.encode(query, () if full and not numeric else initial)
+        encoded_units = (tuple(unit for unit in initial if numeric and unit.table_id) if full else initial)
+        evidence = self.evidence_encoder.encode(query, encoded_units)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
         selected = ()
         if complete_population and not full:
