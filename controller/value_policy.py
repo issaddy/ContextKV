@@ -8,11 +8,11 @@ from torch import nn
 
 
 STATE_FIELDS = (
-    "remaining_sources", "open_needs", "required_rows", "processed_rows",
-    "input_tokens", "remaining_tokens", "elapsed_seconds", "queue_depth",
-    "gpu_ready_tokens", "host_ready_tokens", "prefill_token_ms", "transfer_token_ms", "answer_cost_ms",
+    "remaining_source_fraction", "open_need_fraction", "unread_row_fraction",
+    "context_fraction", "remaining_token_fraction", "elapsed_seconds", "queue_depth",
+    "gpu_ready_fraction", "host_ready_fraction", "prefill_token_ms", "transfer_token_ms", "answer_cost_ms",
 )
-SUMMARY_SIZE = 1540
+SUMMARY_SIZE = 16
 VALUE_FIELDS = ("quality", "seconds", "gpu_gib_seconds", "host_gib_seconds")
 
 
@@ -31,7 +31,7 @@ class ValuePrices:
 class StopValueHead(nn.Module):
     """Two terminal-return predictions; costs include all work after this state."""
 
-    def __init__(self, summary_size=SUMMARY_SIZE, hidden_size=128):
+    def __init__(self, summary_size=SUMMARY_SIZE, hidden_size=32):
         super().__init__()
         self.summary_size, self.hidden_size = summary_size, hidden_size
         self.network = nn.Sequential(

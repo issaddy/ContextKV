@@ -120,20 +120,20 @@ class EvidenceEncoding:
         return EvidenceEncoding((*self.unit_ids, *other.unit_ids), embeddings, relevance,
             (*self.bindings, *other.bindings), self.heads, usage=other.usage, query_sum=query_sum)
 
-    def summary(self, selected_ids):
+    def summary(self, selected_ids, units, need_ids, completed=()):
         import torch
         selected = set(selected_ids)
         mask = torch.tensor([identity in selected for identity in self.unit_ids],
                             device=self.embeddings.device, dtype=torch.bool)
-        chosen, rest = self.embeddings[mask], self.embeddings[~mask]
-        zero = self.embeddings.new_zeros(self.embeddings.shape[-1])
-        mean = chosen.mean(0) if len(chosen) else zero
-        maximum = chosen.max(0).values if len(chosen) else zero
-        remaining = rest.mean(0) if len(rest) else zero
-        stats = self.embeddings.new_tensor([len(chosen), len(rest),
-            self.relevance[mask].mean().item() if len(chosen) else 0.,
-            self.relevance[~mask].mean().item() if len(rest) else 0.])
-        return torch.cat((mean, maximum, remaining, stats))
+        if not len(mask):
+            return self.embeddings.new_zeros(16)
+        support, known = self.need_support(units, need_ids, completed)
+        features = self.heads.features(self.embeddings, self.relevance, mask[None], support, known)[0]
+        rest = self.relevance[~mask]
+        remaining = self.embeddings.new_tensor([
+            float(rest.max()) if len(rest) else 0., float(rest.mean()) if len(rest) else 0.,
+            len(selected)/len(mask), len(rest)/len(mask)])
+        return torch.cat((features, remaining))
 
     def need_support(self, units, need_ids, completed=()):
         """Use the shared field bindings as soft support, with computed Needs already known."""
@@ -150,55 +150,40 @@ class EvidenceEncoding:
                         support[i, j] = max(float(support[i, j]), binding.score)
         return support, self.embeddings.new_tensor([identity in completed for identity in need_ids])
 
-    def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0, need_ids=(), completed=()):
-        """Choose a dependency-closed set using semantic gain and actual acquisition cost."""
-        import numpy as np
-        import torch
+    def frontier(self, units):
+        """Nested relevance-ranked sets, each containing its source dependencies."""
         by_id = {unit.unit_id: unit for unit in units}
-        positions = {identity: index for index, identity in enumerate(self.unit_ids)}
-        count = len(self.unit_ids)
-        if not count:
+        order = sorted(range(len(self.unit_ids)), key=lambda i: -float(self.relevance[i]))
+        active, seen, sets = [], set(), [()]
+        def add(identity):
+            if identity in seen:
+                return
+            seen.add(identity)
+            for dependency in by_id[identity].dependencies:
+                add(dependency)
+            active.append(identity)
+        for index in order:
+            before = len(active)
+            add(self.unit_ids[index])
+            if len(active) != before:
+                sets.append(tuple(active))
+        return tuple(sets)
+
+    def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0, need_ids=(), completed=()):
+        """Price one information frontier, then compile only its chosen context."""
+        import torch
+        if not self.unit_ids or body_tokens <= 0:
             return ()
-        consumers = [[] for _ in self.unit_ids]
-        for unit in units:
-            for dependency in unit.dependencies:
-                consumers[positions[dependency]].append(positions[unit.unit_id])
-        closures = []
-        for root in range(count):
-            pending, members = [root], set()
-            while pending:
-                member = pending.pop()
-                if member not in members:
-                    members.add(member)
-                    pending.extend(consumers[member])
-            closures.append(tuple(members))
-        tokens = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids])
+        sizes = {unit.unit_id: unit.body_tokens for unit in units}
+        candidates = [ids for ids in self.frontier(units) if sum(sizes[i] for i in ids) <= body_tokens]
+        masks = torch.tensor([[identity in ids for identity in self.unit_ids] for ids in candidates],
+                             device=self.embeddings.device, dtype=torch.bool)
         support, known = self.need_support(units, need_ids, completed)
-        active = np.ones(count, dtype=bool)
         with torch.no_grad():
-            while active.any():
-                alternatives = []
-                for members in closures:
-                    trial = active.copy()
-                    trial[list(members)] = False
-                    if not np.array_equal(trial, active):
-                        alternatives.append(trial)
-                if not alternatives:
-                    break
-                masks = np.unique(np.stack([active, *alternatives]), axis=0)
-                masks = np.concatenate((active[None], masks[~np.all(masks == active, axis=1)]))
-                values = self.heads.utility(self.embeddings, self.relevance,
-                    torch.as_tensor(masks, device=self.embeddings.device), support, known).cpu().numpy()
-                costs = (np.asarray([cost_model.estimate(tuple(identity for identity, keep in
-                    zip(self.unit_ids, mask) if keep)) for mask in masks]) if cost_model else np.zeros(len(masks)))
-                objectives = values - seconds_price * costs / 1000
-                sizes = masks @ tokens
-                gains = objectives[1:] - objectives[0]
-                index = int((gains/(sizes[0]-sizes[1:])).argmax() if sizes[0] > body_tokens else gains.argmax())
-                if sizes[0] <= body_tokens and gains[index] <= 0:
-                    break
-                active = masks[index+1]
-        selected = tuple(identity for identity, keep in zip(self.unit_ids, active) if keep)
+            values = self.heads.utility(self.embeddings, self.relevance, masks, support, known)
+            costs = values.new_tensor([cost_model.estimate(ids) if cost_model else 0. for ids in candidates])
+            best = int((values-seconds_price*costs/1000).argmax())
+        selected = candidates[best]
         return cost_model.order(selected) if cost_model else selected
 
 def _spans(labels, coordinates):

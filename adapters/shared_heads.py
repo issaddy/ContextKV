@@ -15,7 +15,6 @@ TEMPORAL_RELATIONS = ("at", "before", "after")
 EDGE_KINDS = ("subject", "condition", "predecessor", "value")
 FIELD_ROLES = ("source", "measure", "entity", "period", "group", "filter", "unit", "version")
 FILTER_OPERATORS = ("eq", "ne", "lt", "le", "gt", "ge", "in", "contains")
-STATE_DIM = 1540
 
 
 class ScaledBilinear(nn.Bilinear):
@@ -87,8 +86,9 @@ class EvidenceHeads(nn.Module):
         # The product gives each Need its own token ordering in each BIO/role logit.
         return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
 
-    def utility(self, embeddings, relevance, selected, support, completed):
-        """Predict answer gain from relevance, semantic coverage and remaining Needs."""
+    @staticmethod
+    def features(embeddings, relevance, selected, support, completed):
+        """Size-independent information state shared by selection and stopping."""
         selected = selected.bool()
         mask = selected.to(embeddings.dtype)
         count = mask.sum(-1, keepdim=True)
@@ -111,12 +111,17 @@ class EvidenceHeads(nn.Module):
             known = completed.mean().expand_as(count)
         else:
             need_mean = need_min = known = torch.zeros_like(count)
-        features = torch.cat((maximum, minimum, total/count.clamp_min(1), total,
-            count.log1p(), redundancy, covered, need_mean, need_min, known,
-            count.new_full(count.shape, float(support.shape[1])).log1p(), (count > 0).to(mask.dtype)), -1)
+        return torch.cat((maximum, minimum, total/count.clamp_min(1),
+            total/(1+total.abs()), count/(count+1), redundancy, covered, need_mean, need_min, known,
+            count.new_full(count.shape, support.shape[1]/(support.shape[1]+1)),
+            (count > 0).to(mask.dtype)), -1)
+
+    def utility(self, embeddings, relevance, selected, support, completed):
+        """Predict additional answer quality beyond the already known facts."""
+        features = self.features(embeddings, relevance, selected, support, completed)
         values = self.set_utility(features).sigmoid()
         empty_features = torch.zeros_like(features)
-        empty_features[:, 7:10] = known
+        empty_features[:, 7:10] = features[:, 9:10]
         if support.shape[1]:
             empty_features[:, 8] = completed.min()
         empty_features[:, 10] = features[:, 10]

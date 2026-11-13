@@ -56,6 +56,8 @@ class SharedEvidenceState:
     processed_tables: set = field(default_factory=set)
     resolved_operations: dict = field(default_factory=dict)
     prepared_programs: tuple = ()
+    totals: dict | None = None
+    budget_exhausted: bool = False
     cache_scope: str = "shared"
     cache_namespace: str | None = None
 

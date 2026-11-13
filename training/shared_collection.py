@@ -4,11 +4,11 @@ from __future__ import annotations
 from controller.source_windows import numbered_text
 
 
-def candidate_sets(unit_ids):
-    """Nested evidence and removal interventions for complementary/redundant material."""
-    ids = tuple(unit_ids)
-    variants = ((), ids[:1], ids[:2], ids[:4], ids, ids[1:])
-    return tuple(dict.fromkeys(variants))
+def candidate_sets(frontier):
+    """Sample the same dependency-closed information frontier used online."""
+    last = len(frontier)-1
+    indices = sorted({0, min(1, last), min(2, last), last//2, max(0, last-2), last})
+    return tuple(frontier[index] for index in indices)
 
 
 def numbered_sources(units):

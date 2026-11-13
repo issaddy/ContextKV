@@ -112,20 +112,23 @@ async def collect(args):
         with path.open("a") as output:
             output.write(json.dumps(record, ensure_ascii=False)+"\n")
 
-    def state_for(query, encoded, observed, all_units, identity):
+    def state_for(query, encoded, observed, all_units, identity, totals):
         blocks = source_blocks(observed)
         state = SharedEvidenceState(replace(query), encoded, EvidencePool(tuple(observed), blocks), (),
             DocumentIndex.from_blocks(source_blocks(all_units)), body_tokens=config["selection"]["body_tokens"],
             population_units=tuple(observed) if query.task.coverage_scope == "all_supplied_documents" else (),
-            cache_scope=identity, cache_namespace=identity)
+            cache_scope=identity, cache_namespace=identity, totals=totals)
         SharedEvidenceProvider._finish_state(state)
         return state
 
     async def answer(row, state, snapshot, identity, previous_totals):
         started = time.monotonic()
         totals = dict(previous_totals)
+        state = replace(state, totals=totals)
         complete = controller.executor(identity, identity, totals,
             cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
+        if args.stage == "sets":
+            await controller.read_required(state, snapshot, complete)
         request = await controller.answer_request(state, snapshot, complete)
         result = await complete(request, "answer")
         item = {"source": row, "answer": result["text"]}
@@ -147,14 +150,14 @@ async def collect(args):
             totals = execution_totals()
             if args.stage == "sets":
                 encoded = await asyncio.to_thread(evidence_encoder.encode, query, units)
-                state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare")
-                complete = controller.executor(state.cache_scope, state.cache_scope, totals,
-                    cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
-                await controller.read_required(state, snapshot, complete)
+                state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare", totals)
                 observations = []
-                for number, chosen in enumerate(candidate_sets(encoded.unit_ids)):
+                for number, chosen in enumerate(candidate_sets(encoded.frontier(units))):
                     identity = f"sets:{row['task_id']}:{number}"
-                    branch = replace(state, selected_ids=chosen, cache_scope=identity, cache_namespace=identity)
+                    branch = replace(state, query=replace(state.query), selected_ids=chosen,
+                        read_units=set(state.read_units), processed_tables=set(state.processed_tables),
+                        resolved_operations=dict(state.resolved_operations),
+                        cache_scope=identity, cache_namespace=identity)
                     item = await answer(row, branch, snapshot, identity, totals)
                     observations.append((chosen, item))
                 await score_answers([item for _, item in observations], run.engine.base_url,
@@ -182,7 +185,7 @@ async def collect(args):
                 encoded = new if encoded is None else encoded.merge(new)
                 observed = units[:start+len(fresh)]
                 if state is None:
-                    state = state_for(query, encoded, observed, units, branch_id)
+                    state = state_for(query, encoded, observed, units, branch_id, totals)
                 else:
                     state = replace(state, evidence=encoded, pool=EvidencePool(observed, source_blocks(observed)),
                         costs=None, cache_scope=branch_id, cache_namespace=branch_id)
@@ -196,7 +199,8 @@ async def collect(args):
                 paid_seconds += windows[transition_id][1]-first
                 if states:
                     states[-1]["transition_id"] = transition_id
-                features = StopValueHead.features(encoded.summary(state.selected_ids),
+                features = StopValueHead.features(encoded.summary(state.selected_ids, state.pool.units,
+                    tuple(need.need_id for need in state.query.task.needs), state.completed_needs),
                     controller._value_state(state, totals, time.monotonic()-paid_seconds, branch_id)).cpu().tolist()
                 item = await answer(row, state, snapshot, branch_id, totals)
                 states.append({"features": features, "answer": item})
