@@ -91,23 +91,31 @@ class EvidenceCosts:
     """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
 
     def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
-                 output_tokens, policy, mode="auto"):
+                 output_tokens, policy, mode="auto", source_headers=()):
         self.sources, self.lengths = {}, {}
+        self.headers = tuple(source_address(block) for block in source_headers)
+        self.covered_headers = {}
+        self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
+                            for block in source_headers)
         for unit in units:
             blocks = blocks_for_units((unit,), source_blocks)
             self.sources[unit.unit_id] = tuple(source_address(block) for block in blocks)
+            missing = with_document_headers(blocks, source_headers)[:-len(blocks)]
+            self.covered_headers[unit.unit_id] = set(self.headers)-{source_address(block) for block in missing}
             self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
                                 for block in blocks)
         self.snapshot = snapshot
         self.costs = {**policy["costs"], **snapshot["costs"]}
-        self.prompt_tokens = prompt_tokens
+        self.prompt_tokens = prompt_tokens-sum(self.lengths[address] for address in self.headers)
         self.output_tokens = min(output_tokens, snapshot["output_tokens"] or output_tokens)
         self.ratio = policy["recompute_ratio"]
         self.quality_cost = policy.get("quality_loss", 0) * policy.get("quality_price_ms", 0)
         self.mode = mode
 
     def addresses(self, ids):
-        return tuple(dict.fromkeys(address for identity in ids for address in self.sources[identity]))
+        covered = set().union(*(self.covered_headers[identity] for identity in ids))
+        return tuple(dict.fromkeys((*(address for address in self.headers if address not in covered),
+            *(address for identity in ids for address in self.sources[identity]))))
 
     def _native(self, addresses):
         costs = self.costs
@@ -126,7 +134,7 @@ class EvidenceCosts:
         best, price = ids, self._native(self.addresses(ids))
         owners = {source: identity for identity in ids for source in self.sources[identity]}
         for prefix in self.snapshot["prefixes"]:
-            chain = prefix["source_ids"]
+            chain = [address for address in prefix["source_ids"] if address not in self.headers]
             if all(source in owners for source in chain):
                 front = tuple(dict.fromkeys(owners[source] for source in chain))
                 ordered = (*front, *(identity for identity in ids if identity not in front))

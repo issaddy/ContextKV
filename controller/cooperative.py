@@ -389,11 +389,11 @@ class CooperativeController:
         units = () if closed else state.pool.units
         blocks = blocks_for_units(units, state.pool.source_blocks)
         native = (state.costs.snapshot if state.costs is not None else
-            await self.engine.evidence_state(tuple(source_address(block) for block in blocks),
+            await self.engine.evidence_state(tuple(source_address(block) for block in (*state.source_headers, *blocks)),
                 cache_scope=state.cache_scope, cache_namespace=state.cache_namespace))
         state.costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
             native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
-            policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"))
+            policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers)
         state.selected_ids = (() if closed else state.evidence.select(units, body_tokens=budget,
             cost_model=state.costs, seconds_price=self.prices.seconds,
             need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed))
