@@ -8,8 +8,32 @@ import re
 from typing import Any
 
 from adapters.table_relations import extract_table_relations
-from controller.context_schema import EvidenceClaim, EvidenceUnit, SourceSpan
-from controller.reduction import UNIT_FACTORS, canonical_quantity
+from controller.schema import EvidenceClaim, EvidenceUnit, SourceSpan
+
+
+# Factors use canonical SI units, with time quantities canonicalized to seconds.
+UNIT_FACTORS = {
+    "": ("", Decimal(1)), "1": ("", Decimal(1)),
+    "kg": ("g", Decimal(1000)), "g": ("g", Decimal(1)),
+    "mg": ("g", Decimal("0.001")),
+    "km": ("m", Decimal(1000)), "m": ("m", Decimal(1)),
+    "cm": ("m", Decimal("0.01")),
+    "h": ("s", Decimal(3600)), "min": ("s", Decimal(60)),
+    "s": ("s", Decimal(1)),
+    "美元": ("USD", Decimal(1)), "USD": ("USD", Decimal(1)),
+    "元": ("CNY", Decimal(1)), "CNY": ("CNY", Decimal(1)),
+    "万元": ("CNY", Decimal(10000)),
+    "credit": ("credit", Decimal(1)), "credits": ("credit", Decimal(1)),
+    "Credit": ("credit", Decimal(1)), "Credits": ("credit", Decimal(1)),
+}
+
+
+def canonical_quantity(value, unit):
+    canonical, factor = UNIT_FACTORS.get(unit, (unit, Decimal(1)))
+    literal = str(value)
+    if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", literal):
+        literal = literal.replace(",", "")
+    return canonical, Decimal(literal) * factor
 
 
 @dataclass(frozen=True)
@@ -650,7 +674,7 @@ def semantic_projection_schema(unit_ids, need_ids):
 
 def decode_projection(text, query, units, need_ids, population_unit_ids):
     import json
-    from controller.context_schema import EvidenceBlock
+    from controller.schema import EvidenceBlock
     data = json.loads(text)
     units_by_id = {f"S{index+1}": unit for index, unit in enumerate(units)}
 
@@ -699,7 +723,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
 def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
     """Read only requested fields and eligibility once; use CPU aggregation afterwards."""
     import json
-    from controller.context_schema import EvidenceBlock
+    from controller.schema import EvidenceBlock
     units, need_ids = tuple(units), tuple(need_ids)
     population = tuple(population_unit_ids) if population_unit_ids is not None else tuple(unit.unit_id for unit in units)
     blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,

@@ -1,4 +1,4 @@
-"""Prepare, run, freeze and report the task-driven evidence/reading study."""
+"""Run document QA methods and report each benchmark's quality and cost."""
 from __future__ import annotations
 
 import argparse
@@ -20,6 +20,18 @@ from controller.config import apply_study_config, create_controller, load_config
 from controller.schema import (Message, OnlineContext, OnlineMessage, OnlineTurn,
                                from_history_messages, history_messages)
 from controller.serialization import dumps, to_jsonable
+
+
+def official_record(turn: OnlineTurn, answer: str) -> dict:
+    """Export the delivered answer and its actual reading material for scoring."""
+    contexts = [{"document_id": c.document_id, "source": c.source, "score": c.score or 0.0,
+                 "text": c.text, "title": c.title} for c in turn.contexts]
+    messages = [{"speaker": "user" if m.speaker == "user" else "agent", "text": m.text} for m in turn.history]
+    messages.append({"speaker": "user", "text": turn.query})
+    record = {"task_id": turn.task_id, "conversation_id": turn.conversation_id,
+            "Collection": turn.collection, "input": messages,
+            "contexts": contexts, "predictions": [{"text": answer}]}
+    return record
 
 
 def read_jsonl(path):
@@ -101,8 +113,7 @@ def method_config(config, method, dataset, split):
 
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
                       limit_conversations=None, limit_turns=2):
-    from adapters.study_retrieval import create_study_retriever
-    from bench.quality import official_record
+    from adapters.providers import create_evidence_provider
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.evidence import make_evidence
     from controller.qa import DocumentQA
@@ -128,7 +139,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     if "answer_system_prompt" in spec:
         run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     service = create_controller(run)
-    provider = await asyncio.to_thread(create_study_retriever, config, service.template)
+    provider = await asyncio.to_thread(create_evidence_provider, config, service.template)
     qa = DocumentQA(service, provider)
     await qa.start()
     if config["execution"].get("cache_start", "cold") == "cold":

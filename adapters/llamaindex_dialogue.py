@@ -13,7 +13,7 @@ from typing import Awaitable, Callable
 
 from controller.evidence import assign_references
 from controller.schema import EvidenceBlock, EvidenceSpan, Message, TurnRecord, history_messages
-from .dialogue import DialogueCall
+from controller.cooperative_request import DialogueCall
 
 
 async def run_dialogue(

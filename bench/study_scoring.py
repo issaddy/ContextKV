@@ -213,7 +213,7 @@ def _overlap_scores(directory):
 
 
 async def _loong_scores(config, spec, directory, settings):
-    from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+    from bench.judge import OpenAICompletionClient, JudgeConfig
     from bench.loong_score import COMMIT, score_answer
     generation = directory.parent
     references = load_jsonl(generation/"references.jsonl")
@@ -221,8 +221,8 @@ async def _loong_scores(config, spec, directory, settings):
                    for row in load_jsonl(generation/"official.jsonl")}
     judge = _judge_config(config, settings)
     output_tokens = judge.get("max_tokens", 2048)
-    client = OpenAICompletionClient(SelectorConfig(judge["base_url"], judge["model"], judge["revision"],
-        max_input_tokens=32768-output_tokens, max_new_tokens=output_tokens,
+    client = OpenAICompletionClient(JudgeConfig(judge["base_url"], judge["model"], judge["revision"],
+        max_new_tokens=output_tokens,
         timeout_seconds=settings.get("timeout_seconds", 180)))
     target = directory/"loong.scores.jsonl"
     records = load_jsonl(target) if target.exists() else []
@@ -244,15 +244,15 @@ async def _loong_scores(config, spec, directory, settings):
 
 
 async def _versionqa_scores(config, spec, directory, settings):
-    from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+    from bench.judge import OpenAICompletionClient, JudgeConfig
     from bench.versionqa import SOURCE_COMMIT, score_answer
 
     references = load_jsonl(directory.parent/"references.jsonl")
     predictions = {row["task_id"]: row["predictions"][0]["text"]
                    for row in load_jsonl(directory.parent/"official.jsonl")}
     judge = _judge_config(config, settings)
-    client = OpenAICompletionClient(SelectorConfig(judge["base_url"], judge["model"], judge["revision"],
-        max_input_tokens=32768-16, max_new_tokens=16,
+    client = OpenAICompletionClient(JudgeConfig(judge["base_url"], judge["model"], judge["revision"],
+        max_new_tokens=16,
         timeout_seconds=settings.get("timeout_seconds", 180)))
     target = directory/"versionqa.scores.jsonl"
     records = load_jsonl(target) if target.exists() else []

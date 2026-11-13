@@ -15,7 +15,7 @@ import re
 from statistics import mean
 
 from adapters.loong import COMMIT
-from adapters.query_selector import OpenAICompletionClient, SelectorConfig
+from bench.judge import OpenAICompletionClient, JudgeConfig
 from bench.official import load_jsonl
 
 
@@ -77,7 +77,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--references", type=Path, required=True)
     parser.add_argument("--predictions", type=Path, required=True)
-    parser.add_argument("--judge-config", type=Path, required=True, help="JSON SelectorConfig for the existing local completion transport")
+    parser.add_argument("--judge-config", type=Path, required=True, help="JSON JudgeConfig for the existing local completion transport")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args(argv)
@@ -88,7 +88,7 @@ def main(argv=None):
     ids = {r["task_id"] for r in references}
     if len(by_id) != len(predictions) or len(ids) != len(references) or by_id.keys()-ids:
         raise ValueError("duplicate or unknown evaluation task IDs")
-    config = SelectorConfig(**json.loads(args.judge_config.read_text()))
+    config = JudgeConfig(**json.loads(args.judge_config.read_text()))
     args.output.mkdir(parents=True, exist_ok=True)
     target = args.output/"scores.jsonl"
     results = load_jsonl(target) if target.exists() else []

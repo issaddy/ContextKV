@@ -8,14 +8,13 @@ import httpx
 
 
 @dataclass(frozen=True)
-class SelectorConfig:
+class JudgeConfig:
     base_url: str
     model: str
     revision: str
     tokenizer_path: str | None = None
     tokenizer_revision: str | None = None
     context_window: int = 32768
-    max_input_tokens: int = 8192
     max_new_tokens: int = 256
     timeout_seconds: float = 60.0
     temperature: float = 0.0

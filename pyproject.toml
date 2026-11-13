@@ -20,7 +20,6 @@ external-reference = ["llama-index-core"]
 
 [dependency-groups]
 dev = [
-    "jsonschema>=4,<5",
     "ruff>=0.11,<1",
 ]
 
@@ -32,7 +31,7 @@ where = ["."]
 include = ["controller*", "adapters*", "bench*", "engine_patches*", "training*"]
 
 [tool.setuptools.package-data]
-bench = ["assets/loong/*", "examples/*.json", "examples/*.jsonl", "examples/*.yaml"]
+bench = ["assets/loong/*"]
 
 [tool.ruff]
 target-version = "py311"

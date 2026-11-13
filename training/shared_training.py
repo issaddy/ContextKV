@@ -7,7 +7,7 @@ from pathlib import Path
 import random
 
 from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder, query_input
-from controller.context_schema import Condition, EvidenceUnit, Need, SourceSpan, TaskState, TextRef, VersionIntent
+from controller.schema import Condition, EvidenceUnit, Need, SourceSpan, TaskState, TextRef, VersionIntent
 from controller.schema import TurnRecord, history_messages
 from controller.serialization import decode
 
@@ -41,7 +41,7 @@ def task_label(row):
 def task_loss(encoder, row):
     import torch
     from torch.nn import functional as F
-    from training.shared_heads import (CONDITION_TYPES, EDGE_KINDS, FILTER_OPERATORS, OPERATIONS,
+    from adapters.shared_heads import (CONDITION_TYPES, EDGE_KINDS, FILTER_OPERATORS, OPERATIONS,
         SCOPES, SPAN_KINDS, TEMPORAL_RELATIONS, UPDATES, VERSION_MODES)
     task = task_label(row)
     inputs, refs, _, catalog_positions = query_input(encoder.tokenizer, conversation(row), row["question"],
@@ -181,7 +181,7 @@ def train_query(args):
 def evidence_loss(encoder, query, units, row, *, field_only=False):
     import torch
     from torch.nn import functional as F
-    from training.shared_heads import FIELD_ROLES
+    from adapters.shared_heads import FIELD_ROLES
     states, embeddings, relevance, addresses, _ = encoder.forward_evidence(query, units)
     source_indices = [i for i, address in enumerate(addresses) if address is not None]
     states = states[source_indices]

@@ -46,8 +46,8 @@ def create_app(controller=None, config=None, *, retrieval=None,
 
     @asynccontextmanager
     async def lifespan(app):
-        from adapters.study_retrieval import create_study_retriever
-        provider = retrieval or await asyncio.to_thread(create_study_retriever, study, service.template)
+        from adapters.providers import create_evidence_provider
+        provider = retrieval or await asyncio.to_thread(create_evidence_provider, study, service.template)
         app.state.qa = DocumentQA(service, provider)
         await app.state.qa.start()
         try:

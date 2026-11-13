@@ -2,6 +2,24 @@
 
 生成模型固定 Qwen3-32B。在线链路由共享查询编码、共享证据编码、结构化计算、价值停止和 SGLang 执行组成。`DocumentQA` 是 HTTP 和 benchmark 的共同入口。
 
+## 模块职责
+
+| 模块 | 职责与输出 | 主要代码 |
+|---|---|---|
+| 公共入口 | 接收问题、注册文档、定位会话，交给同一执行器 | `controller/api.py`、`qa.py` |
+| 查询与证据 | 生成任务/Need 表示，限定合法范围，召回、重排、字段绑定和选择证据；输出检索状态 | `adapters/shared_encoding.py`、`shared_heads.py`、`shared_retrieval.py` |
+| 来源与文档计算 | 维护原文地址、文档与版本关系，执行投影、筛选、连接及 CPU 聚合；输出完整结论和来源 | `adapters/corpus.py`、`document_compute.py`、`version_structure.py` |
+| 决策与执行 | 持有本轮预算、累计费用和执行进度，决定扩展/计算/回答，编译请求并提交结果 | `controller/cooperative.py`、`value_policy.py`、`cooperative_request.py` |
+| KV 执行 | 持有实际 KV 页、GPU/Host 驻留和私有覆盖层，选择原生或 InfoFlow 路径，返回真实执行成本 | `engine_patches/contextkv_compute.py`、`infoflow.py`、`infoflow_attention.py` |
+| 数据与会话 | 定义共用数据结构，保存已提交历史、计算结果和注册文档 | `controller/schema.py`、`conversation_store.py` |
+| 常规对照 | 提供普通 RAG 与 LlamaIndex 的检索、上下文组织和生成流程 | `adapters/providers.py`、`rag_dialogue.py`、`llamaindex_dialogue.py` |
+| 离线训练 | 准备监督、采集实际答案收益、训练辅助模型和建立文档索引；产出权重与索引 | `training/` |
+| 评测 | 按 benchmark 选题和重放、调用公共入口、官方评分并汇总最终质量与成本 | `bench/study.py`、`study_scoring.py`、`judge.py` |
+
+在线模块使用 `adapters/` 中的编码器和任务头；`training/` 调用这些实现生成资产。评分客户端只属于 `bench/`。模型权重格式与训练入口保持不变。
+
+调用方向为：HTTP／benchmark → DocumentQA → CooperativeController → 证据与文档计算 → 请求编译 → SGLang。检索状态只携带数据；控制器负责流程，SGLang 负责实际缓存资源。
+
 ## 查询、证据与计算
 
 Qwen3-Embedding-0.6B 同次前向提供会话查询向量、Need 向量及 token 表示。任务头关联主体、条件、版本和前驱 Need；RCEM 将会话查询对齐到基础编码器的独立查询空间。文档向量由冻结基础编码器生成。任务与历史使用原消息坐标。

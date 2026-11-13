@@ -5,7 +5,7 @@ from dataclasses import replace
 from functools import cached_property
 
 from adapters.table_relations import extract_table_relations
-from controller.context_schema import EvidencePool, EvidenceUnit, SourceSpan
+from controller.schema import EvidencePool, EvidenceUnit, SourceSpan
 from controller.source_windows import SOURCE_WINDOW_TOKENS, source_window_spans
 
 

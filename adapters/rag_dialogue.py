@@ -1,7 +1,7 @@
 """History-aware retrieval, ranked context concatenation, one answer call."""
 from __future__ import annotations
 
-from .dialogue import DialogueCall
+from controller.cooperative_request import DialogueCall
 from controller.evidence import assign_references
 from controller.schema import EvidenceSpan, Message, history_messages
 

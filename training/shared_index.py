@@ -6,33 +6,8 @@ import json
 from pathlib import Path
 
 
-class QwenDocumentEncoder:
-    def __init__(self, model_path, *, device="cpu", dtype="float32", max_length=32768):
-        import torch
-        from transformers import AutoModel, AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.tokenizer.padding_side = "left"
-        self.model = AutoModel.from_pretrained(model_path, dtype=getattr(torch, dtype)).to(device).eval()
-        self.manifest = {"model_id": "Qwen/Qwen3-Embedding-0.6B", "revision": "base", "max_length": max_length,
-                         "pooling": "last_nonpadding_token_l2", "model_path": str(model_path)}
-
-    def encode(self, texts):
-        return self.encode_with_usage(texts)[0]
-
-    def encode_with_usage(self, texts):
-        import torch
-        batch = self.tokenizer(texts, padding=True, return_tensors="pt")
-        input_tokens = int(batch["attention_mask"].sum())
-        batch = batch.to(self.model.device)
-        with torch.no_grad():
-            states = self.model(**batch).last_hidden_state
-            return torch.nn.functional.normalize(states[:, -1].float(), dim=-1).cpu().numpy(), input_tokens
-
-    def close(self):
-        self.model = None
-
-
 def main():
+    from adapters.shared_encoding import QwenDocumentEncoder
     from adapters.hybrid_retrieval import DenseIndex
     from adapters.retrieval import BM25SRetriever, load_beir_corpus
     parser = argparse.ArgumentParser(description=__doc__)

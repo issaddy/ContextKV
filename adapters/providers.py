@@ -17,7 +17,7 @@ class ConventionalEvidenceProvider:
     def __init__(self, config, template):
         import torch
         from transformers import AutoModel, AutoTokenizer
-        from training.shared_index import QwenDocumentEncoder
+        from adapters.shared_encoding import QwenDocumentEncoder
         retrieval, models = config["retrieval"], config["shared"]
         self.config, self.template = config, template
         query = models["query"]
@@ -131,7 +131,7 @@ class ConventionalEvidenceProvider:
         self.reranker = None
 
 
-def create_study_retriever(config, template):
+def create_evidence_provider(config, template):
     if config.get("execution", {}).get("dialogue_mode", "contextkv") == "contextkv":
         from adapters.shared_retrieval import SharedEvidenceProvider
         return SharedEvidenceProvider(config, template)

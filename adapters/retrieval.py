@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from controller.schema import OnlineContext, OnlineTurn
+from controller.schema import OnlineContext
 
 RETRIEVAL_CONFIG = {"implementation": "bm25s", "method": "lucene", "k1": 1.5,
                     "b": .75, "backend": "numpy", "csc_backend": "numpy",
@@ -26,21 +26,6 @@ def clean_context(context: Mapping[str, Any] | OnlineContext) -> OnlineContext:
                          source=str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or ""),
                          title=str(metadata.get("title") or ""),
                          score=float(score) if score is not None else None)
-
-def rerank_document(context: OnlineContext) -> str:
-    """A scoring view with available source context; the original body is unchanged."""
-    body = context.title + "\n" + context.text
-    return f"Source: {context.source}\n{body}" if context.source else body
-
-
-def bind_corpus_context(retriever, corpus_index):
-    """Bind the already loaded metadata before model ranking, when supported."""
-    if corpus_index is None and getattr(retriever, "evidence_selector", None) is not None:
-        raise ValueError("semantic evidence selection requires --evidence-corpus metadata")
-    bind = getattr(retriever, "bind_corpus", None)
-    if corpus_index is not None and bind is not None:
-        bind(corpus_index)
-
 
 async def run_retrieval_worker(operation, /, *args, **kwargs):
     """Run one synchronous retrieval; cancellation drains it before returning.
@@ -66,17 +51,6 @@ async def run_retrieval_worker(operation, /, *args, **kwargs):
 
 def retrieval_query(user_questions: Sequence[str]) -> str:
     return "\n".join(user_questions[-3:])
-
-
-def to_evidence(context: OnlineContext | Mapping[str, Any], corpus_snapshot_id: str,
-                tokenizer: Any | None = None, *, corpus_id: str = "mtrag"):
-    from controller.schema import EvidenceBlock, EvidenceKey
-    c = clean_context(context)
-    key = EvidenceKey(corpus_id, c.document_id, c.document_id, corpus_snapshot_id, c.content_sha256)
-    tokens = tuple(tokenizer.encode(c.text)) if tokenizer is not None else ()
-    uri = c.source or f"{corpus_id}://{corpus_snapshot_id}/{c.document_id}"
-    return EvidenceBlock(key, uri, c.title, c.text, token_ids=tokens,
-                         provenance=(uri, f"corpus_snapshot:{corpus_snapshot_id}"))
 
 
 def load_beir_corpus(path: str | Path) -> dict[str, dict[str, Any]]:
@@ -172,14 +146,6 @@ class BM25SRetriever:
             positions = self._np.asarray([i for i, identity in enumerate(self._ids) if identity in legal_ids], dtype=int)
             order = positions[deterministic_top_k(scores[positions], top_k, self._np)]
         return tuple(replace(self._contexts[int(i)], score=float(scores[i])) for i in order)
-
-    def candidate_search(self, query, *, top_k=50, legal_ids=None):
-        return self.retrieve([query], top_k=top_k, legal_ids=legal_ids)
-
-    def retrieve_turn(self, turn: OnlineTurn) -> OnlineTurn:
-        if turn.protocol != "P3":
-            raise ValueError("real retrieval requires a P3 turn")
-        return replace(turn, contexts=self.retrieve(turn.user_questions))
 
     def save(self, directory: str | Path) -> None:
         directory = Path(directory)

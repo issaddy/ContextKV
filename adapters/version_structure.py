@@ -112,7 +112,7 @@ class VersionIndex:
 
     def paired_units(self, family, before_version, after_version, selected_spans=()):
         """Retrieve both sides of matching sections/fields, including unchanged content."""
-        from controller.context_schema import EvidenceUnit
+        from controller.schema import EvidenceUnit
         before, after = self.parts[family, before_version], self.parts[family, after_version]
         addresses = tuple(dict.fromkeys((*before, *after)))
         pairs = []

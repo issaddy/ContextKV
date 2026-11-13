@@ -1,20 +1,12 @@
-"""Pinned MTRAG reader. Only newly constructed whitelist objects reach serving code.
-
-Raw rows and split/profile utilities are offline infrastructure. OnlineSession exposes
-one current turn at a time and requires a completed answer before advancing; P2/P3
-never copy official assistant messages or annotations into online objects.
-"""
+"""MT-RAG source loading and offline dataset preparation."""
 from __future__ import annotations
-
-from controller.schema import OnlineMessage, OnlineTurn
-from adapters.retrieval import clean_context
 
 from collections import defaultdict
 from hashlib import sha256
 import json
 from pathlib import Path
 import random
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 DATASET_COMMIT = "53fef6f5917c7e10c436f697e69a955dbc795d81"
 DATASET_SHA256 = "5d5201da9fabd072fd8f6b8d051bfaafa7ef031e76722a4920c66e94cede1873"
@@ -22,7 +14,6 @@ DATASET_URL = f"https://raw.githubusercontent.com/IBM/mt-rag-benchmark/{DATASET_
 MTRAG_UN_URL = f"https://raw.githubusercontent.com/IBM/mt-rag-benchmark/{DATASET_COMMIT}/mtragun-human/generation_tasks/reference.jsonl"
 MTRAG_UN_SHA256 = "68053f709c928570718fd2c88455eccf974746f5bfa2206d7fd39b969acb21d4"
 CLOUD_COLLECTION = "mt-rag-ibmcloud-elser-512-100-20240502"
-Protocol = Literal["P1", "P2", "P3"]
 
 
 def load_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -62,74 +53,6 @@ def dataset_identity(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     if any(row.get("dataset", legacy) != identity for row in rows):
         raise ValueError("one benchmark job must use one dataset identity")
     return identity
-
-
-def _message(message: Mapping[str, Any] | OnlineMessage) -> OnlineMessage:
-    if isinstance(message, OnlineMessage):
-        return message
-    speaker = str(message.get("speaker", message.get("role", ""))).lower()
-    speaker = {"human": "user", "agent": "assistant"}.get(speaker, speaker)
-    if speaker not in {"user", "assistant"}:
-        raise ValueError(f"unsupported MTRAG speaker {speaker!r}")
-    return OnlineMessage(speaker, str(message.get("text", message.get("content", ""))))
-
-
-def online_turn(row: Mapping[str, Any], protocol: Protocol = "P2",
-                generated_history: Sequence[OnlineMessage | Mapping[str, Any]] = ()) -> OnlineTurn:
-    if protocol not in {"P1", "P2", "P3"}:
-        raise ValueError("protocol must be P1, P2 or P3")
-    inputs = row["input"]
-    question = _message(inputs[-1])
-    if question.speaker != "user":
-        raise ValueError("task input must end at the current user question")
-    history = (tuple(_message(m) for m in inputs[:-1]) if protocol == "P1"
-               else tuple(_message(m) for m in generated_history))
-    # P3 has no access to even the official current evidence: its retriever fills this separately.
-    contexts = () if protocol == "P3" else tuple(clean_context(c) for c in row["contexts"])
-    return OnlineTurn(str(row["conversation_id"]), str(row["task_id"]), int(row["turn"]),
-                      str(row["Collection"]), question.text, history, contexts, protocol)
-
-
-class OnlineSession:
-    """Infrastructure-owned sequential gate; consumers only receive current().
-
-    A handler is passed the resulting OnlineTurn, never this gate or its raw rows.
-    commit() is called only for a successful, persisted generation. A failed attempt
-    can retry current(); it cannot reveal a subsequent question or evidence block.
-    """
-    def __init__(self, rows: Sequence[Mapping[str, Any]], protocol: Protocol = "P2"):
-        self.__rows = tuple(sorted(rows, key=lambda r: int(r["turn"])))
-        if not self.__rows:
-            raise ValueError("session is empty")
-        if len({str(r["conversation_id"]) for r in self.__rows}) != 1:
-            raise ValueError("rows must belong to one conversation")
-        turns = [int(r["turn"]) for r in self.__rows]
-        if len(set(turns)) != len(turns):
-            raise ValueError("duplicate turn")
-        self.__position = 0
-        self.__history: tuple[OnlineMessage, ...] = ()
-        self.protocol = protocol
-        self.conversation_id = str(self.__rows[0]["conversation_id"])
-
-    @property
-    def done(self) -> bool:
-        return self.__position == len(self.__rows)
-
-    @property
-    def remaining(self) -> int:
-        return len(self.__rows) - self.__position
-
-    def current(self) -> OnlineTurn:
-        if self.done:
-            raise StopIteration("session completed")
-        return online_turn(self.__rows[self.__position], self.protocol, self.__history)
-
-    def commit(self, task_id: str, assistant_text: str) -> None:
-        current = self.current()
-        if task_id != current.task_id:
-            raise ValueError("only the current task may be committed")
-        self.__history += (OnlineMessage("user", current.query), OnlineMessage("assistant", assistant_text))
-        self.__position += 1
 
 
 def group_sessions(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:

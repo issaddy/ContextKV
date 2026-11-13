@@ -8,7 +8,7 @@ from concurrent.futures import Future
 from threading import Lock
 import time
 
-from controller.context_schema import Condition, Need, SourceSpan, TaskState, TextRef, VersionIntent
+from controller.schema import Condition, Need, SourceSpan, TaskState, TextRef, VersionIntent
 from adapters.jina_encoding import pack_passages, project_markers, merge_rankings
 
 QUERY_MODEL = "Qwen/Qwen3-Embedding-0.6B"
@@ -283,11 +283,37 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
     return encoded, tuple(refs), texts, catalog_positions
 
 
+class QwenDocumentEncoder:
+    def __init__(self, model_path, *, device="cpu", dtype="float32", max_length=32768):
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.tokenizer.padding_side = "left"
+        self.model = AutoModel.from_pretrained(model_path, dtype=getattr(torch, dtype)).to(device).eval()
+        self.manifest = {"model_id": "Qwen/Qwen3-Embedding-0.6B", "revision": "base", "max_length": max_length,
+                         "pooling": "last_nonpadding_token_l2", "model_path": str(model_path)}
+
+    def encode(self, texts):
+        return self.encode_with_usage(texts)[0]
+
+    def encode_with_usage(self, texts):
+        import torch
+        batch = self.tokenizer(texts, padding=True, return_tensors="pt")
+        input_tokens = int(batch["attention_mask"].sum())
+        batch = batch.to(self.model.device)
+        with torch.no_grad():
+            states = self.model(**batch).last_hidden_state
+            return torch.nn.functional.normalize(states[:, -1].float(), dim=-1).cpu().numpy(), input_tokens
+
+    def close(self):
+        self.model = None
+
+
 class SharedQueryEncoder:
     def __init__(self, model_path, asset_path, *, device="cuda:0", dtype="bfloat16", train=False, history_tokens=4096):
         import torch
         from transformers import AutoModel, AutoTokenizer
-        from training.shared_heads import QueryHeads
+        from adapters.shared_heads import QueryHeads
         self.torch = torch
         self.history_tokens = history_tokens
         self.backbone_lock = Lock()
@@ -350,7 +376,7 @@ class SharedQueryEncoder:
     def _encode(self, history, question, task_id, current_turn_id, *, catalogue=(), source_scope=(),
                 history_turns=(), _prepared, _states):
         import torch
-        from training.shared_heads import (CONDITION_TYPES, EDGE_KINDS, FILTER_OPERATORS, OPERATIONS,
+        from adapters.shared_heads import (CONDITION_TYPES, EDGE_KINDS, FILTER_OPERATORS, OPERATIONS,
             SCOPES, SPAN_KINDS, TEMPORAL_RELATIONS, UPDATES, VERSION_MODES)
         started = time.perf_counter()
         encoded, refs, texts, catalogue_positions = _prepared
@@ -443,7 +469,7 @@ class SharedEvidenceEncoder:
     def __init__(self, model_path, asset_path, *, device="cuda:0", dtype="bfloat16", batch_tokens=32768, train=False):
         import torch
         from transformers import AutoModel, AutoTokenizer
-        from training.shared_heads import EvidenceHeads
+        from adapters.shared_heads import EvidenceHeads
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer.padding_side = "left"
         self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True,
@@ -560,7 +586,7 @@ class SharedEvidenceEncoder:
 
     def _encode(self, query, units, outputs):
         import torch
-        from training.shared_heads import FIELD_ROLES
+        from adapters.shared_heads import FIELD_ROLES
         started = time.perf_counter()
         batches = self._batches(query, units)
         rankings, bindings, binding_vectors, token_states, token_sources = [], [], [], [], []

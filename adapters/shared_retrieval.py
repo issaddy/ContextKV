@@ -11,7 +11,7 @@ from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
 from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder
 from adapters.version_structure import VersionIndex
-from controller.context_schema import EvidencePool, SourceSpan
+from controller.schema import EvidencePool, SourceSpan
 from controller.schema import OnlineContext, QueryContext, history_messages
 from controller.cooperative_request import EvidenceSelection
 
