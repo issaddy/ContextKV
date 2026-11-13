@@ -7,7 +7,7 @@ import time
 from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, EvidenceCosts, blocks_for_units, compile_request,
-                                  source_address, with_document_headers, working_history)
+                                  source_address, source_body, with_document_headers, working_history)
 from .schema import EvidenceBlock, EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -209,9 +209,7 @@ class CooperativeController:
             state.processed_tables.update(projection.table_id for projection in program.projections)
         state.computations = tuple(records.values())
         budget, _ = self._answer_budget(state, snapshot, state.computations)
-        raw_size = sum(len(self.template.tokenizer.encode(
-            f"[S{i+1}] {block.title} | version={block.key.version}\n{block.text}\n\n",
-            add_special_tokens=False)) for i, block in enumerate(blocks))
+        raw_size = len(self.template.tokenizer.encode(source_body(blocks)[0], add_special_tokens=False))
         if raw_size <= budget:
             return
         required = {need.need_id for need in state.query.task.needs
@@ -427,16 +425,13 @@ class CooperativeController:
             return ()
         blocks = blocks_for_units(units, state.pool.source_blocks)
         encode = self.template.tokenizer.encode
-        sizes = [len(encode(f"[S{i+1}] {block.title} | version={block.key.version}\n{block.text}\n\n",
-                            add_special_tokens=False)) for i, block in enumerate(blocks)]
-        if sum(sizes) <= budget:
+        if len(encode(source_body(blocks)[0], add_special_tokens=False)) <= budget:
             return blocks
         packs = tuple(self._source_packs(units, self.settings.get("semantic_input_tokens", 8192),
             lambda unit: numbered_lines(unit.text, self.template.tokenizer)[0]))
         retained = [blocks_for_units(pack, state.pool.source_blocks) for pack in packs]
         def size(group):
-            return sum(len(encode(f"[S1] {block.title} | version={block.key.version}\n{block.text}\n\n",
-                                  add_special_tokens=False)) for block in group)
+            return len(encode(source_body(group)[0], add_special_tokens=False))
         weights = [size(group) for group in retained]
         total = remaining = sum(weights)
         projected = set()

@@ -216,22 +216,35 @@ class CompiledRequest:
     demand: tuple[dict, ...]
 
 
-def compile_request(template, question, history, evidence, *, results=(),
-                    future_sources=(), instruction=None, system_prompt=SYSTEM):
+def source_body(evidence):
+    """Render source fragments once, sharing document headings and reference IDs."""
     body, spans, segments, references = "", [], [], []
-    for index, block in enumerate(evidence):
-        reference = f"S{index + 1}"
-        body += f"[{reference}] {block.title} | version={block.key.version}\n"
+    identities, previous, previous_end = {}, None, 0
+    for block in evidence:
+        if block.key not in identities:
+            identities[block.key] = f"S{len(identities)+1}"
+            references.append((identities[block.key], block.key))
+        reference = identities[block.key]
+        source_start = block.span[0] if block.span else 0
+        if previous != block.key:
+            body += f"[{reference}] {block.title} | version={block.key.version}\n"
+        elif source_start != previous_end:
+            body += "[...]\n"
         start = len(body)
         body += block.text
         end = len(body)
         body += "\n\n"
-        source_start = block.span[0] if block.span else 0
         spans.append(EvidenceSpan(block.key, 1, start, end, block.source_uri,
                                   block.provenance, reference,
                                   source_start=source_start, source_end=source_start + len(block.text)))
         segments.append((source_address(block), start, end))
-        references.append((reference, block.key))
+        previous, previous_end = block.key, source_start+len(block.text)
+    return body, spans, segments, references
+
+
+def compile_request(template, question, history, evidence, *, results=(),
+                    future_sources=(), instruction=None, system_prompt=SYSTEM):
+    body, spans, segments, references = source_body(evidence)
     task = answer_task(question, results)
     if instruction:
         task += "\n" + instruction
