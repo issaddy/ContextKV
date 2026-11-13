@@ -4,7 +4,8 @@
 
 | 文件 | 内容 |
 |---|---|
-| [核心机制 20 题评测](core-mechanism-20-20261113.json) | 当前四项 benchmark 各 20 题的普通问答、ContextKV、LlamaIndex 对照，包含质量、完整响应、批次资源、辅助训练与缓存协同；[表格报告](../docs/study/shared_smoke.md) |
+| [动态流程迭代](dynamic-flow-20261113.json) | 四项各 20 题的重排试验、恢复任务聚焦输入后的 20 题复测、通用投影协议与关系计算检查；[当前报告](../docs/study/shared_smoke.md) |
+| [核心机制 20 题评测](core-mechanism-20-20261113.json) | 此前四项 benchmark 各 20 题的普通问答、ContextKV、LlamaIndex 对照，包含质量、完整响应、批次资源、辅助训练与缓存协同 |
 | [此前源码审查小跑](method-review-20261113.json) | 此前各 2 题的指标及 Native／InfoFlow 非前缀配对 |
 | [共享编码首次小跑](shared-encoding-smoke-20261113.json) | 审查前四项 benchmark 同题比较、真实历史 2 轮、实际批次资源及辅助训练摘要 |
 | [本轮指标](evaluation-20261112.json) | `queue_results`：39组完成运行，含交付失败；`incomplete_attempts`：12组中断运行的已付费用；`auxiliary`：训练结果；`cache_pairs`：4个缓存配对；`group_continuations`：已有事实续跑 |

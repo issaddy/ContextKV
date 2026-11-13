@@ -2,7 +2,7 @@
 
 当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，查询 LoRA 和 Jina 骨干继续复用；任务、字段、集合和停止头随当前协议更新。快速对照使用每个 benchmark、每种方法相同的 20 题。当前结果见[本轮报告](shared_smoke.md)。
 
-当前 12 组对照已完成运行和评分：普通问答、LlamaIndex 各交付 80/80，ContextKV 交付 79/80。MultiDoc2Dial、MT-RAG 同时改善质量和 P95；VersionQA、Loong 仍低于基线。结果目录为 `runs/current/core-20`，轻量指标已汇总至 `results/core-mechanism-20-20261113.json`。
+当前恢复任务聚焦重排，保留事实完整性、紧凑来源地址与缓存监督修正。最新 MultiDoc2Dial 20 题复测 F1 为 19.09、P95 为 11.30 秒；通用投影与关系计算检查已交付答案，但语义质量仍不足。既有四项参照、本轮试验及恢复后的复测见 `results/dynamic-flow-20261113.json` 和[当前报告](shared_smoke.md)。当前方案尚未对其余三项重跑。
 
 ## 路径与环境
 
