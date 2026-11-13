@@ -6,7 +6,8 @@ from dataclasses import dataclass, field, replace
 import time
 from weakref import WeakValueDictionary
 
-from .cooperative_request import SYSTEM, compile_request, working_history
+from .cooperative_request import (SYSTEM, EvidenceCosts, blocks_for_units, compile_request,
+                                  source_address, working_history)
 from .schema import EvidenceBlock, EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -41,19 +42,8 @@ class AnswerResult:
 
 def selected_blocks(state):
     """Selected units retain exact original-text coordinates and dependency text."""
-    selected = set(state.selected_ids)
-    source = {block.key: block for block in state.pool.source_blocks}
-    blocks = []
-    for unit in state.pool.units:
-        if unit.unit_id not in selected:
-            continue
-        for span in unit.source_spans:
-            block = source[span.source_key]
-            base = block.span[0] if block.span else 0
-            blocks.append(EvidenceBlock(block.key, block.source_uri, block.title,
-                block.text[span.start-base:span.end-base], span=(span.start, span.end),
-                parent_section=block.parent_section, provenance=block.provenance))
-    return tuple({(block.key, block.span): block for block in blocks}.values())
+    units = {unit.unit_id: unit for unit in state.pool.units}
+    return blocks_for_units((units[identity] for identity in state.selected_ids), state.pool.source_blocks)
 
 
 def computation_record(program, result):
@@ -156,7 +146,10 @@ class CooperativeController:
                 computed_needs = {item["need_id"] for item in computations if item["complete"]}
                 required = {need.need_id for need in state.query.task.needs
                             if need.operation in {"count", "sum", "group", "mean", "min", "max"}}
+                population = state.query.task.coverage_scope == "all_supplied_documents"
                 while True:
+                    if not population:
+                        await self._select_evidence(state, snapshot, computations)
                     outside = state.document_index.outside_tables(state.pool.units)
                     if not outside:
                         from adapters.shared_retrieval import need_scope_signature
@@ -172,8 +165,9 @@ class CooperativeController:
                     complete_scope = required <= computed_needs
                     selected = selected_blocks(state)
                     feature_state = self._value_state(state, totals, arrived, complete_scope, session_id)
-                    action = self.stop.choose(state.evidence.summary(state.selected_ids), feature_state,
-                        self.prices, can_continue=bool(state.pending_units), complete_scope=complete_scope)
+                    action = ("answer" if population else self.stop.choose(
+                        state.evidence.summary(state.selected_ids), feature_state, self.prices,
+                        can_continue=bool(state.pending_units), complete_scope=complete_scope))
                     if action == "continue":
                         state = await provider.expand(state)
                         auxiliary = {**auxiliary,
@@ -184,7 +178,14 @@ class CooperativeController:
                                                                            snapshot, complete,
                             selected if any(need.need_id not in required for need in state.query.task.needs) else ()))
                     break
-                selected = self._answer_sources(state, snapshot, computations)
+                if population and (not state.query.task.needs or any(
+                        need.need_id not in {item["need_id"] for item in computations} for need in state.query.task.needs)):
+                    selected = await self._population_sources(state, snapshot, computations, complete)
+                elif computations:
+                    await self._select_evidence(state, snapshot, computations)
+                    selected = selected_blocks(state)
+                else:
+                    selected = selected_blocks(state)
                 request = compile_request(self.template, query, snapshot.raw_history, selected,
                     results=tuple(computations), system_prompt=self.policy.system_prompt or SYSTEM)
                 final = await complete(request, "answer")
@@ -205,19 +206,16 @@ class CooperativeController:
         covered = {program.projections[i].table_id for i in used} | set(program.excluded_table_ids)
         return set(program.population_table_ids) <= covered and not program.unresolved_conditions
 
-    def _source_packs(self, units, input_tokens, output_tokens):
-        """Pack original source windows against input and projected-record output sizes."""
-        pack, inputs, records = [], 0, 0
-        record_capacity = max(1, output_tokens // 160)
+    def _source_packs(self, units, input_tokens):
+        """Pack source windows by their actual input size."""
+        pack, inputs = [], 0
         for unit in units:
             tokens = len(self.template.tokenizer.encode(unit.text, add_special_tokens=False))
-            lines = sum(bool(line.strip()) for line in unit.text.splitlines())
-            if pack and (inputs + tokens > input_tokens or records + lines > record_capacity):
+            if pack and inputs + tokens > input_tokens:
                 yield tuple(pack)
-                pack, inputs, records = [], 0, 0
+                pack, inputs = [], 0
             pack.append(unit)
             inputs += tokens
-            records += lines
         if pack:
             yield tuple(pack)
 
@@ -267,7 +265,7 @@ class CooperativeController:
         if outside:
             projections = []
             population = tuple(unit.unit_id for unit in outside)
-            for number, units in enumerate(self._source_packs(outside, input_tokens, output_tokens)):
+            for number, units in enumerate(self._source_packs(outside, input_tokens)):
                 projection = semantic_projection(state.query, units, sorted(need_ids), population_unit_ids=population)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, instruction=projection.instruction, future_sources=selected,
@@ -293,13 +291,10 @@ class CooperativeController:
             raise ValueError("requested numeric computation has no complete source population")
         return computations
 
-    def _answer_sources(self, state, snapshot, computations):
+    def _answer_budget(self, state, snapshot, computations):
         from .cooperative_request import compact_computations
         from .schema import Message, history_messages
         import json
-        numeric = {item["need_id"] for item in computations}
-        if computations and all(need.need_id in numeric for need in state.query.task.needs):
-            return ()
         question = state.query.task.raw_question
         if computations:
             question += "\nComputed results with original-source addresses:\n" + json.dumps(
@@ -307,8 +302,48 @@ class CooperativeController:
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", ""),
                                      *history_messages(snapshot.raw_history), Message("user", question)))
         body_tokens = min(state.body_tokens, self.policy.max_total_model_tokens-self.policy.max_new_tokens-len(fixed.input_ids))
-        state.selected_ids = state.evidence.select(state.pool.units, body_tokens=body_tokens, token_price=state.token_price)
-        return selected_blocks(state)
+        return body_tokens, len(fixed.input_ids)
+
+    async def _select_evidence(self, state, snapshot, computations):
+        computed = {item["need_id"] for item in computations}
+        if computations and all(need.need_id in computed for need in state.query.task.needs):
+            state.selected_ids = ()
+            return
+        budget, prompt_tokens = self._answer_budget(state, snapshot, computations)
+        blocks = blocks_for_units(state.pool.units, state.pool.source_blocks)
+        native = await self.engine.evidence_state(tuple(source_address(block) for block in blocks))
+        state.costs = EvidenceCosts(state.pool.units, state.pool.source_blocks, self.template.tokenizer,
+            native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
+            policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"))
+        state.selected_ids = state.evidence.select(state.pool.units, body_tokens=budget,
+            cost_model=state.costs, seconds_price=self.prices.seconds)
+
+    async def _population_sources(self, state, snapshot, computations, complete):
+        from adapters.document_compute import semantic_evidence_projection
+        budget, _ = self._answer_budget(state, snapshot, computations)
+        units = state.population_units
+        blocks = blocks_for_units(units, state.pool.source_blocks)
+        encode = self.template.tokenizer.encode
+        sizes = [len(encode(f"[S{i+1}] {block.title} | version={block.key.version}\n{block.text}\n\n",
+                            add_special_tokens=False)) for i, block in enumerate(blocks)]
+        if sum(sizes) <= budget:
+            return blocks
+        packs = tuple(self._source_packs(units, self.settings.get("semantic_input_tokens", 8192)))
+        weights = [sum(len(encode(unit.text, add_special_tokens=False)) for unit in pack) for pack in packs]
+        total, spent, projected = sum(weights), 0, {}
+        for number, (pack, weight) in enumerate(zip(packs, weights)):
+            quota = budget-spent if number == len(packs)-1 else int(budget*weight/total)
+            spent += quota
+            projection = semantic_evidence_projection(state.query.task.raw_question, pack)
+            request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
+                projection.blocks, instruction=projection.instruction,
+                system_prompt=self.policy.system_prompt or SYSTEM)
+            result = await complete(request, f"coverage:{number}", schema=projection.schema, output_tokens=quota)
+            if result["meta"]["finish_reason"]["type"] == "length":
+                raise ValueError("complete-population evidence exceeds its conclusion budget")
+            for block in projection.decode(result["text"]):
+                projected[source_address(block)] = block
+        return tuple(projected.values())
 
     def _value_state(self, state, totals, arrived, complete_scope, session_id):
         native = {**self.kv_policy["costs"], **self.native_state.get(session_id, {})}

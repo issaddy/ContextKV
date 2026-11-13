@@ -35,19 +35,27 @@ def task_label(row):
         tuple(decode(TextRef, ref) for ref in raw.get("working_history", ())),
         tuple(decode(Condition, item) for item in raw["conditions"]),
         tuple(decode(Need, item) for item in raw["needs"]),
-        decode(VersionIntent, raw["version_intent"]), current_turn_id=row["turn"], query=row["question"])
+        decode(VersionIntent, raw["version_intent"]), current_turn_id=row["turn"], query=row["question"],
+        coverage_scope=raw["coverage_scope"])
 
 
-def task_loss(encoder, row):
+def task_loss(encoder, row, prepared=None):
     import torch
     from torch.nn import functional as F
     from adapters.shared_heads import (CONDITION_TYPES, EDGE_KINDS, FILTER_OPERATORS, OPERATIONS,
         SCOPES, SPAN_KINDS, TEMPORAL_RELATIONS, UPDATES, VERSION_MODES)
-    task = task_label(row)
-    inputs, refs, _, catalog_positions = query_input(encoder.tokenizer, conversation(row), row["question"],
-        row["turn"], catalogue(row), history_tokens=encoder.history_tokens, history_turns=row.get("history_turns", ()))
-    states, logits = encoder.forward_input(inputs)
+    if prepared is None:
+        inputs, refs, _, catalog_positions = query_input(encoder.tokenizer, conversation(row), row["question"],
+            row["turn"], catalogue(row), history_tokens=encoder.history_tokens, history_turns=row.get("history_turns", ()))
+        states, logits = encoder.forward_input(inputs)
+    else:
+        refs, catalog_positions, states = prepared
+        logits = encoder.heads(states, states[-1])
     device = states.device
+    if row.get("coverage_only"):
+        return F.cross_entropy(logits["coverage_scope"][None], torch.tensor(
+            [SCOPES.index(row["task_state"]["coverage_scope"])], device=device))
+    task = task_label(row)
     labels = torch.zeros((len(refs), len(SPAN_KINDS)), dtype=torch.long, device=device)
     labels[[i for i, ref in enumerate(refs) if ref is None]] = -100
 
@@ -76,8 +84,9 @@ def task_loss(encoder, row):
                 span = TextRef(turn_id, speaker, start, start+len(version))
                 if positions((span,)):
                     tag((span,), "version")
-    losses = [F.cross_entropy(logits["span"].reshape(-1, 3), labels.reshape(-1),
-                              weight=states.new_tensor([.1, 1., 1.]))]
+    losses = [F.cross_entropy(logits["span"].reshape(-1, 3), labels.reshape(-1)),
+        F.cross_entropy(logits["coverage_scope"][None], torch.tensor(
+            [SCOPES.index(task.coverage_scope)], device=device))]
     historical = [i for i, ref in enumerate(refs) if ref is not None and ref.turn_id != row["turn"]]
     if historical:
         wanted = set(positions(task.working_history))
@@ -130,6 +139,8 @@ def task_loss(encoder, row):
             value = getattr(encoder.heads, name)(states[-1], vector).squeeze(-1)
             losses.append(F.binary_cross_entropy_with_logits(value, states.new_tensor(row_metadata[field] in expected)))
 
+    if prepared is not None:
+        return torch.stack(losses).mean()
     # Conversational/rewrite and ordinary-query identity pairs share the frozen base space.
     # Documents are always encoded with adapters disabled, so their space stays fixed directly.
     instruction = "Instruct: Retrieve evidence for the question.\nQuery: "
@@ -150,22 +161,37 @@ def task_loss(encoder, row):
 
 def train_query(args):
     import torch
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig, PeftModel, get_peft_model
     torch.manual_seed(args.seed)
     encoder = SharedQueryEncoder(args.model, None, device=args.device, train=True, history_tokens=args.history_tokens)
-    encoder.model = get_peft_model(encoder.model, LoraConfig(r=args.rank, lora_alpha=args.rank*2,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], task_type="FEATURE_EXTRACTION"))
+    if args.init_asset:
+        encoder.model = PeftModel.from_pretrained(encoder.model, Path(args.init_asset)/"adapter", is_trainable=not args.heads_only)
+        encoder.heads.load_state_dict({**encoder.heads.state_dict(), **torch.load(
+            Path(args.init_asset)/"heads.pt", map_location=args.device, weights_only=True)})
+    else:
+        encoder.model = get_peft_model(encoder.model, LoraConfig(r=args.rank, lora_alpha=args.rank*2,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], task_type="FEATURE_EXTRACTION"))
+    if args.heads_only:
+        encoder.model.requires_grad_(False).eval()
     parameters = [parameter for module in (encoder.model, encoder.heads) for parameter in module.parameters()
                   if parameter.requires_grad]
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate)
     training = [row for row in rows(args.data) if row["split"] == "train"]
+    prepared = {}
+    if args.heads_only:
+        for row in training:
+            inputs, refs, _, positions = query_input(encoder.tokenizer, conversation(row), row["question"],
+                row["turn"], catalogue(row), history_tokens=encoder.history_tokens, history_turns=row.get("history_turns", ()))
+            with torch.no_grad():
+                states, _ = encoder.forward_input(inputs)
+            prepared[row["task_id"]] = refs, positions, states
     random.seed(args.seed)
     steps, total = 0, 0.
     for _ in range(args.epochs):
         random.shuffle(training)
         for row in training:
             optimizer.zero_grad(set_to_none=True)
-            loss = task_loss(encoder, row)
+            loss = task_loss(encoder, row, prepared.get(row["task_id"]))
             loss.backward()
             optimizer.step()
             total += loss.item()
@@ -240,7 +266,8 @@ def train_evidence(args):
             masks = embeddings.new_tensor([[unit.unit_id in item["unit_ids"] for unit in units] for item in row["sets"]])
             qualities = embeddings.new_tensor([item["quality"] for item in row["sets"]])
             encoded.append((embeddings, relevance, masks, qualities))
-        optimizer = torch.optim.AdamW(encoder.heads.set_utility.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.AdamW([p for name, p in encoder.heads.named_parameters()
+                                      if name.startswith("set_")], lr=args.learning_rate)
         for _ in range(args.epochs):
             for example in encoded:
                 optimizer.zero_grad(set_to_none=True)
@@ -294,6 +321,7 @@ def main():
     parser.add_argument("--query-asset")
     parser.add_argument("--init-asset")
     parser.add_argument("--field-only", action="store_true")
+    parser.add_argument("--heads-only", action="store_true")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--rank", type=int, default=16)

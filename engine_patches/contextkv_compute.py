@@ -23,6 +23,7 @@ class ComputeRuntime:
         self.output_tokens_mean = 0.0
         self.demands = {}
         self.source_nodes = {}
+        self.source_prefixes = {}
         self.prioritized_nodes = set()
         self.gpu_token_seconds = self.host_token_seconds = 0.0
         self.observed_at = time.monotonic()
@@ -45,6 +46,20 @@ class ComputeRuntime:
         self.observed_at, self.pool_used = now, self._pool_used()
 
     def control(self, action, data):
+        if action == 'evidence_state':
+            scope = data.get('cache_scope', 'shared')
+            wanted = set(data['source_ids'])
+            sources, prefixes = {}, []
+            for address in wanted:
+                source_id = scope, address
+                sources[address] = dict(zip(('gpu_tokens', 'host_tokens'), self._resident(source_id, 'infoflow')))
+                prefix = self.source_prefixes.get(source_id)
+                if prefix is not None and prefix['namespace'] == data.get('cache_namespace') and set(prefix['sources']) <= wanted:
+                    gpu, host = self._resident(source_id, 'exact')
+                    gpu, host = min(gpu, prefix['tokens']), min(host, max(0, prefix['tokens']-gpu))
+                    if gpu or host:
+                        prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host))
+            return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs), output_tokens=self.output_tokens_mean)
         if action == 'close_session':
             self.demands.pop(data['session_id'], None)
             self._refresh_priorities()
@@ -59,6 +74,7 @@ class ComputeRuntime:
             if flushed:
                 self.demands.clear()
                 self.source_nodes.clear()
+                self.source_prefixes.clear()
                 self.prioritized_nodes.clear()
                 self.gpu_token_seconds = self.host_token_seconds = 0.0
                 self.observed_at, self.pool_used = time.monotonic(), self._pool_used()
@@ -74,6 +90,21 @@ class ComputeRuntime:
 
     def _key(self, source_id, ids):
         return RadixKey(array('q', ids), cache_salt='contextkv:independent-block:' + source_id[0])
+
+    def _resident(self, source_id, mode):
+        node_id = self.source_nodes.get((source_id, mode))
+        if node_id is None:
+            return 0, 0
+        node = self.cache.tree_core._node_arena.get(node_id)
+        gpu = host = 0
+        while node is not None and node.parent is not None:
+            component = node.component_data[0]
+            if component.value is not None:
+                gpu += len(component.value)
+            elif component.host_value is not None and node.write_through_pending_id is None:
+                host += len(component.host_value)
+            node = node.parent
+        return gpu, host
 
     def _match(self, source_id, ids):
         return self.cache.match_prefix(MatchPrefixParams(key=self._key(source_id, ids)))
@@ -317,6 +348,7 @@ class ComputeRuntime:
             node = self.cache.tree_core._node_arena.get(node_id)
             if node is None:
                 del self.source_nodes[identity]
+                self.source_prefixes.pop(source_id, None)
             else:
                 consumers = self._consumers(source_id, mode)
                 while node.parent is not None:
@@ -397,13 +429,15 @@ class ComputeRuntime:
             self.costs['prefill_token_ms'] = .8 * self.costs.get('prefill_token_ms', measured) + .2 * measured
         if state.mode == 'exact':
             scope = state.metadata.get('cache_scope', 'shared')
-            for item in state.metadata.get('demand', ()):
-                if 'native_prefix_end' in item:
-                    match = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
-                        array('q', state.input_ids[:item['native_prefix_end']]),
-                        req.extra_key, cache_salt=req.cache_salt)))
-                    if match.device_prefix_len + match.host_hit_length:
-                        self.source_nodes[((scope, item['source_id']), 'exact')] = match.best_match_node
+            prefix = []
+            for item in state.metadata.get('blocks', ()):
+                prefix.append(item['source_id'])
+                match = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
+                    array('q', state.input_ids[:item['end']]), req.extra_key, cache_salt=req.cache_salt)))
+                if match.device_prefix_len + match.host_hit_length:
+                    source_id = scope, item['source_id']
+                    self.source_nodes[source_id, 'exact'] = match.best_match_node
+                    self.source_prefixes[source_id] = dict(sources=tuple(prefix), tokens=item['end'], namespace=req.cache_salt)
         self._refresh_priorities()
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, input_tokens=len(state.input_ids),

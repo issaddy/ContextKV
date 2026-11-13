@@ -122,93 +122,55 @@ class EvidenceEncoding:
             self.relevance[~mask].mean().item() if len(rest) else 0.])
         return torch.cat((mean, maximum, remaining, stats))
 
-    def select(self, units, *, body_tokens, token_price=0.0):
-        """Prune a joint evidence set by generator utility, retaining complementary groups."""
+    def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0):
+        """Choose a dependency-closed set using semantic gain and actual acquisition cost."""
         import numpy as np
         import torch
         by_id = {unit.unit_id: unit for unit in units}
         positions = {identity: index for index, identity in enumerate(self.unit_ids)}
         count = len(self.unit_ids)
+        if not count:
+            return ()
         consumers = [[] for _ in self.unit_ids]
         for unit in units:
             for dependency in unit.dependencies:
                 consumers[positions[dependency]].append(positions[unit.unit_id])
-        support = {}
-        for binding in self.bindings:
-            if binding.role == "source":
-                covered = sum(1 << positions[unit.unit_id] for unit in units if any(
-                    span.source_key == binding.source_span.source_key
-                    and span.start < binding.source_span.end and binding.source_span.start < span.end
-                    for span in unit.source_spans))
-                if covered:
-                    support[binding.need_id] = support.get(binding.need_id, 0) | covered
-        costs = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids], dtype=np.int64)
+        closures = []
+        for root in range(count):
+            pending, members = [root], set()
+            while pending:
+                member = pending.pop()
+                if member not in members:
+                    members.add(member)
+                    pending.extend(consumers[member])
+            closures.append(tuple(members))
+        tokens = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids])
         active = np.ones(count, dtype=bool)
-        chosen = (1 << count)-1
         with torch.no_grad():
-            encoded = self.embeddings
-            width = encoded.shape[-1]
-            vectors = torch.cat((encoded, self.relevance[:, None]), dim=-1).cpu().numpy()
-            items = np.empty((count, width+2), dtype=np.float64)
-            items[:, :width] = vectors[:, :width]
-            items[:, width] = 1
-            items[:, width+1] = vectors[:, width]
-            removal = np.empty_like(items)
-            removal_cost = np.empty(count, dtype=np.int64)
-            closures, owners = [], [[] for _ in self.unit_ids]
-            for root in range(count):
-                pending, members = [root], set()
-                while pending:
-                    member = pending.pop()
-                    if member not in members:
-                        members.add(member)
-                        pending.extend(consumers[member])
-                indices = list(members)
-                closures.append(sum(1 << member for member in indices))
-                removal[root] = items[indices].sum(axis=0)
-                removal_cost[root] = costs[indices].sum()
-                for member in indices:
-                    owners[member].append(root)
-            owners = [np.asarray(group, dtype=np.intp) for group in owners]
-            total, cost = items.sum(axis=0), int(costs.sum())
-            while chosen:
-                # Preserve each observed Need's support while pruning its redundant
-                # alternatives. Empty evidence remains only a training control.
-                candidates = np.asarray([index for index in np.flatnonzero(active)
-                    if (remaining := chosen & ~closures[index])
-                    and all(remaining & coverage for coverage in support.values())], dtype=np.intp)
-                if not len(candidates):
+            while active.sum() > 1:
+                alternatives = []
+                for members in closures:
+                    trial = active.copy()
+                    trial[list(members)] = False
+                    if trial.any() and not np.array_equal(trial, active):
+                        alternatives.append(trial)
+                if not alternatives:
                     break
-                pooled = np.empty((len(candidates)+1, width+2), dtype=np.float32)
-                pooled[0] = total
-                pooled[1:] = total-removal[candidates]
-                pooled = torch.from_numpy(pooled).to(self.embeddings.device)
-                values = self.heads.utility_pooled(pooled[:, :width], pooled[:, width:width+1],
-                    pooled[:, width+1:]).cpu().numpy()
-                gains = values[1:]-values[0] + token_price*removal_cost[candidates]
-                if cost > body_tokens:
-                    index = int((gains/removal_cost[candidates].astype(values.dtype)).argmax())
-                else:
-                    index = int(gains.argmax())
-                if cost <= body_tokens and gains[index] <= 0:
+                masks = np.unique(np.stack([active, *alternatives]), axis=0)
+                masks = np.concatenate((active[None], masks[~np.all(masks == active, axis=1)]))
+                values = self.heads.utility(self.embeddings, self.relevance,
+                    torch.as_tensor(masks, device=self.embeddings.device)).cpu().numpy()
+                costs = (np.asarray([cost_model.estimate(tuple(identity for identity, keep in
+                    zip(self.unit_ids, mask) if keep)) for mask in masks]) if cost_model else np.zeros(len(masks)))
+                objectives = values - seconds_price * costs / 1000
+                sizes = masks @ tokens
+                gains = objectives[1:] - objectives[0]
+                index = int((gains/(sizes[0]-sizes[1:])).argmax() if sizes[0] > body_tokens else gains.argmax())
+                if sizes[0] <= body_tokens and gains[index] <= 0:
                     break
-                removed = closures[int(candidates[index])] & chosen
-                chosen &= ~removed
-                deleted = []
-                while removed:
-                    bit = removed & -removed
-                    deleted.append(bit.bit_length()-1)
-                    removed ^= bit
-                active[deleted] = False
-                total -= items[deleted].sum(axis=0)
-                cost -= int(costs[deleted].sum())
-                # Each removed item updates only closures that actually contained it.
-                for member in deleted:
-                    affected = owners[member][active[owners[member]]]
-                    removal[affected] -= items[member]
-                    removal_cost[affected] -= costs[member]
-        return tuple(identity for index, identity in enumerate(self.unit_ids) if active[index])
-
+                active = masks[index+1]
+        selected = tuple(identity for identity, keep in zip(self.unit_ids, active) if keep)
+        return cost_model.order(selected) if cost_model else selected
 
 def _spans(labels, coordinates):
     """Decode independent BIO labels while retaining original source addresses."""
@@ -466,7 +428,8 @@ class SharedQueryEncoder:
                 time_refs=tuple(reference(span) for span in spans["time"]),
                 temporal_relation=TEMPORAL_RELATIONS[int(logits["temporal_relation"].argmax())])
             task = TaskState(task_id, question, tuple(history_refs), tuple(conditions), needs, intent,
-                             tuple(source_scope), current_turn_id, question)
+                             tuple(source_scope), current_turn_id, question,
+                             coverage_scope=SCOPES[int(logits["coverage_scope"].argmax())])
             projected = torch.nn.functional.normalize(self.heads.need_projection(need_vectors), dim=-1)
             return QueryEncoding(task, torch.nn.functional.normalize(states[-1], dim=-1), projected,
                 states, refs, texts, operators, {"input_tokens": len(encoded["input_ids"]),

@@ -9,6 +9,37 @@ from adapters.evidence_pool import SourceDirectory
 from controller.serialization import to_jsonable
 
 
+def coverage_states():
+    """Intent-only contrast pairs; no benchmark questions or answers are used."""
+    pairs = (
+        ("Explain the eligibility rules for this grant.", "List every eligible application across the supplied files."),
+        ("What steps are needed to renew the licence?", "Which licences in the complete register have expired?"),
+        ("How is this protocol's timeout configured?", "Find every inconsistent timeout definition across the protocol documents."),
+        ("Show an example of a dependency between two components.", "Determine whether the complete component dependency graph contains a cycle."),
+        ("Why was this contract terminated?", "Identify all contracts terminated before their expiry dates in the supplied collection."),
+        ("Give all steps of the standard reimbursement procedure.", "Calculate the total reimbursement across all submitted claims."),
+        ("Compare the stated limits in these two policy versions.", "Find every changed limit across the full set of policy versions."),
+        ("What does the manual mean by an unavailable service?", "Establish whether any supplied incident report describes an unavailable service."),
+        ("请解释这个项目的申请条件。", "请列出资料中全部符合申请条件的项目。"),
+        ("怎样办理员工离职手续？", "请找出所给人事记录中所有尚未完成离职手续的员工。"),
+        ("说明两份技术说明中接口定义的区别。", "检查整个接口目录是否存在互相矛盾的定义。"),
+        ("举例说明设备之间的连接方式。", "根据所有设备连接记录判断整个网络是否连通。"),
+        ("这份报告中的异常原因是什么？", "汇总全部报告中的异常事件，并去除重复事件。"),
+        ("请说明完整的采购审批流程。", "查找全部订单中没有经过审批的订单。"),
+        ("这两项服务的收费有什么区别？", "列出所给价目表中每项服务的最低收费。"),
+        ("给出一个满足要求的供应商。", "确认提供的所有供应商是否都满足要求。"),
+        ("What caused the sample build failure?", "Identify every failed build in the complete deployment log."),
+        ("Explain one path between the named stations.", "Determine the longest path in the supplied acyclic route network."),
+        ("请给出一个符合标准的产品实例。", "请检查全部检验记录是否存在不符合标准的产品。"),
+        ("这篇研究介绍了什么方法？", "整理全部研究之间的依赖关系并判断是否存在闭环。"),
+    )
+    return [{"task_id": f"coverage-{index}-{kind}", "conversation_id": f"coverage-{index}",
+        "split": "dev" if index >= 16 else "train", "turn": 1, "history": [], "question": question,
+        "coverage_only": True, "task_state": {"coverage_scope": scope}}
+        for index, pair in enumerate(pairs) for kind, (question, scope) in enumerate(zip(pair,
+            ("selected_sources", "all_supplied_documents")))]
+
+
 def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
     """Generate new training sources; no evaluation questions or answers are read."""
     randomizer = random.Random(seed)

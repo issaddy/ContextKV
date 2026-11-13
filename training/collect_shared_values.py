@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import yaml
 
 from controller.config import create_model_template, load_config, load_kv_policy
-from controller.cooperative_request import compile_request, working_history
+from controller.cooperative_request import EvidenceCosts, compile_request, source_address, working_history
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceBlock, EvidenceUnit, TurnRecord
 from controller.serialization import decode
@@ -81,7 +81,7 @@ async def collect(args):
         await engine.profile_prepare("cold")
         # Full-population arithmetic completes by its execution contract. The
         # learned STOP action is trained on optional evidence expansion.
-        source = [row for row in source if not any(need["operation"] in {
+        source = [row for row in source if row["task_state"]["coverage_scope"] == "selected_sources" and not any(need["operation"] in {
             "count", "sum", "group", "mean", "min", "max"} for need in row["task_state"]["needs"])]
         evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
         roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
@@ -150,8 +150,15 @@ async def collect(args):
                 else:
                     encoded = encoded.merge(new)
                 observed = units[:start + len(fresh)]
-                chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"],
-                    token_price=config["shared"]["runtime"]["prices"]["seconds"] * kv_policy["costs"]["prefill_token_ms"] / 1000)
+                blocks = source_blocks(observed)
+                native_view = await engine.evidence_state(tuple(source_address(block) for block in blocks),
+                    cache_scope=f"training:{row['task_id']}:")
+                fixed = compile_request(template, row["question"], working_history(query, history(row)), ())
+                costs = EvidenceCosts(observed, blocks, template.tokenizer, native_view,
+                    prompt_tokens=len(fixed.input_ids), output_tokens=config["execution"]["output_tokens"],
+                    policy=kv_policy, mode=config["shared"]["runtime"]["kv_mode"])
+                chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"], cost_model=costs,
+                    seconds_price=config["shared"]["runtime"]["prices"]["seconds"])
                 transition_id = f"expand:{row['task_id']}:{start}"
                 windows[transition_id] = first, time.monotonic()
                 paid_seconds += windows[transition_id][1]-first

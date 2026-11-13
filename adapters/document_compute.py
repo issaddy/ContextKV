@@ -745,6 +745,40 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
+def semantic_evidence_projection(question, units):
+    """Project complete-population semantic evidence directly to source-addressed quotes."""
+    import json
+    from controller.schema import EvidenceBlock
+    units = tuple(units)
+    blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
+        span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
+    identities = {f"S{i+1}": unit for i, unit in enumerate(units)}
+    schema = {"type": "object", "properties": {"evidence": {"type": "array", "items": {
+        "type": "object", "properties": {"source": {"enum": list(identities)},
+            "text": {"type": "string", "minLength": 1}, "occurrence": {"type": "integer", "minimum": 0}},
+        "required": ["source", "text", "occurrence"], "additionalProperties": False}}},
+        "required": ["evidence"], "additionalProperties": False}
+    instruction = ("Examine every supplied source for the current question. Return exact source quotes containing "
+        "all facts needed for the requested result. Preserve qualifying entities, directed relationships, "
+        "exceptions, conditions, dates, units and versions together. For a complete list or a global relationship "
+        "question, retain every relevant member or relationship in this batch, not just representative examples. "
+        "Apply the question's scope and eligibility restrictions, retaining the evidence for each qualifying result. "
+        "Omit a source only after examining it and finding no relevant evidence. Do not answer the question or "
+        "produce a selection ranking. Text must be copied exactly; occurrence is its zero-based occurrence "
+        "within the named source. Use concise quotes and omit unrelated material.\nQuestion: " + question)
+
+    def decode_evidence(text):
+        result = []
+        for entry in json.loads(text)["evidence"]:
+            unit = identities[entry["source"]]
+            quote, span = _literal_source(unit, entry)
+            result.append(EvidenceBlock(span.source_key, "", unit.heading, quote,
+                span=(span.start, span.end)))
+        return tuple(result)
+
+    return SemanticBinding(blocks, instruction, schema, decode_evidence)
+
+
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""
     from dataclasses import replace

@@ -33,6 +33,7 @@ class QueryHeads(nn.Module):
         self.history = nn.Linear(hidden_size, 1)
         self.operation = nn.Linear(hidden_size, len(OPERATIONS))
         self.scope = nn.Linear(hidden_size, len(SCOPES))
+        self.coverage = nn.Linear(hidden_size, len(SCOPES))
         self.join = nn.Linear(hidden_size, 2)
         self.distinct = nn.Linear(hidden_size, 2)
         self.condition_type = nn.Linear(hidden_size, len(CONDITION_TYPES))
@@ -61,6 +62,7 @@ class QueryHeads(nn.Module):
             "history": self.history(token_states).squeeze(-1),
             "version_mode": self.version_mode(pooled),
             "temporal_relation": self.temporal_relation(pooled),
+            "coverage_scope": self.coverage(pooled),
         }
 
     def edges(self, left, right):
@@ -76,7 +78,8 @@ class EvidenceHeads(nn.Module):
         self.field = nn.Linear(hidden_size, len(FIELD_ROLES) * 3)
         self.binding = ScaledBilinear(hidden_size, hidden_size, len(FIELD_ROLES))
         self.join = ScaledBilinear(hidden_size, hidden_size, 1)
-        self.set_utility = nn.Sequential(nn.Linear(3, 16), nn.GELU(), nn.Linear(16, 1))
+        self.set_item = nn.Sequential(nn.Linear(513, 32), nn.GELU())
+        self.set_utility = nn.Sequential(nn.Linear(99, 32), nn.GELU(), nn.Linear(32, 1))
 
     def field_logits(self, states, need_vectors):
         queries = F.layer_norm(self.query(need_vectors), (states.shape[-1],))
@@ -86,18 +89,18 @@ class EvidenceHeads(nn.Module):
         return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
 
     def utility(self, embeddings, relevance, selected):
-        mask = selected.to(embeddings.dtype)
+        items = self.set_item(torch.cat((embeddings, relevance[:, None]), -1))
+        mask = selected.to(items.dtype)
         count = mask.sum(-1, keepdim=True)
-        summed = mask @ embeddings
-        total_score = mask @ relevance[:, None]
-        return self.utility_pooled(summed, count, total_score)
-
-    def utility_pooled(self, summed, count, total_score):
+        summed = mask @ items
         means = summed / count.clamp_min(1)
-        # Frozen Jina relevance and mean-vector coherence transfer across domains;
-        # the small head learns their generator utility and set-size interaction.
-        features = torch.cat((total_score / count.clamp_min(1),
-                              means.square().sum(-1, keepdim=True), count / (count + 1)), dim=-1)
+        maximum = items[None].expand(len(mask), -1, -1).masked_fill(~selected.bool()[..., None], -torch.inf).amax(1)
+        maximum = torch.where(count > 0, maximum, torch.zeros_like(maximum))
+        # Retain semantic coordinates and pair interactions; equal relevance and
+        # set size no longer make complementary and redundant sets identical.
+        pairs = (summed.square() - mask @ items.square()) / (count * (count-1)).clamp_min(1)
+        mean_score = (mask @ relevance[:, None]) / count.clamp_min(1)
+        features = torch.cat((means, maximum, pairs, mean_score, count/(count+1), (count > 0).to(items.dtype)), -1)
         values = self.set_utility(features).sigmoid()
         empty = self.set_utility(torch.zeros_like(features)).sigmoid()
         return (values - empty).squeeze(-1)

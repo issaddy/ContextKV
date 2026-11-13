@@ -96,6 +96,7 @@ class TaskState:
     current_turn_id: int = 0
     query: str = ""
     effective_source_scope: tuple[EvidenceKey, ...] | None = None
+    coverage_scope: str = "selected_sources"
 
 
 @dataclass(frozen=True)

@@ -55,6 +55,87 @@ def source_address(block):
         key.corpus_id, key.document_id, key.version, key.passage_id, f"{start}:{end}"))
 
 
+def blocks_for_units(units, source_blocks):
+    sources = {block.key: block for block in source_blocks}
+    result = {}
+    for unit in units:
+        for span in unit.source_spans:
+            block = sources[span.source_key]
+            base = block.span[0] if block.span else 0
+            item = replace(block, text=block.text[span.start-base:span.end-base],
+                           span=(span.start, span.end), token_ids=())
+            result[source_address(item)] = item
+    return tuple(result.values())
+
+
+class EvidenceCosts:
+    """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
+
+    def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
+                 output_tokens, policy, mode="auto"):
+        self.sources, self.lengths = {}, {}
+        for unit in units:
+            blocks = blocks_for_units((unit,), source_blocks)
+            self.sources[unit.unit_id] = tuple(source_address(block) for block in blocks)
+            self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
+                                for block in blocks)
+        self.snapshot = snapshot
+        self.costs = {**policy["costs"], **snapshot["costs"]}
+        self.prompt_tokens = prompt_tokens
+        self.output_tokens = min(output_tokens, snapshot["output_tokens"] or output_tokens)
+        self.ratio = policy["recompute_ratio"]
+        self.quality_cost = policy.get("quality_loss", 0) * policy.get("quality_price_ms", 0)
+        self.mode = mode
+
+    def addresses(self, ids):
+        return tuple(dict.fromkeys(address for identity in ids for address in self.sources[identity]))
+
+    def _native(self, addresses):
+        costs = self.costs
+        tokens = self.prompt_tokens + sum(self.lengths[address]+20 for address in addresses)
+        saved = 0.0
+        for prefix in self.snapshot["prefixes"]:
+            chain = tuple(prefix["source_ids"])
+            if addresses[:len(chain)] == chain:
+                saved = max(saved, prefix["gpu_tokens"]*costs["prefill_token_ms"] +
+                    prefix["host_tokens"]*(costs["prefill_token_ms"]-costs.get("transfer_token_ms", 0)))
+        return max(0.0, tokens*costs["prefill_token_ms"]-saved) + self.output_tokens*costs["exact_decode_token_ms"]
+
+    def order(self, ids):
+        ids = tuple(ids)
+        best, price = ids, self._native(self.addresses(ids))
+        owners = {source: identity for identity in ids for source in self.sources[identity]}
+        for prefix in self.snapshot["prefixes"]:
+            chain = prefix["source_ids"]
+            if all(source in owners for source in chain):
+                front = tuple(dict.fromkeys(owners[source] for source in chain))
+                ordered = (*front, *(identity for identity in ids if identity not in front))
+                cost = self._native(self.addresses(ordered))
+                if cost < price:
+                    best, price = ordered, cost
+        return best
+
+    def estimate(self, ids):
+        addresses = self.addresses(self.order(ids))
+        native = self._native(addresses)
+        if self.mode == "exact":
+            return native
+        costs, cold, host = self.costs, 0, 0
+        for address in addresses:
+            resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
+            length = self.lengths[address]
+            if resident["gpu_tokens"] + resident["host_tokens"] >= length:
+                host += min(length, resident["host_tokens"])
+            else:
+                cold += length
+        body = sum(self.lengths[address] for address in addresses)
+        prompt = self.prompt_tokens+20*len(addresses)
+        infoflow = (cold*costs["build_token_ms"] + host*costs.get("transfer_token_ms", 0) +
+            prompt*costs["score_token_ms"] + (prompt+self.ratio*body)*costs["recompute_token_ms"] +
+            self.output_tokens*costs["infoflow_decode_token_ms"] + self.quality_cost)
+        return infoflow if self.mode == "infoflow" else min(native, infoflow)
+
+
 def compact_computations(results):
     sources, records = {}, []
     for result in results:

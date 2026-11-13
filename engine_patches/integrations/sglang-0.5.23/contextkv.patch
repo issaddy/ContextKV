@@ -281,7 +281,7 @@ diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache
 diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
 --- a/python/sglang/srt/entrypoints/http_server.py
 +++ b/python/sglang/srt/entrypoints/http_server.py
-@@ -1022,6 +1022,30 @@
+@@ -1022,6 +1022,36 @@
          raise ValueError("decision_layout is set only by /v1/systemone")
 
 
@@ -301,6 +301,12 @@ diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/en
 +@auth_level(AuthLevel.ADMIN_OPTIONAL)
 +async def contextkv_close(request: Request):
 +    return await _global_state.tokenizer_manager.contextkv_control("close_session", await request.json())
++
++
++@app.post("/context/evidence/state")
++@auth_level(AuthLevel.ADMIN_OPTIONAL)
++async def contextkv_evidence_state(request: Request):
++    return await _global_state.tokenizer_manager.contextkv_control("evidence_state", await request.json())
 +
 +
 +@app.post("/context/profile/prepare")

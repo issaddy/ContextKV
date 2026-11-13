@@ -18,15 +18,17 @@ from training.shared_collection import numbered_text, numbered_sources, word_ref
 
 
 TASK_INSTRUCTION = """Label a document-QA request for a shared query encoder. Use only the visible conversation and question.
-Return JSON with rewritten_query, needs, conditions, history_refs, version_intent.
+Return JSON with rewritten_query, coverage_scope, needs, conditions, history_refs, version_intent.
 Every text reference is {message_id,word_boundaries:[a,b]}, selecting the displayed numbered words.
 The two zero-based boundary indices select an inclusive span, in either order.
 Use the ID of the message actually containing the intended words. Do not return words or turn IDs as references.
 needs: [{need_id,anchor_refs,subject_refs,operation,scope,condition_ids,predecessor_need_ids,query,join,distinct}].
 operation: lookup/enumerate/procedure/compare/count/sum/mean/min/max/group/infer; scope: selected_sources/all_supplied_documents.
 operation names the requested result: grouped totals use sum, grouped counts use count, and group means listing rows by category.
-scope describes the requested computation population. Ordinary lookup/procedure/inference uses selected_sources;
-all_supplied_documents is for an aggregate or complete listing across the declared documents, not a synonym for using evidence.
+coverage_scope independently states whether the answer needs support from relevant sources (selected_sources)
+or requires examining a complete declared population (all_supplied_documents). Complete enumeration, universal
+claims and global relationships can require full coverage without numeric arithmetic. A question using supplied
+evidence does not itself require full coverage. Each Need's scope applies the same distinction to that result.
 Split independent requested results into separate Needs. query is a standalone search query for that Need.
 Give each Need one concise contiguous anchor reference; keep subjects and conditions in their own references.
 Every Need anchor must belong to current_message_id; history supplies subject, condition and history_refs.
@@ -79,7 +81,7 @@ def task_annotations(raw, locations):
         "scope": item["scope"], "condition_ids": item["condition_ids"],
         "predecessor_need_ids": item["predecessor_need_ids"]} for item in raw["needs"]]
     version = raw["version_intent"]
-    return {"task_state": {"conditions": conditions, "needs": needs,
+    return {"task_state": {"conditions": conditions, "needs": needs, "coverage_scope": raw["coverage_scope"],
         "working_history": [ref(item) for item in raw["history_refs"]],
         "version_intent": {**version, "time_refs": [ref(item) for item in version["time_refs"]]}},
         "rewritten_query": raw["rewritten_query"], "need_queries": [item["query"] for item in raw["needs"]],
@@ -99,7 +101,7 @@ def task_label_schema(locations, catalogue):
     current_ref = word_reference_schema({current_id: locations[current_id]}, "message_id")
     def ids(values):
         return array({"enum": list(dict.fromkeys(values))}) if values else {"type": "array", "maxItems": 0, "items": string}
-    return obj({"rewritten_query": string, "needs": array(obj({
+    return obj({"rewritten_query": string, "coverage_scope": {"enum": ["selected_sources", "all_supplied_documents"]}, "needs": array(obj({
         "need_id": string, "anchor_refs": {**array(current_ref), "minItems": 1, "maxItems": 1},
         "subject_refs": array(ref), "operation": {"enum": "lookup enumerate procedure compare count sum mean min max group infer".split()},
         "scope": {"enum": ["selected_sources", "all_supplied_documents"]}, "condition_ids": array(string),
@@ -249,6 +251,53 @@ async def prepare_labels(args):
             "dev": sum(row["split"] == "dev" and row["task_id"] in completed for row in states), "output": str(output)}
 
 
+async def refresh_coverage(args):
+    """Relabel scope from the question and conversation, independent of operation labels."""
+    import httpx
+    from training.controlled_tasks import coverage_states
+    datasets = {path: [json.loads(line) for line in Path(path).read_text().splitlines() if line]
+                for path in args.refresh_coverage}
+    states = {row["task_id"]: row for rows in datasets.values() for row in rows if not row.get("coverage_only")}
+    values, semaphore = list(states.values()), asyncio.Semaphore(args.concurrency)
+    instruction = ("Classify the evidence coverage required by each question using its conversation. "
+        "selected_sources means relevant evidence can support the answer: explanations, procedures, specific "
+        "lookups or comparisons. all_supplied_documents means the declared population must be examined: "
+        "complete enumeration of qualifying members, aggregate over every record, absence/universal claims, "
+        "or a global relationship/property. This distinction is independent of numeric arithmetic. "
+        "Using only provided documents does NOT imply examining every document. Listing all steps/types "
+        "from one explanatory passage is selected_sources. Return each id and coverage_scope.")
+    schema = {"type": "object", "properties": {"labels": {"type": "array", "items": {
+        "type": "object", "properties": {"id": {"type": "string"}, "coverage_scope": {
+            "enum": ["selected_sources", "all_supplied_documents"]}}, "required": ["id", "coverage_scope"],
+        "additionalProperties": False}}}, "required": ["labels"], "additionalProperties": False}
+    async with httpx.AsyncClient(timeout=180) as client:
+        async def classify(batch):
+            async with semaphore:
+                response = await client.post(args.endpoint[0].rstrip("/")+"/v1/chat/completions", json={
+                    "model": args.teacher_model, "temperature": 0, "max_tokens": 1024,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps([
+                        {"id": row["task_id"], "question": row["question"], "history": row["history"]} for row in batch])}],
+                    "response_format": {"type": "json_schema", "json_schema": {"name": "coverage", "schema": schema}}})
+                response.raise_for_status()
+                return json.loads(response.json()["choices"][0]["message"]["content"])["labels"]
+        labels = {item["id"]: item["coverage_scope"] for batch in await asyncio.gather(
+            *(classify(values[start:start+8]) for start in range(0, len(values), 8))) for item in batch}
+    for path, rows in datasets.items():
+        for row in rows:
+            if row.get("coverage_only"):
+                continue
+            scope = labels[row["task_id"]]
+            row["task_state"]["coverage_scope"] = scope
+            for need in row["task_state"]["needs"]:
+                need["scope"] = scope
+        Path(path).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
+    queries = [row for row in datasets[args.refresh_coverage[0]] if not row.get("coverage_only")]
+    queries.extend(coverage_states())
+    Path(args.output).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in queries))
+    return {"relabelled": len(labels), "query_states": len(queries), "output": args.output}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="data/multidoc2dial/source")
@@ -258,6 +307,7 @@ def main():
     parser.add_argument("--teacher-model", default="/data/models/qwen3-32b")
     parser.add_argument("--output", required=True)
     parser.add_argument("--task-only", action="store_true", help="Label diverse conversation pairs without evidence retrieval or field annotation")
+    parser.add_argument("--refresh-coverage", nargs="+", help="Existing task/field/set labels to correct with the fixed teacher")
     parser.add_argument("--train-states", type=int, default=24)
     parser.add_argument("--dev-states", type=int, default=8)
     parser.add_argument("--controlled-train-families", type=int, default=2)
@@ -267,7 +317,7 @@ def main():
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    print(json.dumps(asyncio.run(prepare_labels(args))))
+    print(json.dumps(asyncio.run(refresh_coverage(args) if args.refresh_coverage else prepare_labels(args))))
 
 
 if __name__ == "__main__":
