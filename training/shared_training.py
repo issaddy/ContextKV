@@ -302,32 +302,45 @@ def train_evidence(args):
     encoder = SharedEvidenceEncoder(args.model, args.init_asset, device=args.device, train=True)
     encoder.model.requires_grad_(False).eval()
     optimizer = torch.optim.AdamW(encoder.heads.parameters(), lr=args.learning_rate)
-    training = [row for row in rows(args.data) if row["split"] == "train"
-                and (bool(row["task_state"]["needs"] and row["units"]) if args.field_only else bool(row.get("sets")))]
+    data = [row for row in rows(args.data)
+            if (bool(row["task_state"]["needs"] and row["units"]) if args.field_only else bool(row.get("sets")))]
+    training = [row for row in data if row["split"] == "train"]
     steps, total = 0, 0.
+    selection = {}
     if not args.field_only:
         # The set collector uses inferred tasks. Encode that same query view once;
         # only the lightweight set head changes across fitting epochs.
-        encoded = []
-        for row in training:
+        encoded = {"train": [], "dev": []}
+        for row in data:
             query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
                 catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
             units = tuple(decode(EvidenceUnit, item) for item in row["units"])
             with torch.no_grad():
-                _, embeddings, relevance, _, _ = encoder.forward_evidence(query, units)
+                evidence = encoder.encode(query, units)
+                embeddings, relevance = evidence.embeddings, evidence.relevance
+                support, completed = evidence.need_support(units,
+                    tuple(need.need_id for need in query.task.needs), row["completed_needs"])
             masks = embeddings.new_tensor([[unit.unit_id in item["unit_ids"] for unit in units] for item in row["sets"]])
             qualities = embeddings.new_tensor([item["quality"] for item in row["sets"]])
-            encoded.append((embeddings, relevance, masks, qualities))
+            encoded[row["split"]].append((embeddings, relevance, masks, qualities, support, completed))
         optimizer = torch.optim.AdamW([p for name, p in encoder.heads.named_parameters()
                                       if name.startswith("set_")], lr=args.learning_rate)
-        for _ in range(args.epochs):
-            for example in encoded:
+        best_loss, best = float("inf"), None
+        for epoch in range(args.epochs):
+            for example in encoded["train"]:
                 optimizer.zero_grad(set_to_none=True)
                 loss = encoder.heads.loss(*example)
                 loss.backward()
                 optimizer.step()
                 total += loss.item()
                 steps += 1
+            with torch.no_grad():
+                dev_loss = sum(float(encoder.heads.loss(*example)) for example in encoded["dev"])/len(encoded["dev"])
+                if dev_loss < best_loss:
+                    best_loss = dev_loss
+                    best = {name: value.clone() for name, value in encoder.heads.state_dict().items()}
+                    selection = {"dev_states": len(encoded["dev"]), "dev_loss": dev_loss, "epoch": epoch+1}
+        encoder.heads.load_state_dict(best)
     else:
         for _ in range(args.epochs):
             for row in training:
@@ -348,7 +361,8 @@ def train_evidence(args):
     torch.save(encoder.heads.state_dict(), output / "heads.pt")
     (output / "training.json").write_text(json.dumps({"model": args.model, "states": len(training),
         "steps": steps, "loss": total/steps, "method": "shared_fields_generator_set_utility",
-        "quality_target": "bounded_answer_gain_listwise", "phase": "fields" if args.field_only else "sets"}, indent=2)+"\n")
+        "quality_target": "bounded_answer_gain_listwise", "phase": "fields" if args.field_only else "sets",
+        **selection}, indent=2)+"\n")
 
 
 def train_coverage(args):

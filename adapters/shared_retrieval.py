@@ -258,7 +258,8 @@ class SharedEvidenceProvider:
         selected = ()
         if complete_population and not full:
             # An open search collection is not the population supplied for computation.
-            selected = evidence.select(initial, body_tokens=available)
+            selected = evidence.select(initial, body_tokens=available,
+                need_ids=tuple(need.need_id for need in query.task.needs))
             anchors = tuple(span.source_key for identity in selected for span in by_id[identity].source_spans)
             population_keys = corpus.document_keys(anchors, legal)
             pool = replace(directory.full_scope(population_keys), scope_id="located_documents")

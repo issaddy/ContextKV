@@ -336,7 +336,8 @@ class CooperativeController:
             native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
             policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"))
         state.selected_ids = (() if closed else state.evidence.select(units, body_tokens=budget,
-            cost_model=state.costs, seconds_price=self.prices.seconds))
+            cost_model=state.costs, seconds_price=self.prices.seconds,
+            need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed))
 
     async def _population_sources(self, state, snapshot, computations, complete):
         from adapters.document_compute import semantic_evidence_projection

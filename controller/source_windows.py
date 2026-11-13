@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 
 SOURCE_WINDOW_TOKENS = 2048
-SOURCE_WINDOW_LINES = 8
 
 
 def numbered_text(text):
@@ -53,14 +52,12 @@ def source_window_spans(text, tokenizer, *, tokens=SOURCE_WINDOW_TOKENS):
             start = cut
         rows.append((start, end))
         start = end
-    windows, first, last, lines = [], 0, 0, 0
+    windows, first, last = [], 0, 0
     for start, end in rows:
-        nonempty = bool(text[start:end].strip())
-        if last > first and (size(first, end) > tokens or lines + nonempty > SOURCE_WINDOW_LINES):
+        if last > first and size(first, end) > tokens:
             windows.append((first, last))
-            first, lines = start, 0
+            first = start
         last = end
-        lines += nonempty
     if last > first:
         windows.append((first, last))
     return tuple(windows)

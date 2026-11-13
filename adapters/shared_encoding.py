@@ -60,7 +60,13 @@ class QueryEncoding:
     distinct_needs: frozenset = frozenset()
 
     def text(self, refs):
-        return " ".join(self.texts[(ref.turn_id, ref.speaker)][ref.start:ref.end] for ref in refs)
+        merged = []
+        for ref in sorted(set(refs), key=lambda r: (r.turn_id, r.speaker, r.start, r.end)):
+            if merged and (merged[-1].turn_id, merged[-1].speaker) == (ref.turn_id, ref.speaker) and ref.start <= merged[-1].end:
+                merged[-1] = replace(merged[-1], end=max(merged[-1].end, ref.end))
+            else:
+                merged.append(ref)
+        return " ".join(self.texts[(ref.turn_id, ref.speaker)][ref.start:ref.end] for ref in merged)
 
     @property
     def pooled(self):
@@ -129,7 +135,22 @@ class EvidenceEncoding:
             self.relevance[~mask].mean().item() if len(rest) else 0.])
         return torch.cat((mean, maximum, remaining, stats))
 
-    def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0):
+    def need_support(self, units, need_ids, completed=()):
+        """Use the shared field bindings as soft support, with computed Needs already known."""
+        by_id = {unit.unit_id: unit for unit in units}
+        positions = {identity: i for i, identity in enumerate(need_ids)}
+        support = self.embeddings.new_zeros((len(self.unit_ids), len(need_ids)))
+        for binding in self.bindings:
+            if binding.role == "source" and binding.need_id in positions:
+                for i, identity in enumerate(self.unit_ids):
+                    if any(span.source_key == binding.source_span.source_key
+                           and span.start <= binding.source_span.start and binding.source_span.end <= span.end
+                           for span in by_id[identity].source_spans):
+                        j = positions[binding.need_id]
+                        support[i, j] = max(float(support[i, j]), binding.score)
+        return support, self.embeddings.new_tensor([identity in completed for identity in need_ids])
+
+    def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0, need_ids=(), completed=()):
         """Choose a dependency-closed set using semantic gain and actual acquisition cost."""
         import numpy as np
         import torch
@@ -152,6 +173,7 @@ class EvidenceEncoding:
                     pending.extend(consumers[member])
             closures.append(tuple(members))
         tokens = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids])
+        support, known = self.need_support(units, need_ids, completed)
         active = np.ones(count, dtype=bool)
         with torch.no_grad():
             while active.any():
@@ -166,7 +188,7 @@ class EvidenceEncoding:
                 masks = np.unique(np.stack([active, *alternatives]), axis=0)
                 masks = np.concatenate((active[None], masks[~np.all(masks == active, axis=1)]))
                 values = self.heads.utility(self.embeddings, self.relevance,
-                    torch.as_tensor(masks, device=self.embeddings.device)).cpu().numpy()
+                    torch.as_tensor(masks, device=self.embeddings.device), support, known).cpu().numpy()
                 costs = (np.asarray([cost_model.estimate(tuple(identity for identity, keep in
                     zip(self.unit_ids, mask) if keep)) for mask in masks]) if cost_model else np.zeros(len(masks)))
                 objectives = values - seconds_price * costs / 1000
@@ -435,6 +457,16 @@ class SharedQueryEncoder:
                     else:
                         history_refs.append(ref)
             mode = VERSION_MODES[int(logits["version_mode"].argmax())]
+            # Literal catalogue identifiers are source constraints, independent
+            # of the learned intent class. Match complete identifiers only.
+            import re
+            explicit_versions = tuple(dict.fromkeys(row["version"] for row in catalogue
+                if re.search(r"(?<![\w.])"+re.escape(row["version"])+r"(?![\w.])", question, re.IGNORECASE)))
+            if explicit_versions:
+                selected_versions = list(explicit_versions)
+                selected_families = [row["family"] for row in catalogue if row["version"] in explicit_versions]
+                if mode == "current":
+                    mode = "explicit"
             intent = VersionIntent(mode,
                 document_families=tuple(dict.fromkeys(selected_families)),
                 version_ids=tuple(dict.fromkeys(selected_versions)) if mode != "current" else (),

@@ -88,7 +88,10 @@ async def collect(args):
     from adapters.shared_retrieval import SharedEvidenceState, SharedEvidenceProvider
     from adapters.document_compute import DocumentIndex
     query_encoder = SharedQueryEncoder(**config["shared"]["query"])
-    evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
+    # Set collection needs the existing field head, not a previously fitted set head.
+    evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"], train=args.stage == "sets")
+    evidence_encoder.model.eval()
+    evidence_encoder.heads.eval()
     controller = CooperativeController(None, engine, template, settings=run.cooperative, policy=run.context)
     kv_policy = controller.kv_policy
     if args.stage == "stop":
@@ -145,7 +148,7 @@ async def collect(args):
                     branch = replace(state, selected_ids=chosen, cache_scope=identity, cache_namespace=identity)
                     item = await answer(row, branch, snapshot, identity, totals)
                     observations.append((chosen, item))
-                outputs.append((row, observations))
+                outputs.append(({**row, "completed_needs": sorted(state.completed_needs)}, observations))
                 return
             from controller.value_policy import StopValueHead
             paid_seconds = time.monotonic()-started

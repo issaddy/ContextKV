@@ -78,8 +78,7 @@ class EvidenceHeads(nn.Module):
         self.field = nn.Linear(hidden_size, len(FIELD_ROLES) * 3)
         self.binding = ScaledBilinear(hidden_size, hidden_size, len(FIELD_ROLES))
         self.join = ScaledBilinear(hidden_size, hidden_size, 1)
-        self.set_item = nn.Sequential(nn.Linear(513, 32), nn.GELU())
-        self.set_utility = nn.Sequential(nn.Linear(99, 32), nn.GELU(), nn.Linear(32, 1))
+        self.set_utility = nn.Sequential(nn.Linear(12, 16), nn.GELU(), nn.Linear(16, 1))
 
     def field_logits(self, states, need_vectors):
         queries = F.layer_norm(self.query(need_vectors), (states.shape[-1],))
@@ -88,25 +87,44 @@ class EvidenceHeads(nn.Module):
         # The product gives each Need its own token ordering in each BIO/role logit.
         return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
 
-    def utility(self, embeddings, relevance, selected):
-        items = self.set_item(torch.cat((embeddings, relevance[:, None]), -1))
-        mask = selected.to(items.dtype)
+    def utility(self, embeddings, relevance, selected, support, completed):
+        """Predict answer gain from relevance, semantic coverage and remaining Needs."""
+        selected = selected.bool()
+        mask = selected.to(embeddings.dtype)
         count = mask.sum(-1, keepdim=True)
-        summed = mask @ items
-        means = summed / count.clamp_min(1)
-        maximum = items[None].expand(len(mask), -1, -1).masked_fill(~selected.bool()[..., None], -torch.inf).amax(1)
-        maximum = torch.where(count > 0, maximum, torch.zeros_like(maximum))
-        # Retain semantic coordinates and pair interactions; equal relevance and
-        # set size no longer make complementary and redundant sets identical.
-        pairs = (summed.square() - mask @ items.square()) / (count * (count-1)).clamp_min(1)
-        mean_score = (mask @ relevance[:, None]) / count.clamp_min(1)
-        features = torch.cat((means, maximum, pairs, mean_score, count/(count+1), (count > 0).to(items.dtype)), -1)
+        maximum = relevance[None].expand_as(mask).masked_fill(~selected, -torch.inf).amax(-1, keepdim=True)
+        minimum = relevance[None].expand_as(mask).masked_fill(~selected, torch.inf).amin(-1, keepdim=True)
+        maximum = torch.where(count > 0, maximum, 0.)
+        minimum = torch.where(count > 0, minimum, 0.)
+        total = mask @ relevance[:, None]
+        similarity = (embeddings @ embeddings.T).clamp(0, 1)
+        pairs = mask[:, :, None]*mask[:, None, :]*(1-torch.eye(len(relevance), device=mask.device))
+        redundancy = (pairs*similarity).sum((1, 2))[:, None]/(count*(count-1)).clamp_min(1)
+        coverage = (similarity[None]*mask[:, :, None]).amax(1)
+        weights = relevance.clamp_min(0)
+        covered = (coverage*weights).sum(-1, keepdim=True)/weights.sum().clamp_min(1e-6)
+        if support.shape[1]:
+            need_coverage = (mask[:, :, None]*support[None]).amax(1)
+            need_coverage = torch.maximum(need_coverage, completed[None])
+            need_mean = need_coverage.mean(-1, keepdim=True)
+            need_min = need_coverage.amin(-1, keepdim=True)
+            known = completed.mean().expand_as(count)
+        else:
+            need_mean = need_min = known = torch.zeros_like(count)
+        features = torch.cat((maximum, minimum, total/count.clamp_min(1), total,
+            count.log1p(), redundancy, covered, need_mean, need_min, known,
+            count.new_full(count.shape, float(support.shape[1])).log1p(), (count > 0).to(mask.dtype)), -1)
         values = self.set_utility(features).sigmoid()
-        empty = self.set_utility(torch.zeros_like(features)).sigmoid()
+        empty_features = torch.zeros_like(features)
+        empty_features[:, 7:10] = known
+        if support.shape[1]:
+            empty_features[:, 8] = completed.min()
+        empty_features[:, 10] = features[:, 10]
+        empty = self.set_utility(empty_features).sigmoid()
         return (values - empty).squeeze(-1)
 
-    def loss(self, embeddings, relevance, masks, qualities):
-        predictions = self.utility(embeddings, relevance, masks)
+    def loss(self, embeddings, relevance, masks, qualities, support, completed):
+        predictions = self.utility(embeddings, relevance, masks, support, completed)
         empty = (masks == 0).all(dim=-1)
         gains = qualities-qualities[empty].mean()
         loss = F.mse_loss(predictions, gains)
