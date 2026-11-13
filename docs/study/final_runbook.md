@@ -1,6 +1,6 @@
 # ContextKV 运行手册
 
-当前版本使用共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。共享索引及辅助训练已完成：54 个训练状态、23 个开发状态，集合效用使用 274 次实际答案，停止监督使用 47 条轨迹、92 次终点答案。SGLang 精确生成、独立块构建、GPU 热复用及 Host 备份已实际跑通；逐 benchmark 端到端评测正在运行。
+当前版本使用共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。共享索引及 190 个训练状态、39 个开发状态的查询训练已完成，字段与收益资产正在绑定更新。普通 RAG 四项 benchmark 各 10 题已完成生成与评分，ContextKV 与 LlamaIndex 对照尚未完成。SGLang 精确生成、独立块构建、GPU 热复用及 Host 备份已实际跑通。
 
 ## 路径与环境
 
@@ -34,6 +34,13 @@
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 python3 -m training.prepare_shared_labels \
+  --task-only --source data/multidoc2dial/source \
+  --query-model models/qwen3-embedding-0.6b \
+  --endpoint http://127.0.0.1:30000 \
+  --output data/training/shared/query_labels.jsonl \
+  --train-states 160 --dev-states 24 --concurrency 4
+
+python3 -m training.prepare_shared_labels \
   --source data/multidoc2dial/source \
   --query-model models/qwen3-embedding-0.6b \
   --endpoint http://127.0.0.1:30000 \
@@ -42,7 +49,7 @@ python3 -m training.prepare_shared_labels \
 
 python3 -m training.shared_training query \
   --model models/qwen3-embedding-0.6b \
-  --data data/training/shared/labels.jsonl \
+  --data data/training/shared/query_labels.jsonl \
   --output models/shared-query --device cuda:2 --epochs 5
 
 python3 -m training.shared_index \
@@ -78,7 +85,7 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
-标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。集合样本保存候选集合、实际质量和完整成本；停止样本保存紧凑表示及多步回报需要的费用。必须完成的数值总体由覆盖规则执行，不学习提前停止。
+标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样，覆盖更多会话；字段监督复用独立的来源标注。集合样本保存候选集合、实际质量和完整成本；停止样本保存紧凑表示及多步回报需要的费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
 ## 少量端到端评测
 
