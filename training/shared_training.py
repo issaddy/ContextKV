@@ -89,7 +89,7 @@ def task_loss(encoder, row):
         [TEMPORAL_RELATIONS.index(task.version_intent.temporal_relation)], device=device)))
 
     def pool(spans):
-        return states[positions(spans)].mean(0)+encoder.heads.context(states[-1])
+        return logits["features"][positions(spans)].mean(0)
 
     need_vectors = torch.stack([pool(need.anchor_spans) for need in task.needs]) if task.needs else states[:0]
     condition_vectors = (torch.stack([pool((condition.predicate_span or condition.key_span,))
@@ -235,11 +235,13 @@ def train_evidence(args):
                 catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
             # Field supervision uses annotated Need ownership on the same visible input.
             task = task_label(row)
+            with torch.no_grad():
+                features = query_encoder.heads.contextualize(query.token_states, query.token_states[-1])
             def pool(refs):
                 indices = [i for i, token in enumerate(query.token_refs) if token is not None and any(
                     token.turn_id == ref.turn_id and token.speaker == ref.speaker
                     and token.start < ref.end and ref.start < token.end for ref in refs)]
-                return query.token_states[indices].mean(0)+query_encoder.heads.context(query.token_states[-1])
+                return features[indices].mean(0)
             query.task = task
             query.need_vectors = (torch.nn.functional.normalize(query_encoder.heads.need_projection(
                 torch.stack([pool(need.anchor_spans) for need in task.needs])), dim=-1).detach()

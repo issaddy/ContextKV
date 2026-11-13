@@ -18,6 +18,13 @@ FILTER_OPERATORS = ("eq", "ne", "lt", "le", "gt", "ge", "in", "contains")
 STATE_DIM = 1540
 
 
+class ScaledBilinear(nn.Bilinear):
+    def forward(self, left, right):
+        left = F.layer_norm(left, (self.in1_features,))
+        right = F.layer_norm(right, (self.in2_features,))
+        return super().forward(left, right) * self.in1_features ** -.5
+
+
 class QueryHeads(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -33,15 +40,23 @@ class QueryHeads(nn.Module):
         self.filter_operator = nn.Linear(hidden_size, len(FILTER_OPERATORS))
         self.version_mode = nn.Linear(hidden_size, len(VERSION_MODES))
         self.temporal_relation = nn.Linear(hidden_size, len(TEMPORAL_RELATIONS))
-        self.version = nn.Bilinear(hidden_size, hidden_size, 1)
-        self.family = nn.Bilinear(hidden_size, hidden_size, 1)
-        self.edge = nn.Bilinear(hidden_size, hidden_size, len(EDGE_KINDS))
+        self.version = ScaledBilinear(hidden_size, hidden_size, 1)
+        self.family = ScaledBilinear(hidden_size, hidden_size, 1)
+        self.edge = ScaledBilinear(hidden_size, hidden_size, len(EDGE_KINDS))
         self.need_projection = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.eye_(self.need_projection.weight)
 
+    def contextualize(self, token_states, pooled):
+        tokens = F.layer_norm(token_states, (token_states.shape[-1],))
+        current = self.context(F.layer_norm(pooled, (pooled.shape[-1],)))
+        current = F.layer_norm(current, (current.shape[-1],))
+        return F.layer_norm(tokens + current + tokens * current, (tokens.shape[-1],))
+
     def forward(self, token_states, pooled):
-        token_states = token_states + self.context(pooled)
+        token_states = self.contextualize(token_states, pooled)
+        pooled = F.layer_norm(pooled, (pooled.shape[-1],))
         return {
+            "features": token_states,
             "span": self.span(token_states).view(*token_states.shape[:-1], len(SPAN_KINDS), 3),
             "history": self.history(token_states).squeeze(-1),
             "version_mode": self.version_mode(pooled),
@@ -59,8 +74,8 @@ class EvidenceHeads(nn.Module):
         super().__init__()
         self.query = nn.Sequential(nn.LayerNorm(query_size), nn.Linear(query_size, hidden_size, bias=False))
         self.field = nn.Linear(hidden_size, len(FIELD_ROLES) * 3)
-        self.binding = nn.Bilinear(hidden_size, hidden_size, len(FIELD_ROLES))
-        self.join = nn.Bilinear(hidden_size, hidden_size, 1)
+        self.binding = ScaledBilinear(hidden_size, hidden_size, len(FIELD_ROLES))
+        self.join = ScaledBilinear(hidden_size, hidden_size, 1)
         self.set_item = nn.Sequential(nn.Linear(embedding_size, 256), nn.GELU(), nn.Linear(256, 256))
         self.set_utility = nn.Sequential(nn.Linear(256 * 2 + 2, 128), nn.GELU(), nn.Linear(128, 1))
 
@@ -78,8 +93,11 @@ class EvidenceHeads(nn.Module):
         mask = selected.to(encoded.dtype)
         count = mask.sum(-1, keepdim=True)
         summed = mask @ encoded
-        means = summed / count.clamp_min(1)
         total_score = mask @ relevance[:, None]
+        return self.utility_pooled(summed, count, total_score)
+
+    def utility_pooled(self, summed, count, total_score):
+        means = summed / count.clamp_min(1)
         features = torch.cat((summed, means, count, total_score), dim=-1)
         return self.set_utility(features).squeeze(-1)
 

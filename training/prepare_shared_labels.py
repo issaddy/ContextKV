@@ -131,11 +131,12 @@ def prepare_states(args, tokenizer):
     records, supervision, _ = convert(json.loads((source/"multidoc2dial_doc.json").read_text()),
         json.loads((source/"multidoc2dial_dial_train.json").read_text()), dataset_version="archive-f0c034c24966",
         source_uri="https://doc2dial.github.io/multidoc2dial/", split="train", source_format="multidoc2dial")
-    corpus = CorpusIndex.from_records(records, corpus_id="multidoc2dial", snapshot_id="multidoc2dial-train")
-    directory = SourceDirectory(corpus, tokenizer)
-    by_id = directory.units_by_id
-    sparse = BM25SRetriever({identity: {"text": unit.text, "title": unit.heading} for identity, unit in by_id.items()},
-                           corpus_snapshot_id="multidoc2dial-train")
+    if not args.task_only:
+        corpus = CorpusIndex.from_records(records, corpus_id="multidoc2dial", snapshot_id="multidoc2dial-train")
+        directory = SourceDirectory(corpus, tokenizer)
+        by_id = directory.units_by_id
+        sparse = BM25SRetriever({identity: {"text": unit.text, "title": unit.heading} for identity, unit in by_id.items()},
+                               corpus_snapshot_id="multidoc2dial-train")
     tasks = list(benchmark_rows(supervision))
     sessions = sorted({row["conversation_id"] for row in tasks})
     random.Random(args.seed).shuffle(sessions)
@@ -144,6 +145,12 @@ def prepare_states(args, tokenizer):
     limits = {"train": args.train_states, "dev": args.dev_states}
     session_order = {identity: index for index, identity in enumerate(sessions)}
     tasks.sort(key=lambda row: (session_order[row["conversation_id"]], row["turn"]))
+    if args.task_only:
+        grouped = {identity: [] for identity in sessions}
+        for row in tasks:
+            grouped[row["conversation_id"]].append(row)
+        tasks = [row for start in range(0, max(map(len, grouped.values())), 2)
+                 for identity in sessions for row in grouped[identity][start:start+2]]
     for row in tasks:
         split = "dev" if row["conversation_id"] in dev_sessions else "train"
         if counts[split] >= limits[split]:
@@ -160,6 +167,12 @@ def prepare_states(args, tokenizer):
                                     question, turn, history_tokens=args.history_tokens)
         visible = {(ref.turn_id, ref.speaker) for ref in refs if ref is not None}
         history = [item for item in history if (item["turn_id"], item["speaker"]) in visible]
+        state = {"task_id": row["task_id"], "conversation_id": row["conversation_id"], "turn": turn,
+            "split": split, "question": question, "history": history, "catalogue": [], "dataset": "multidoc2dial"}
+        chosen.append(state)
+        counts[split] += 1
+        if args.task_only:
+            continue
         positives = [unit.unit_id for unit in by_id.values() if any(
             span.source_key.passage_id == label["passage_id"] and span.start < label["end"] and label["start"] < span.end
             for span in unit.source_spans for label in row["grounding"])]
@@ -171,11 +184,8 @@ def prepare_states(args, tokenizer):
             if identity not in selected:
                 selected[identity] = by_id[identity]
                 pending.extend(by_id[identity].dependencies)
-        chosen.append({"task_id": row["task_id"], "conversation_id": row["conversation_id"], "turn": turn,
-            "split": split, "question": question, "history": history, "catalogue": [],
-            "reference_answer": row["targets"][0]["text"], "dataset": "multidoc2dial",
-            "grounding": row["grounding"], "units": to_jsonable(tuple(selected.values()))})
-        counts[split] += 1
+        state.update(reference_answer=row["targets"][0]["text"], grounding=row["grounding"],
+                     units=to_jsonable(tuple(selected.values())))
     return chosen
 
 
@@ -215,11 +225,15 @@ async def prepare_labels(args):
                 "current_message_id": messages[-1]["message_id"], "catalogue": row["catalogue"]},
                 task_label_schema(message_locations, row["catalogue"]))
             row = {**row, **task_annotations(task, message_locations)}
-            sources, source_locations = numbered_sources(row["units"])
-            field = await complete(FIELD_INSTRUCTION, {"messages": messages, "task": task,
-                "sources": sources, "reference_answer": row["reference_answer"]},
-                field_label_schema(row, source_locations))
-            labeled = {**row, "bindings": source_bindings(source_locations, field["bindings"])}
+            if args.task_only:
+                labeled = {key: value for key, value in row.items()
+                           if key not in {"units", "grounding", "reference_answer"}}
+            else:
+                sources, source_locations = numbered_sources(row["units"])
+                field = await complete(FIELD_INSTRUCTION, {"messages": messages, "task": task,
+                    "sources": sources, "reference_answer": row["reference_answer"]},
+                    field_label_schema(row, source_locations))
+                labeled = {**row, "bindings": source_bindings(source_locations, field["bindings"])}
             sink.write(json.dumps(labeled, ensure_ascii=False)+"\n")
             sink.flush()
             completed.add(row["task_id"])
@@ -241,6 +255,7 @@ def main():
     parser.add_argument("--endpoint", nargs="+", default=["http://127.0.0.1:30000"])
     parser.add_argument("--teacher-model", default="/data/models/qwen3-32b")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--task-only", action="store_true", help="Label diverse conversation pairs without evidence retrieval or field annotation")
     parser.add_argument("--train-states", type=int, default=24)
     parser.add_argument("--dev-states", type=int, default=8)
     parser.add_argument("--controlled-train-families", type=int, default=2)

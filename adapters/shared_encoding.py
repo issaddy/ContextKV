@@ -117,42 +117,71 @@ class EvidenceEncoding:
         import torch
         by_id = {unit.unit_id: unit for unit in units}
         positions = {identity: index for index, identity in enumerate(self.unit_ids)}
-        chosen = set(self.unit_ids)
-        consumers = {identity: set() for identity in self.unit_ids}
+        count = len(self.unit_ids)
+        consumers = [[] for _ in self.unit_ids]
         for unit in units:
             for dependency in unit.dependencies:
-                consumers[dependency].add(unit.unit_id)
-
-        def remove(identity):
-            pending, removed = [identity], set()
-            while pending:
-                key = pending.pop()
-                if key not in removed:
-                    removed.add(key)
-                    pending.extend(consumers[key] & chosen)
-            return chosen-removed
-
+                consumers[positions[dependency]].append(positions[unit.unit_id])
+        costs = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids], dtype=np.int64)
+        active = np.ones(count, dtype=bool)
+        chosen = (1 << count)-1
         with torch.no_grad():
             encoded = self.heads.set_item(self.embeddings)
+            width = encoded.shape[-1]
+            vectors = torch.cat((encoded, self.relevance[:, None]), dim=-1).cpu().numpy()
+            items = np.empty((count, width+2), dtype=np.float64)
+            items[:, :width] = vectors[:, :width]
+            items[:, width] = 1
+            items[:, width+1] = vectors[:, width]
+            removal = np.empty_like(items)
+            removal_cost = np.empty(count, dtype=np.int64)
+            closures, owners = [], [[] for _ in self.unit_ids]
+            for root in range(count):
+                pending, members = [root], set()
+                while pending:
+                    member = pending.pop()
+                    if member not in members:
+                        members.add(member)
+                        pending.extend(consumers[member])
+                indices = list(members)
+                closures.append(sum(1 << member for member in indices))
+                removal[root] = items[indices].sum(axis=0)
+                removal_cost[root] = costs[indices].sum()
+                for member in indices:
+                    owners[member].append(root)
+            owners = [np.asarray(group, dtype=np.intp) for group in owners]
+            total, cost = items.sum(axis=0), int(costs.sum())
             while chosen:
-                candidates = [remove(identity) for identity in self.unit_ids if identity in chosen]
-                masks = np.zeros((len(candidates) + 1, len(self.unit_ids)), dtype=np.float32)
-                for row, group in enumerate([chosen, *candidates]):
-                    masks[row, [positions[identity] for identity in group]] = 1
-                values = self.heads.utility_encoded(encoded, self.relevance,
-                    torch.from_numpy(masks).to(self.embeddings.device)).cpu().numpy()
-                cost = sum(by_id[key].body_tokens for key in chosen)
+                candidates = np.flatnonzero(active)
+                pooled = np.empty((len(candidates)+1, width+2), dtype=np.float32)
+                pooled[0] = total
+                pooled[1:] = total-removal[candidates]
+                pooled = torch.from_numpy(pooled).to(self.embeddings.device)
+                values = self.heads.utility_pooled(pooled[:, :width], pooled[:, width:width+1],
+                    pooled[:, width+1:]).cpu().numpy()
                 gains = values[1:]-values[0]
                 if cost > body_tokens:
-                    freed = np.asarray([sum(by_id[key].body_tokens for key in chosen-group)
-                                        for group in candidates], dtype=values.dtype)
-                    index = int((gains/freed).argmax())
+                    index = int((gains/removal_cost[candidates].astype(values.dtype)).argmax())
                 else:
                     index = int(gains.argmax())
                 if cost <= body_tokens and gains[index] <= 0:
                     break
-                chosen = candidates[index]
-        return tuple(identity for identity in self.unit_ids if identity in chosen)
+                removed = closures[int(candidates[index])] & chosen
+                chosen &= ~removed
+                deleted = []
+                while removed:
+                    bit = removed & -removed
+                    deleted.append(bit.bit_length()-1)
+                    removed ^= bit
+                active[deleted] = False
+                total -= items[deleted].sum(axis=0)
+                cost -= int(costs[deleted].sum())
+                # Each removed item updates only closures that actually contained it.
+                for member in deleted:
+                    affected = owners[member][active[owners[member]]]
+                    removal[affected] -= items[member]
+                    removal_cost[affected] -= costs[member]
+        return tuple(identity for index, identity in enumerate(self.unit_ids) if active[index])
 
 
 def _spans(labels, coordinates):
@@ -327,8 +356,8 @@ class SharedQueryEncoder:
                 return TextRef(refs[first].turn_id, refs[first].speaker, refs[first].start, refs[last-1].end)
 
             def vectors(items):
-                context = self.heads.context(states[-1])
-                return torch.stack([states[first:last].mean(0)+context for first, last in items]) if items else states.new_empty((0, states.shape[-1]))
+                features = logits["features"]
+                return torch.stack([features[first:last].mean(0) for first, last in items]) if items else states.new_empty((0, states.shape[-1]))
 
             conditions = []
             condition_vectors = vectors(spans["condition"])
