@@ -15,17 +15,6 @@ class VersionPart:
     spans: tuple
 
 
-@dataclass(frozen=True)
-class VersionChange:
-    family: str
-    before_version: str
-    after_version: str
-    address: tuple[str, ...]
-    before: tuple
-    after: tuple
-    kind: str
-
-
 def _sections(block, metadata):
     headings = list(re.finditer(r"^(#{1,6})\s+(.+?)\s*#*\s*$", block.text, re.MULTILINE))
     if not headings:
@@ -121,73 +110,33 @@ class VersionIndex:
                   and (info[axis] < anchor if direction == "before" else info[axis] > anchor)]
         return (max(values) if direction == "before" else min(values))[1] if values else None
 
-    def changes(self, family, before_version, after_version):
-        before = self.parts[family, before_version]
-        after = self.parts[family, after_version]
-        result = []
-        for address in dict.fromkeys((*before, *after)):
-            old, new = before.get(address, ()), after.get(address, ())
-            old_text, new_text = "\n".join(part.text for part in old), "\n".join(part.text for part in new)
-            if old_text == new_text:
-                continue
-            old_spans = tuple(span for part in old for span in part.spans)
-            new_spans = tuple(span for part in new for span in part.spans)
-            if address[0] == "section" and len(old) == len(new) == 1:
-                old_spans, new_spans = self._changed_spans(old[0], new[0])
-            result.append(VersionChange(family, before_version, after_version, address,
-                old_spans, new_spans, "added" if not old else "removed" if not new else "modified"))
-        return tuple(result)
-
-    @staticmethod
-    def _changed_spans(before, after):
-        """Locate changed original lines while retaining the enclosing section relation."""
-        left, right = before.text.splitlines(keepends=True), after.text.splitlines(keepends=True)
-        left_offsets, right_offsets = [0], [0]
-        for line in left:
-            left_offsets.append(left_offsets[-1] + len(line))
-        for line in right:
-            right_offsets.append(right_offsets[-1] + len(line))
-        from controller.context_schema import SourceSpan
-        old, new = [], []
-        for operation, i, j, k, m in SequenceMatcher(None, left, right, autojunk=False).get_opcodes():
-            if operation == "equal":
-                continue
-            for target, part, offsets, start, end in (
-                    (old, before, left_offsets, i, j), (new, after, right_offsets, k, m)):
-                if start < end:
-                    source = part.spans[0]
-                    first, last = source.start + offsets[start], source.start + offsets[end]
-                    target.append(SourceSpan(f"{source.span_id}:change:{first}:{last}",
-                                             source.source_key, first, last))
-        return tuple(old), tuple(new)
-
-    def paired_evidence(self, family, before_version, after_version, addresses=()):
-        changes = self.changes(family, before_version, after_version)
-        return tuple(change for change in changes if not addresses or change.address in addresses)
-
     def paired_units(self, family, before_version, after_version, selected_spans=()):
         """Retrieve both sides of matching sections/fields, including unchanged content."""
         from controller.context_schema import EvidenceUnit
         before, after = self.parts[family, before_version], self.parts[family, after_version]
         addresses = tuple(dict.fromkeys((*before, *after)))
-        if selected_spans:
-            addresses = tuple(address for address in addresses if any(
-                source.source_key == selected.source_key and source.start < selected.end
-                and selected.start < source.end
-                for part in (*before.get(address, ()), *after.get(address, ()))
-                for source in part.spans for selected in selected_spans))
-        grouped = {}
+        pairs = []
         for address in addresses:
             left, right = before.get(address, ()), after.get(address, ())
-            if selected_spans and (len(left) > 1 or len(right) > 1):
-                pairs = _part_pairs(left, right)
-                parts = tuple(part for pair in pairs if any(
-                    source.source_key == selected.source_key and source.start < selected.end
-                    and selected.start < source.end
-                    for part in pair for source in part.spans for selected in selected_spans)
-                    for part in pair)
+            if address[0] == "section" and (not left or not right):
+                continue
+            if len(left) > 1 or len(right) > 1:
+                pairs.extend(_part_pairs(left, right))
             else:
-                parts = (*left, *right)
+                pairs.append((*left, *right))
+        # A changed heading is part of the version change, not a new document identity.
+        unmatched_before = tuple(part for address, parts in before.items()
+                                 if address[0] == "section" and address not in after for part in parts)
+        unmatched_after = tuple(part for address, parts in after.items()
+                                if address[0] == "section" and address not in before for part in parts)
+        pairs.extend(_part_pairs(unmatched_before, unmatched_after))
+        grouped = {}
+        for parts in pairs:
+            if selected_spans and not any(
+                source.source_key == selected.source_key and source.start < selected.end
+                and selected.start < source.end
+                for part in parts for source in part.spans for selected in selected_spans):
+                continue
             members = []
             for part in parts:
                 for span in part.spans:

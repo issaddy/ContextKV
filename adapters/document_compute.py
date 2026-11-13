@@ -221,7 +221,8 @@ class DocumentIndex:
         for row in table.rows:
             fields = {field.name: (replace(row[field.column], unit=field.unit,
                 qualifiers=(*row[field.column].qualifiers, field.unit_source))
-                if field.unit_source is not None else row[field.column]) for field in projection.fields}
+                if field.unit_source is not None and not row[field.column].unit else row[field.column])
+                for field in projection.fields}
             sources = _unique_spans(span for cell in fields.values() for span in _cell_sources(cell))
             record = _Record(fields, sources)
             if all(_matches(record, predicate) for predicate in projection.predicates):
@@ -270,8 +271,12 @@ class DocumentIndex:
                 key = _record_key(record, program.distinct)
                 if key in unique:
                     previous = unique[key]
-                    if program.value_field and previous.fields[program.value_field].text != record.fields[program.value_field].text:
-                        raise ValueError("distinct entity has conflicting measure values")
+                    if program.value_field:
+                        left, right = previous.fields[program.value_field], record.fields[program.value_field]
+                        values = ((quantity(left), quantity(right)) if program.operation in _NUMERIC_AGGREGATES
+                                  else (left.text, right.text))
+                        if values[0] != values[1]:
+                            raise ValueError("distinct entity has conflicting measure values")
                     record = _Record(previous.fields, _unique_spans((*previous.sources, *record.sources)))
                 unique[key] = record
             records = tuple(unique.values())
@@ -431,7 +436,12 @@ def build_programs(query, evidence, index):
                     local_conditions.add(condition_id)
             if not fields:
                 continue
-            units = [binding for binding in bindings if binding.role == "unit" and binding.table_id == table.table_id]
+            unit_sources = (*[span for span in table.header_spans if span is not None],
+                            *(span for row in table.rows for cell in row for span in cell.qualifiers))
+            units = [binding for binding in bindings if binding.role == "unit" and any(
+                source.source_key == binding.source_span.source_key
+                and source.start <= binding.source_span.start and binding.source_span.end <= source.end
+                for source in unit_sources)]
             declared_unit = max(units, key=lambda binding: binding.score) if units else None
             projections.append(Projection(table.table_id,
                 tuple(Field(name, column, declared_unit.text, declared_unit.source_span)

@@ -1,4 +1,4 @@
-"""Actual Qwen answers and measured costs for set utility and stopping heads."""
+"""Actual answer utility for sets; complete costs for stopping trajectories."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from controller.config import create_model_template, load_config
+from controller.config import create_model_template, load_config, load_kv_policy
 from controller.cooperative_request import compile_request, working_history
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceBlock, EvidenceUnit, TurnRecord
@@ -66,30 +66,33 @@ async def score_answers(rows, endpoint, *, model, concurrency):
 
 
 async def collect(args):
-    from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
     config = yaml.safe_load(Path(args.config).read_text())
     run = load_config(config["generation"]["run_config"])
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
-    await engine.profile_prepare("cold")
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
     query_encoder = SharedQueryEncoder(**config["shared"]["query"])
+    kv_policy = (load_kv_policy(config["shared"]["runtime"]) if args.stage == "stop"
+                 else {"recompute_ratio": config["shared"]["runtime"]["recompute_ratio"]})
     evidence_encoder = None
     if args.stage == "stop":
+        from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
+        await engine.profile_prepare("cold")
         # Full-population arithmetic completes by its execution contract. The
         # learned STOP action is trained on optional evidence expansion.
         source = [row for row in source if not any(need["operation"] in {
             "count", "sum", "group", "mean", "min", "max"} for need in row["task_state"]["needs"])]
         evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
-    roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
-    sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
+        roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
+        sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
+        await sampler.start()
     outputs, answers, windows, queries = [], [], {}, {}
     limit = asyncio.Semaphore(args.concurrency)
-    await sampler.start()
 
     async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None):
-        started = time.monotonic()
+        if args.stage == "stop":
+            started = time.monotonic()
         request = compile_request(template, row["question"], working_history(queries[row["task_id"]], history(row)), source_blocks(units),
                                   future_sources=source_blocks(future))
         # Every question owns its training source namespace. Warm branches share
@@ -98,21 +101,23 @@ async def collect(args):
         result = await engine.compute(request, session_id=scope, request_id=identity,
             max_new_tokens=config["execution"]["output_tokens"] if output_tokens is None else output_tokens, mode=mode,
             cache_namespace=identity, cache_scope=scope,
-            recompute_ratio=config["shared"]["runtime"]["recompute_ratio"])
-        windows[identity] = started, time.monotonic()
-        item = {"source": row, "answer": result["text"], "call_id": identity,
-            "costs": {"seconds": windows[identity][1]-started}, "native": result["meta"]["contextkv_compute"]}
+            **kv_policy)
+        item = {"source": row, "answer": result["text"]}
+        if args.stage == "stop":
+            windows[identity] = started, time.monotonic()
+            item.update(call_id=identity, costs={"seconds": windows[identity][1]-started},
+                        native=result["meta"]["contextkv_compute"])
         answers.append(item)
         return item
 
     async def collect_state(row, index):
         async with limit:
             units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
-            query_started = time.monotonic()
+            if args.stage == "stop":
+                query_started = time.monotonic()
             query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
                 row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
             queries[row["task_id"]] = query
-            paid_seconds = time.monotonic()-query_started
             if args.stage == "sets":
                 if all(need["operation"] in {"count", "sum", "group", "mean", "min", "max"}
                        for need in row["task_state"]["needs"]):
@@ -126,9 +131,8 @@ async def collect(args):
                     observations.append((chosen, item))
                 outputs.append((row, observations))
                 return
-            from adapters.shared_encoding import EvidenceEncoding
             from controller.value_policy import StopValueHead
-            import torch
+            paid_seconds = time.monotonic()-query_started
             warm = index % 2 == 1
             native = {}
             if warm:
@@ -144,9 +148,7 @@ async def collect(args):
                 if encoded is None:
                     encoded = new
                 else:
-                    encoded = EvidenceEncoding((*encoded.unit_ids, *new.unit_ids),
-                        torch.cat((encoded.embeddings, new.embeddings)), torch.cat((encoded.relevance, new.relevance)),
-                        (*encoded.bindings, *new.bindings), encoded.heads)
+                    encoded = encoded.merge(new)
                 observed = units[:start + len(fresh)]
                 chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"])
                 transition_id = f"expand:{row['task_id']}:{start}"
@@ -172,19 +174,21 @@ async def collect(args):
     try:
         await asyncio.gather(*(collect_state(row, index) for index, row in enumerate(source)))
     finally:
-        await sampler.stop()
+        if args.stage == "stop":
+            await sampler.stop()
         await engine.aclose()
         query_encoder.close()
         if evidence_encoder:
             evidence_encoder.close()
-    attributed = attribute_physical(sampler.samples, windows)
-    for item in answers:
-        item["costs"].update(attributed[item["call_id"]])
+    if args.stage == "stop":
+        attributed = attribute_physical(sampler.samples, windows)
+        for item in answers:
+            item["costs"].update(attributed[item["call_id"]])
     await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
     records = []
     for row, observed in outputs:
         if args.stage == "sets":
-            sets = [{"unit_ids": chosen, "quality": item["quality"], "costs": item["costs"]}
+            sets = [{"unit_ids": chosen, "quality": item["quality"]}
                     for chosen, item in observed]
             records.append({**row, **({"sets": sets} if sets else {})})
         else:

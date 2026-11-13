@@ -9,7 +9,7 @@ from adapters.document_compute import DocumentIndex
 from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
-from adapters.shared_encoding import EvidenceEncoding, SharedEvidenceEncoder, SharedQueryEncoder
+from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder
 from adapters.version_structure import VersionIndex
 from controller.context_schema import EvidencePool, SourceSpan
 from controller.schema import OnlineContext, QueryContext, history_messages
@@ -259,10 +259,7 @@ class SharedEvidenceProvider:
             if fresh:
                 extra = self.evidence_encoder.encode(query, fresh)
                 usage["input_tokens"] += extra.usage["input_tokens"]
-                evidence = EvidenceEncoding((*evidence.unit_ids, *extra.unit_ids),
-                    torch.cat((evidence.embeddings, extra.embeddings)),
-                    torch.cat((evidence.relevance, extra.relevance)),
-                    (*evidence.bindings, *extra.bindings), evidence.heads)
+                evidence = evidence.merge(extra)
             initial, pending = (*retained, *fresh), ()
             selected = evidence.select(initial, body_tokens=available)
             query.task = replace(query.task,
@@ -370,17 +367,12 @@ class SharedEvidenceProvider:
             if need.need_id not in programmed and need.operation in {"count", "sum", "mean", "min", "max", "group", "infer", "compare"})
 
     def expand_state(self, state):
-        import torch
-        from adapters.shared_encoding import EvidenceEncoding
         existing = set(state.evidence.unit_ids)
         all_units = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
         fresh = tuple(unit for unit in self._closure(state.pending_units[:self.evidence_batch], all_units)
                       if unit.unit_id not in existing)
         new = self.evidence_encoder.encode(state.query, fresh)
-        old = state.evidence
-        evidence = EvidenceEncoding((*old.unit_ids, *new.unit_ids), torch.cat((old.embeddings, new.embeddings)),
-            torch.cat((old.relevance, new.relevance)), (*old.bindings, *new.bindings), old.heads,
-            usage=new.usage)
+        evidence = state.evidence.merge(new)
         units = (*state.pool.units, *fresh)
         selected = evidence.select(units, body_tokens=state.body_tokens)
         fresh_ids = {unit.unit_id for unit in fresh}

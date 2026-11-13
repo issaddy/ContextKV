@@ -103,8 +103,10 @@ class EvidenceHeads(nn.Module):
 
     def loss(self, embeddings, relevance, masks, qualities):
         predictions = self.utility(embeddings, relevance, masks)
-        loss = F.mse_loss(predictions, qualities)
-        pair = qualities[:, None] - qualities[None, :]
+        empty = (masks == 0).all(dim=-1)
+        gains = qualities-qualities[empty].mean()
+        loss = F.mse_loss(predictions, gains)
+        pair = gains[:, None] - gains[None, :]
         ordered = pair > 0
         if ordered.any():
             margins = predictions[:, None] - predictions[None, :]

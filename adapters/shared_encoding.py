@@ -95,6 +95,16 @@ class EvidenceEncoding:
     token_states: tuple = ()
     token_sources: tuple = ()
     usage: dict = field(default_factory=dict)
+    query_sum: object = None
+
+    def merge(self, other):
+        """Extend a shared list using the author's weighted cross-batch query vector."""
+        import torch
+        embeddings = torch.cat((self.embeddings, other.embeddings))
+        query_sum = self.query_sum+other.query_sum
+        relevance = torch.nn.functional.cosine_similarity(embeddings, query_sum[None, :], dim=-1)
+        return EvidenceEncoding((*self.unit_ids, *other.unit_ids), embeddings, relevance,
+            (*self.bindings, *other.bindings), self.heads, usage=other.usage, query_sum=query_sum)
 
     def summary(self, selected_ids):
         import torch
@@ -494,7 +504,21 @@ class SharedEvidenceEncoder:
         documents = self.model.projector(states[doc_positions]).float()
         q = self.model.projector(states[query_position]).float()
         scores = torch.nn.functional.cosine_similarity(documents, q.unsqueeze(0), dim=-1)
-        return states.float(), torch.nn.functional.normalize(documents, dim=-1), scores, addresses, len(ids)
+        return states.float(), torch.nn.functional.normalize(documents, dim=-1), scores, addresses, len(ids), q
+
+    def forward_evidence(self, query, units):
+        """Train on the same evidence batches and global cosine scores used online."""
+        import torch
+        outputs = [self.forward_batch(query.evidence_query, batch) for batch in self._batches(query, units)]
+        if not outputs:
+            return (torch.empty((0, self.model.config.hidden_size), device=self.model.device),
+                    torch.empty((0, 512), device=self.model.device),
+                    torch.empty(0, device=self.model.device), (), 0)
+        documents = torch.cat([item[1] for item in outputs])
+        query_sum = torch.stack([item[5]*((1+item[2])/2).max() for item in outputs]).sum(0)
+        scores = torch.nn.functional.cosine_similarity(documents, query_sum[None, :], dim=-1)
+        return (torch.cat([item[0] for item in outputs]), documents, scores,
+                tuple(address for item in outputs for address in item[3]), sum(item[4] for item in outputs))
 
     def _batches(self, query, units):
         units = tuple(units)
@@ -541,7 +565,7 @@ class SharedEvidenceEncoder:
                     query = self.model.projector(states[query_position]).float()
                     scores = torch.nn.functional.cosine_similarity(documents, query.unsqueeze(0), dim=-1)
                     outputs[owner][tuple(unit.unit_id for unit in units)] = (states.float(),
-                        torch.nn.functional.normalize(documents, dim=-1), scores, addresses, len(ids))
+                        torch.nn.functional.normalize(documents, dim=-1), scores, addresses, len(ids), query)
             results = [self._encode(query, units, outputs[index]) for index, (query, units) in enumerate(requests)]
         elapsed = (time.perf_counter()-started)*1000
         total = sum(item.usage["input_tokens"] for item in results)
@@ -554,14 +578,14 @@ class SharedEvidenceEncoder:
         from training.shared_heads import FIELD_ROLES
         started = time.perf_counter()
         batches = self._batches(query, units)
-        embeddings, relevance, bindings, binding_vectors, token_states, token_sources = [], [], [], [], [], []
+        embeddings, queries, bindings, binding_vectors, token_states, token_sources = [], [], [], [], [], []
         token_count = 0
         with torch.no_grad():
             for batch in batches:
-                states, documents, scores, addresses, count = outputs[tuple(unit.unit_id for unit in batch)]
+                states, documents, scores, addresses, count, query_vector = outputs[tuple(unit.unit_id for unit in batch)]
                 token_count += count
                 embeddings.append(documents)
-                relevance.append(scores)
+                queries.append(query_vector*((1+scores)/2).max())
                 source_indices = [i for i, address in enumerate(addresses) if address is not None]
                 source_states = states[source_indices]
                 sources = tuple(addresses[i] for i in source_indices)
@@ -601,11 +625,13 @@ class SharedEvidenceEncoder:
                 for index in indices:
                     if sum(root(other) == root(index) for other in indices) > 1:
                         bindings[index] = replace(bindings[index], relation_group=f"{need_id}:j{root(index)}")
-        return EvidenceEncoding(tuple(unit.unit_id for unit in units),
-            torch.cat(embeddings) if embeddings else torch.empty((0, 512), device=self.model.device),
-            torch.cat(relevance) if relevance else torch.empty(0, device=self.model.device),
+        documents = torch.cat(embeddings) if embeddings else torch.empty((0, 512), device=self.model.device)
+        query_sum = torch.stack(queries).sum(0) if queries else torch.zeros(512, device=self.model.device)
+        relevance = torch.nn.functional.cosine_similarity(documents, query_sum[None, :], dim=-1)
+        return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents, relevance,
             tuple(bindings), self.heads, tuple(token_states), tuple(token_sources),
-            {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(batches)})
+            {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(batches)},
+            query_sum)
 
     def close(self):
         self.model = self.heads = None

@@ -75,10 +75,13 @@ class CooperativeController:
         self.native_state = {}
         self.engine_info = None
         self.resident_models = {}
+        self.kv_policy = {}
         if dialogue_mode == "contextkv":
             from .value_policy import StopValueHead, ValuePrices
             self.stop = StopValueHead.load(settings["stop_asset"])
             self.prices = ValuePrices(**settings.get("prices", {}))
+            from .config import load_kv_policy
+            self.kv_policy = load_kv_policy(settings)
 
     def bind_resident_models(self, manifest):
         self.resident_models = manifest
@@ -123,9 +126,7 @@ class CooperativeController:
                 result = await self.engine.compute(request, session_id=session_id,
                     request_id=f"{request_id}:{name}", max_new_tokens=output_tokens,
                     mode=self.settings.get("kv_mode", "auto") if self.dialogue_mode == "contextkv" else "exact",
-                    recompute_ratio=self.settings.get("recompute_ratio", 0.15),
-                    quality_loss=self.settings.get("approximation_quality_loss", 0.0),
-                    quality_price_ms=self.settings.get("quality_price_ms", 0.0), response_schema=schema)
+                    **self.kv_policy, response_schema=schema)
                 meta = result["meta"]
                 native = meta["contextkv_compute"]
                 self.native_state = native

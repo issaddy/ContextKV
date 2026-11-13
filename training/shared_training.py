@@ -130,17 +130,21 @@ def task_loss(encoder, row):
             value = getattr(encoder.heads, name)(states[-1], vector).squeeze(-1)
             losses.append(F.binary_cross_entropy_with_logits(value, states.new_tensor(row_metadata[field] in expected)))
 
-    # RCEM aligns conversation representations to rewritten queries in the frozen base space.
-    targets = [row["rewritten_query"], *row.get("need_queries", ())]
-    batch = encoder.tokenizer(["Instruct: Retrieve evidence for the question.\nQuery: "+text for text in targets],
+    # Conversational/rewrite and ordinary-query identity pairs share the frozen base space.
+    # Documents are always encoded with adapters disabled, so their space stays fixed directly.
+    instruction = "Instruct: Retrieve evidence for the question.\nQuery: "
+    ordinary = encoder.tokenizer([instruction+row["question"]], return_tensors="pt").to(encoder.model.device)
+    ordinary_states = encoder.model(**ordinary, use_cache=False).last_hidden_state[:, -1].float()
+    predicted = encoder.heads.need_projection(need_vectors)
+    adapted = F.normalize(torch.cat((states[-1:], predicted, ordinary_states)), dim=-1)
+    targets = [row["rewritten_query"], *row.get("need_queries", ()), row["question"]]
+    batch = encoder.tokenizer([instruction+text for text in targets],
                               padding=True, return_tensors="pt").to(encoder.model.device)
     with torch.no_grad(), encoder.model.disable_adapter():
         base = encoder.model(**batch, use_cache=False).last_hidden_state[:, -1].float()
         base = F.normalize(base, dim=-1)
-    losses.append(1-F.cosine_similarity(states[-1], base[0], dim=0))
-    if len(base) > 1:
-        predicted = encoder.heads.need_projection(need_vectors)
-        losses.append((1-F.cosine_similarity(predicted, base[1:], dim=-1)).mean())
+    losses.append(torch.linalg.vector_norm(adapted-base, dim=-1).mean())
+    losses.append((F.pdist(adapted)-F.pdist(base)).abs().mean())
     return torch.stack(losses).mean()
 
 
@@ -171,14 +175,14 @@ def train_query(args):
     encoder.model.save_pretrained(output / "adapter")
     torch.save(encoder.heads.state_dict(), output / "heads.pt")
     (output / "training.json").write_text(json.dumps({"model": args.model, "states": len(training),
-        "steps": steps, "loss": total/steps, "method": "rcem_shared_task", "history_tokens": args.history_tokens}, indent=2)+"\n")
+        "steps": steps, "loss": total/steps, "method": "rcem_shared_task_structure_alignment", "history_tokens": args.history_tokens}, indent=2)+"\n")
 
 
 def evidence_loss(encoder, query, units, row, *, field_only=False):
     import torch
     from torch.nn import functional as F
     from training.shared_heads import FIELD_ROLES
-    states, embeddings, relevance, addresses, _ = encoder.forward_batch(query.evidence_query, units)
+    states, embeddings, relevance, addresses, _ = encoder.forward_evidence(query, units)
     source_indices = [i for i, address in enumerate(addresses) if address is not None]
     states = states[source_indices]
     addresses = [addresses[i] for i in source_indices]
@@ -259,7 +263,8 @@ def train_evidence(args):
     output.mkdir(parents=True, exist_ok=True)
     torch.save(encoder.heads.state_dict(), output / "heads.pt")
     (output / "training.json").write_text(json.dumps({"model": args.model, "states": len(training),
-        "steps": steps, "loss": total/steps, "method": "shared_fields_generator_set_utility"}, indent=2)+"\n")
+        "steps": steps, "loss": total/steps, "method": "shared_fields_generator_set_utility",
+        "quality_target": "answer_quality_minus_empty"}, indent=2)+"\n")
 
 
 def main():

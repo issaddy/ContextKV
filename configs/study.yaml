@@ -47,6 +47,7 @@ shared:
     batch_tokens: 16384
   runtime:
     stop_asset: models/shared-stop.pt
+    kv_quality_asset: models/infoflow-quality.json
     kv_mode: auto
     recompute_ratio: 0.15
     prices:
