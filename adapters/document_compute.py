@@ -745,41 +745,64 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
-def semantic_evidence_projection(question, units):
-    """Project complete-population semantic evidence directly to source-addressed quotes."""
+def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer):
+    """Select indexed original lines; the model never reconstructs source text."""
     import json
+    from dataclasses import replace
     from controller.schema import EvidenceBlock
     units = tuple(units)
-    blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
-        span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
-    identities = {f"S{i+1}": unit for i, unit in enumerate(units)}
-    schema = {"type": "object", "properties": {"evidence": {"type": "array", "items": {
-        "type": "object", "properties": {"source": {"enum": list(identities)},
-            "text": {"type": "string", "minLength": 1}, "occurrence": {"type": "integer", "minimum": 0}},
-        "required": ["source", "text", "occurrence"], "additionalProperties": False}}},
-        "required": ["evidence"], "additionalProperties": False}
-    instruction = ("Examine every supplied source for the current question. Return exact source quotes containing "
-        "all facts needed for the requested result. Preserve qualifying entities, directed relationships, "
-        "exceptions, conditions, dates, units and versions together. For a complete list or a global relationship "
-        "question, retain every relevant member or relationship in this batch, not just representative examples. "
-        "Keep each source's own entity/title with its relationships so different batches can be joined later. "
-        "Keep relevant cross-source relationships even when the other source is in a different batch. "
-        "Apply the question's scope and eligibility restrictions, retaining the evidence for each qualifying result. "
-        "Omit a source only after examining it and finding no relevant evidence. Do not answer the question or "
-        "produce a selection ranking. Text must be copied exactly; occurrence is its zero-based occurrence "
-        "within the named source. Use concise quotes and omit unrelated material.\nQuestion: " + question)
+    identities, blocks, locations, choices = {}, [], {}, []
+    for index, unit in enumerate(units):
+        identity = f"S{index+1}"
+        identities[identity] = unit
+        lines = unit.text.splitlines(keepends=True)
+        offsets, cursor = [], 0
+        for line in lines:
+            offsets.append((cursor, cursor+len(line)))
+            cursor += len(line)
+        locations[identity] = offsets
+        origin = unit.source_spans[0]
+        key = replace(origin.source_key, passage_id=origin.source_key.passage_id+":indexed-lines")
+        body = "".join(f"[{number}; {len(tokenizer.encode(line, add_special_tokens=False))} tokens] {line}" + ("" if line.endswith("\n") else "\n")
+                       for number, line in enumerate(lines))
+        blocks.append(EvidenceBlock(key, "", unit.heading, body))
+        bound = {"type": "integer", "minimum": 0, "maximum": len(lines)-1}
+        choices.append({"type": "object", "properties": {"source": {"const": identity},
+            "first_line": bound, "last_line": bound}, "required": ["source", "first_line", "last_line"],
+            "additionalProperties": False})
+    schema = {"type": "object", "properties": {"evidence": {"type": "array", "items": {"oneOf": choices}}},
+              "required": ["evidence"], "additionalProperties": False}
+    instruction = ("Examine every supplied source. Select the original line ranges containing the fields and "
+        "statements needed to answer the question. Preserve source entity/title, relevant attributes, directed "
+        "relationships, conditions, exceptions, dates, units and versions. Retain facts needed to decide eligibility "
+        "even when they are negative or ambiguous; the final answer decides which members satisfy the conditions. "
+        "For global relationships keep relevant cross-source links even when the other source is in another batch. "
+        "Exclude only material unrelated to the requested fields or relationships. Return source IDs and inclusive "
+        "line ranges, not copied text, summaries, final answers or rankings. "
+        f"The selected original lines share a budget of {retained_tokens} tokens; their token counts are shown. "
+        "Keep the necessary facts and leave unrelated lines out.\nQuestion: " + question)
 
     def decode_evidence(text):
-        result = []
+        ranges = {}
         for entry in json.loads(text)["evidence"]:
-            unit = identities[entry["source"]]
-            quote, span = _literal_source(unit, entry)
-            result.append(EvidenceBlock(span.source_key, "", unit.heading, quote,
-                span=(span.start, span.end)))
+            first, last = sorted((entry["first_line"], entry["last_line"]))
+            offsets = locations[entry["source"]]
+            ranges.setdefault(entry["source"], []).append((offsets[first][0], offsets[last][1]))
+        result = []
+        for identity in identities:
+            merged = []
+            for left, right in sorted(ranges.get(identity, ())):
+                if merged and left <= merged[-1][1]:
+                    merged[-1] = merged[-1][0], max(right, merged[-1][1])
+                else:
+                    merged.append((left, right))
+            unit = identities[identity]
+            origin = unit.source_spans[0]
+            result.extend(EvidenceBlock(origin.source_key, "", unit.heading, unit.text[left:right],
+                span=(origin.start+left, origin.start+right)) for left, right in merged)
         return tuple(result)
 
-    return SemanticBinding(blocks, instruction, schema, decode_evidence)
-
+    return SemanticBinding(tuple(blocks), instruction, schema, decode_evidence)
 
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""

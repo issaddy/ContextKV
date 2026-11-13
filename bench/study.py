@@ -123,8 +123,13 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     grouped = {}
     for row in source_rows:
         grouped.setdefault(row["conversation_id"], []).append(row)
-    conversations = sorted(grouped)[:limit_conversations]
-    selected = [row for sid in conversations for row in sorted(grouped[sid], key=lambda row: row["turn"])]
+    conversations = sorted(grouped)
+    random.Random(matrix.get("seed", 42)).shuffle(conversations)
+    conversations = conversations[:limit_conversations]
+    ordered = [sorted(grouped[sid], key=lambda row: row["turn"]) for sid in conversations]
+    # Spread a small queue across conversations while retaining adjacent turns.
+    selected = [row for start in range(0, max(map(len, ordered), default=0), 2)
+                for turns in ordered for row in turns[start:start+2]]
     selected = selected[:limit_turns]
     grouped = {}
     for row in selected:

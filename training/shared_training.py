@@ -47,10 +47,12 @@ def task_loss(encoder, row, prepared=None):
     if prepared is None:
         inputs, refs, _, catalog_positions = query_input(encoder.tokenizer, conversation(row), row["question"],
             row["turn"], catalogue(row), history_tokens=encoder.history_tokens, history_turns=row.get("history_turns", ()))
-        states, logits = encoder.forward_input(inputs)
+        query_position = max(i for i, ref in enumerate(refs)
+                             if ref is not None and ref.turn_id == row["turn"] and ref.speaker == "user")
+        states, logits = encoder.forward_input(inputs, query_position)
     else:
-        refs, catalog_positions, states = prepared
-        logits = encoder.heads(states, states[-1])
+        refs, catalog_positions, states, query_position = prepared
+        logits = encoder.heads(states, states[query_position])
     device = states.device
     if row.get("coverage_only"):
         return F.cross_entropy(logits["coverage_scope"][None], torch.tensor(
@@ -136,7 +138,7 @@ def task_loss(encoder, row, prepared=None):
         vector = states[indices].mean(0)
         for name, field, expected in (("version", "version", task.version_intent.version_ids),
                                       ("family", "family", task.version_intent.document_families)):
-            value = getattr(encoder.heads, name)(states[-1], vector).squeeze(-1)
+            value = getattr(encoder.heads, name)(states[query_position], vector).squeeze(-1)
             losses.append(F.binary_cross_entropy_with_logits(value, states.new_tensor(row_metadata[field] in expected)))
 
     if prepared is not None:
@@ -147,7 +149,7 @@ def task_loss(encoder, row, prepared=None):
     ordinary = encoder.tokenizer([instruction+row["question"]], return_tensors="pt").to(encoder.model.device)
     ordinary_states = encoder.model(**ordinary, use_cache=False).last_hidden_state[:, -1].float()
     predicted = encoder.heads.need_projection(need_vectors)
-    adapted = F.normalize(torch.cat((states[-1:], predicted, ordinary_states)), dim=-1)
+    adapted = F.normalize(torch.cat((states[query_position:query_position+1], predicted, ordinary_states)), dim=-1)
     targets = [row["rewritten_query"], *row.get("need_queries", ()), row["question"]]
     batch = encoder.tokenizer([instruction+text for text in targets],
                               padding=True, return_tensors="pt").to(encoder.model.device)
@@ -183,8 +185,10 @@ def train_query(args):
             inputs, refs, _, positions = query_input(encoder.tokenizer, conversation(row), row["question"],
                 row["turn"], catalogue(row), history_tokens=encoder.history_tokens, history_turns=row.get("history_turns", ()))
             with torch.no_grad():
-                states, _ = encoder.forward_input(inputs)
-            prepared[row["task_id"]] = refs, positions, states
+                query_position = max(i for i, ref in enumerate(refs)
+                    if ref is not None and ref.turn_id == row["turn"] and ref.speaker == "user")
+                states, _ = encoder.forward_input(inputs, query_position)
+            prepared[row["task_id"]] = refs, positions, states, query_position
     random.seed(args.seed)
     steps, total = 0, 0.
     for _ in range(args.epochs):
@@ -201,7 +205,9 @@ def train_query(args):
     encoder.model.save_pretrained(output / "adapter")
     torch.save(encoder.heads.state_dict(), output / "heads.pt")
     (output / "training.json").write_text(json.dumps({"model": args.model, "states": len(training),
-        "steps": steps, "loss": total/steps, "method": "rcem_shared_task_structure_alignment", "history_tokens": args.history_tokens}, indent=2)+"\n")
+        "steps": steps, "loss": total/steps,
+        "method": "shared_task_heads" if args.heads_only else "rcem_shared_task_structure_alignment",
+        "history_tokens": args.history_tokens}, indent=2)+"\n")
 
 
 def field_loss(encoder, query, units, row):
@@ -284,7 +290,7 @@ def train_evidence(args):
                 # Field supervision uses annotated Need ownership on the same visible input.
                 task = task_label(row)
                 with torch.no_grad():
-                    features = query_encoder.heads.contextualize(query.token_states, query.token_states[-1])
+                    features = query_encoder.heads.contextualize(query.token_states, query.pooled)
                 def pool(refs):
                     indices = [i for i, token in enumerate(query.token_refs) if token is not None and any(
                         token.turn_id == ref.turn_id and token.speaker == ref.speaker

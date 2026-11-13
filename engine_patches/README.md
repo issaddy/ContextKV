@@ -18,6 +18,8 @@
 
 `start/end` 是实际输入 token 的半开区间，块只包含稳定原文。来源 ID 由文档、版本和原文地址组成。需求随会话的下一次提交更新；`/context/session/close` 在会话结束时释放该会话的需求优先级。当前编译的原文顺序与后续需求共享字面前缀时，需求附带 `native_prefix_end`，同时登记 Native 的前缀消费者。
 
+`/context/evidence/state` 一次接收当前候选的来源地址，返回独立块的 GPU/Host 驻留、可用 Native 前缀顺序和实测费用系数。此接口只读取 owner 状态，不编译提示或分配 KV。控制器用同一快照为候选集合计价，SGLang 在实际提交时按当前驻留完成执行选择。
+
 相同 `cache_scope` 内，独立块按实际 token 前缀共享原生页；训练冷分支使用独立 scope，暖分支共用预建块所在的 scope。请求私有重算不会写回这些共享页。
 
 ## 执行

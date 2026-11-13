@@ -62,6 +62,12 @@ class QueryEncoding:
         return " ".join(self.texts[(ref.turn_id, ref.speaker)][ref.start:ref.end] for ref in refs)
 
     @property
+    def pooled(self):
+        index = max(i for i, ref in enumerate(self.token_refs)
+                    if ref is not None and ref.turn_id == self.task.current_turn_id and ref.speaker == "user")
+        return self.token_states[index]
+
+    @property
     def search_texts(self):
         return (self.task.raw_question, *(self.text((*need.anchor_spans, *need.subject_refs,
             *(ref for condition in self.task.conditions if condition.condition_id in need.condition_ids
@@ -220,12 +226,7 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
             owners.append((start, length, owner))
         return start, length
 
-    add("Instruct: Retrieve evidence for the current question using the conversation.\nAvailable source versions:\n")
-    for row in catalogue:
-        start, end = add(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
-        catalog_spans.append((start, end, row))
-        add("\n")
-    add("Conversation:\n")
+    add("Instruct: Retrieve evidence for the current question using the conversation.\nConversation:\n")
     selected, size = set(), 0
     order = sorted(range(len(history)), key=lambda index: (history[index][0] in history_turns, index), reverse=True)
     for index in order:
@@ -244,6 +245,12 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
     texts[current_turn_id, "user"] = question
     add(f"Current query (turn {current_turn_id}): ")
     add(question, (current_turn_id, "user"))
+    if catalogue:
+        add("\nAvailable source versions:\n")
+        for row in catalogue:
+            start, end = add(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+            catalog_spans.append((start, end, row))
+            add("\n")
     encoded = tokenizer("".join(parts), return_offsets_mapping=True, add_special_tokens=True)
     offsets = encoded.pop("offset_mapping")
     refs = []
@@ -323,11 +330,11 @@ class SharedQueryEncoder:
                 states = self.model(**batch, use_cache=False).last_hidden_state
             return torch.nn.functional.normalize(states[:, -1].float(), dim=-1).cpu().numpy(), tokens
 
-    def forward_input(self, encoded):
+    def forward_input(self, encoded, query_position):
         torch = self.torch
         batch = {key: torch.tensor([value], device=self.model.device) for key, value in encoded.items()}
         states = self.model(**batch, use_cache=False).last_hidden_state[0].float()
-        return states, self.heads(states, states[-1])
+        return states, self.heads(states, states[query_position])
 
     def encode(self, history, question, task_id, current_turn_id, *, catalogue=(), source_scope=(), history_turns=()):
         return self.ready.submit({"history": history, "question": question, "task_id": task_id,
@@ -359,7 +366,10 @@ class SharedQueryEncoder:
         encoded, refs, texts, catalogue_positions = _prepared
         with torch.no_grad():
             states = _states
-            logits = self.heads(states, states[-1])
+            query_position = max(i for i, ref in enumerate(refs)
+                                 if ref is not None and ref.turn_id == current_turn_id and ref.speaker == "user")
+            pooled = states[query_position]
+            logits = self.heads(states, pooled)
             coordinates = [(ref.turn_id, ref.speaker, ref.start, ref.end) if ref is not None else None for ref in refs]
             labels = logits["span"].argmax(-1).tolist()
             spans = {kind: _spans([row[index] for row in labels], coordinates)
@@ -406,9 +416,9 @@ class SharedQueryEncoder:
             selected_versions, selected_families = [], []
             for row, positions in catalogue_positions:
                 vector = states[positions].mean(0)
-                if self.heads.version(states[-1], vector).item() > 0:
+                if self.heads.version(pooled, vector).item() > 0:
                     selected_versions.append(row["version"])
-                if self.heads.family(states[-1], vector).item() > 0:
+                if self.heads.family(pooled, vector).item() > 0:
                     selected_families.append(row["family"])
             for span in spans["version"]:
                 ref = reference(span)
@@ -431,7 +441,7 @@ class SharedQueryEncoder:
                              tuple(source_scope), current_turn_id, question,
                              coverage_scope=SCOPES[int(logits["coverage_scope"].argmax())])
             projected = torch.nn.functional.normalize(self.heads.need_projection(need_vectors), dim=-1)
-            return QueryEncoding(task, torch.nn.functional.normalize(states[-1], dim=-1), projected,
+            return QueryEncoding(task, torch.nn.functional.normalize(pooled, dim=-1), projected,
                 states, refs, texts, operators, {"input_tokens": len(encoded["input_ids"]),
                     "compute_ms": (time.perf_counter()-started)*1000, "calls": 1}, condition_vectors,
                 frozenset(need.need_id for need, vector in zip(needs, need_vectors)

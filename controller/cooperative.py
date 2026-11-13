@@ -187,7 +187,11 @@ class CooperativeController:
                 else:
                     selected = selected_blocks(state)
                 request = compile_request(self.template, query, snapshot.raw_history, selected,
-                    results=tuple(computations), system_prompt=self.policy.system_prompt or SYSTEM)
+                    results=tuple(computations), system_prompt=self.policy.system_prompt or SYSTEM,
+                    instruction=(f"The complete declared population of {len(state.population_units)} source windows "
+                        "has been examined. Use the original evidence and computed results to decide the requested "
+                        "membership and relationships. If they do not establish a result, state that finding."
+                        if population else None))
                 final = await complete(request, "answer")
                 source_keys = {decode(EvidenceKey, span["source_key"]) for item in computations for span in item["sources"]}
                 calculation_sources = tuple(block for block in state.document_index.blocks.values()
@@ -334,7 +338,8 @@ class CooperativeController:
         for number, (pack, weight) in enumerate(zip(packs, weights)):
             quota = budget-spent if number == len(packs)-1 else int(budget*weight/total)
             spent += quota
-            projection = semantic_evidence_projection(state.query.task.raw_question, pack)
+            projection = semantic_evidence_projection(state.query.task.raw_question, pack,
+                retained_tokens=quota, tokenizer=self.template.tokenizer)
             request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                 projection.blocks, instruction=projection.instruction,
                 system_prompt=self.policy.system_prompt or SYSTEM)
