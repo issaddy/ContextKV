@@ -26,27 +26,38 @@ def lambda_targets(model, trajectory, prices, trace_lambda):
     rows = trajectory["states"]
     features = torch.tensor([row["features"] for row in rows], device=model.mean.device)
     predicted, tails = model(features)
-    chosen = prices.utility(predicted, tails).argmax(-1)
+    count = len(rows)
+    observed = torch.stack([observed_values(row["stop"], model.mean.device) for row in rows])
+    mask = torch.tensor([[row["complete_scope"], index < count-1]
+                         for index, row in enumerate(rows)], device=model.mean.device)
     target = torch.zeros_like(predicted)
+    target[:, 0] = observed
     realised_seconds = torch.zeros_like(tails)
-    mask = torch.ones_like(tails, dtype=torch.bool)
-    for index in range(len(rows) - 1, -1, -1):
-        row = rows[index]
-        target[index, 0] = observed_values(row["stop"], model.mean.device)
-        realised_seconds[index, 0] = row["stop"]["seconds"]
-        if not row["complete_scope"]:
-            chosen[index] = 1
-        if index == len(rows) - 1:
-            mask[index, 1] = False
-            chosen[index] = 0
-            continue
-        next_action = chosen[index + 1]
-        step = observed_values({"quality": 0.0, **row["transition"]}, model.mean.device)
-        target[index, 1] = step + (
-            (1 - trace_lambda) * predicted[index + 1, next_action]
-            + trace_lambda * target[index + 1, next_action]
-        )
-        realised_seconds[index, 1] = step[1] + realised_seconds[index + 1, next_action]
+    realised_seconds[:, 0] = observed[:, 1]
+    previous, previous_tails = predicted.clone(), tails.clone()
+    previous[-1, 0], previous_tails[-1, 0] = observed[-1], observed[-1, 1]
+    steps = [observed_values({"quality": 0.0, **row["transition"]}, model.mean.device)
+             for row in rows[:-1]]
+    # Each backup depth takes its own maximum over STOP and CONTINUE before
+    # the forward-view lambda mixture (Stop-RAG equations 3--11).
+    for depth in range(1, count):
+        current, current_tails = previous.clone(), previous_tails.clone()
+        current[:, 0], current_tails[:, 0] = observed, observed[:, 1]
+        utilities = prices.utility(previous, previous_tails).masked_fill(~mask, -torch.inf)
+        chosen = utilities.argmax(-1)
+        for index, step in enumerate(steps):
+            action = chosen[index+1]
+            current[index, 1] = step + previous[index+1, action]
+            current_tails[index, 1] = step[1] + previous_tails[index+1, action]
+            horizon = count-1-index
+            if depth <= horizon:
+                weight = trace_lambda ** (depth-1)
+                if depth < horizon:
+                    weight *= 1-trace_lambda
+                target[index, 1] += weight * current[index, 1]
+                if depth == horizon:
+                    realised_seconds[index, 1] = current_tails[index, 1]
+        previous, previous_tails = current, current_tails
     return features, target, realised_seconds, mask
 
 

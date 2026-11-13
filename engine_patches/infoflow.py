@@ -50,8 +50,10 @@ def causal_attention(query, key, value, positions, *, query_chunk=256):
     return torch.cat(result)
 
 
-def attention_mass(query, key, positions, *, query_chunk=32):
-    """Sum prompt-to-context attention mass without keeping an attention log."""
+def attention_norm_squared(query, key, positions, *, query_chunk=32):
+    """Accumulate squared head-mean attention; prompt chunks share the L2 norm."""
+    from sglang.srt.distributed import tensor_model_parallel_all_reduce
+    from sglang.srt.runtime_context import get_parallel
     groups = query.shape[1] // key.shape[1]
     k = key.repeat_interleave(groups, dim=1).transpose(0, 1).float()
     result = torch.zeros(len(key), device=key.device, dtype=torch.float32)
@@ -61,7 +63,11 @@ def attention_mass(query, key, positions, *, query_chunk=32):
         logits = (q @ k.transpose(-2, -1)) / math.sqrt(query.shape[-1])
         logits.masked_fill_(columns[None, :] > positions[start:start + query_chunk, None],
                             -torch.inf)
-        result += logits.softmax(-1).sum((0, 1))
+        head_sum = logits.softmax(-1).sum(0)
+        world = get_parallel().attn_tp_size
+        if world > 1:
+            head_sum = tensor_model_parallel_all_reduce(head_sum)
+        result += (head_sum / (query.shape[1] * world)).square().sum(0)
     return result
 
 
@@ -184,6 +190,7 @@ class QwenInfoFlow:
     @torch.inference_mode()
     def score(self, state, prompt):
         device, count = state.row.device, int(prompt[-1]) + 1
+        query_rows = prompt >= max((block.end for block in state.blocks), default=0)
         ids = torch.tensor(state.input_ids, device=device, dtype=torch.int64)
         hidden = self.model.embed_tokens(ids[prompt])
         # The author's default aggregates the last two layers.
@@ -195,25 +202,22 @@ class QwenInfoFlow:
             if index >= len(self.layers) - 2:
                 all_k, _ = state.layer_kv(layer_id, layer.self_attn.rotary_emb,
                                           count, overlay=False)
-                state.scores[:count] += attention_mass(q, all_k, prompt)
+                state.scores[index-len(self.layers)+2, :count] += attention_norm_squared(
+                    q[query_rows], all_k, prompt[query_rows])
             hidden = self._finish_layer(layer, hidden,
                 self._attend(state, layer, q, prompt, count))
         state.counters['score_tokens'] += len(prompt)
 
     def select(self, state):
-        from sglang.srt.distributed import tensor_model_parallel_all_reduce
-        from sglang.srt.runtime_context import get_parallel
-
         count, device = len(state.input_ids), state.row.device
         context = torch.zeros(count, dtype=torch.bool, device=device)
         for block in state.blocks:
             context[block.start:block.end] = True
-        if get_parallel().attn_tp_size > 1:
-            state.scores = tensor_model_parallel_all_reduce(state.scores)
+        scores = state.scores.sqrt().mean(0)
         context_positions = context.nonzero().flatten()
         ratio = float(state.metadata.get('recompute_ratio', .15))
         amount = min(len(context_positions), math.ceil(len(context_positions) * ratio))
-        selected = context_positions[state.scores[context_positions].topk(amount).indices]
+        selected = context_positions[scores[context_positions].topk(amount).indices]
         state.selected = torch.cat((state.prompt, selected)).sort().values
         state.replayed = state.selected[:0]
         state.counters['private_tokens'] = len(state.selected)
