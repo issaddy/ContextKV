@@ -355,6 +355,7 @@ class CooperativeController:
                                     if unit.unit_id in state.selected_ids),
                 "remaining_tokens": self.settings.get("max_total_tokens", 131072) - totals["input_tokens"] - totals["output_tokens"],
                 "elapsed_seconds": time.monotonic()-arrived,
+                "answer_cost_ms": state.costs.estimate(state.selected_ids) if state.costs else 0.0,
                 **{name: native.get(name, 0) for name in (
                     "queue_depth", "gpu_ready_tokens", "host_ready_tokens", "prefill_token_ms", "transfer_token_ms")}}
 

@@ -175,6 +175,7 @@ async def collect(args):
                     "required_rows": 0, "processed_rows": 0, "input_tokens": count,
                     "remaining_tokens": config["execution"]["max_total_tokens"],
                     "elapsed_seconds": paid_seconds,
+                    "answer_cost_ms": costs.estimate(chosen),
                     **{name: native.get(name, 0) for name in ("queue_depth", "gpu_ready_tokens", "host_ready_tokens",
                         "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
                 selected = tuple(unit for unit in observed if unit.unit_id in chosen)
