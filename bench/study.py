@@ -112,7 +112,7 @@ def method_config(config, method, dataset, split):
 
 
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
-                      limit_conversations=None, limit_turns=2):
+                      limit_conversations=None, limit_turns=20):
     from adapters.providers import create_evidence_provider
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.evidence import make_evidence
@@ -256,7 +256,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
 
 
 async def evaluate(config, matrix, output, *, split, methods=None, datasets=None,
-                   concurrency=1, limit_conversations=None, limit_turns=2, score=True):
+                   concurrency=1, limit_conversations=None, limit_turns=20, score=True):
     from bench.study_scoring import score_dataset
 
     output = Path(output)
@@ -355,7 +355,7 @@ def main(argv=None):
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--limit-conversations", type=int)
-    parser.add_argument("--limit-turns", type=int, default=2, help="Questions per benchmark and method")
+    parser.add_argument("--limit-turns", type=int, default=20, help="Questions per benchmark and method")
     parser.add_argument("--unscored", action="store_true")
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())

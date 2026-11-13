@@ -18,7 +18,7 @@
 共享编码与 InfoFlow 已完成辅助训练和少量真实 GPU 端到端运行，[当前结果](docs/study/shared_smoke.md)包含各 benchmark 的同题质量、响应时间和资源占用。
 
 ```bash
-python3 -m bench.study evaluate --split test --limit-turns 2 --concurrency 4
+python3 -m bench.study evaluate --split test --limit-turns 20 --concurrency 4
 ```
 
 题数上限分别作用于每个 benchmark、每种方法。最终保留答案、来源地址、官方质量指标、完整响应、Qwen 输入/输出 token 与少量缓存指标，以及整批 GPU/Host 占用积分。

@@ -538,6 +538,7 @@ class SemanticBinding:
     instruction: str
     schema: dict
     decode: object
+    output_tokens: int | None = None
 
 
 def _query_description(query, need_ids):
@@ -556,15 +557,33 @@ def _query_description(query, need_ids):
             for condition in query.task.conditions if condition.condition_id in condition_ids]}
 
 
-def _literal_source(unit, address):
-    text, cursor = address["text"], 0
-    for _ in range(address["occurrence"] + 1):
-        start = unit.text.index(text, cursor)
-        cursor = start + len(text)
+def _word_source(unit, address):
+    from controller.source_windows import numbered_text
+    _, offsets = numbered_text(unit.text)
+    first, last = sorted(address["word_boundaries"])
+    start, cursor = offsets[first][0], offsets[last][1]
     origin = unit.source_spans[0]
     span = SourceSpan(f"{origin.span_id}:{start}:{cursor}", origin.source_key,
                       origin.start + start, origin.start + cursor)
-    return text, span
+    return unit.text[start:cursor], span
+
+
+def _word_address_schema(units):
+    from controller.source_windows import numbered_text
+    return {"oneOf": [{"type": "object", "properties": {"unit_id": {"const": f"S{i+1}"},
+        "word_boundaries": {"type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}}},
+        "required": ["unit_id", "word_boundaries"], "additionalProperties": False}
+        for i, unit in enumerate(units) if (offsets := numbered_text(unit.text)[1])]}
+
+
+def _word_blocks(units):
+    from dataclasses import replace
+    from controller.schema import EvidenceBlock
+    from controller.source_windows import numbered_text
+    return tuple(EvidenceBlock(replace(unit.source_spans[0].source_key,
+        passage_id=f"{unit.source_spans[0].source_key.passage_id}:indexed-words:{unit.source_spans[0].start}:{unit.source_spans[0].end}"),
+        "", unit.heading, numbered_text(unit.text)[0]) for unit in units)
 
 
 def semantic_binding_schema(index, need_ids):
@@ -578,10 +597,7 @@ def semantic_binding_schema(index, need_ids):
         "value": {"anyOf": [string, {"type": "number"}, array(string)]}, "unit": string})
     projection = obj({"table_id": {"enum": list(index.tables)}, "fields": array(obj({
         "name": string, "column": {"type": "integer", "minimum": 0},
-        "unit_span": {"anyOf": [{"type": "null"}, obj({
-            "unit_id": {"enum": [f"S{i+1}" for i in range(len(index.binding_units()))]},
-            "text": {"type": "string", "minLength": 1},
-            "occurrence": {"type": "integer", "minimum": 0}})]}})),
+        "unit_span": {"anyOf": [{"type": "null"}, _word_address_schema(index.binding_units())]}})),
         "predicates": array(predicate)})
     return obj({"programs": array(obj({"need_id": {"enum": list(need_ids)},
         "projections": array(projection), "value_field": string, "entity_fields": array(string),
@@ -601,7 +617,7 @@ def decode_programs(text, query, index):
         address = field["unit_span"]
         if address is None:
             return Field(field["name"], field["column"])
-        text, span = _literal_source(fragments[address["unit_id"]], address)
+        text, span = _word_source(fragments[address["unit_id"]], address)
         return Field(field["name"], field["column"], text, span)
     for item in json.loads(text)["programs"]:
         need = needs[item["need_id"]]
@@ -622,19 +638,17 @@ def decode_programs(text, query, index):
 
 def semantic_binding(query, index, need_ids):
     """Bind a document program from schema and examples, without reading all rows."""
-    from dataclasses import replace
     import json
     units = index.binding_units()
-    blocks = tuple(replace(index.blocks[unit.source_spans[0].source_key], text=unit.text,
-        span=(unit.source_spans[0].start, unit.source_spans[0].end), token_ids=()) for unit in units)
+    blocks = _word_blocks(units)
     catalogue = [{"table_id": table.table_id, "columns": [
         {"column": column, "header": header} for column, header in enumerate(table.headers)],
         "caption": table.caption, "rows": len(table.rows), "source_start": table.source.start} for table in index.tables.values()]
     instruction = ("Bind the requested fields and conditions to the supplied table schemas. "
         "Samples illustrate columns; the CPU will execute over every row of each selected table. "
         "Return projections and typed filters, explicit equality joins, and requested entity deduplication. "
-        "Use zero-based column indices. Optional unit_span identifies a supplied S source, exact unit text, "
-        "and its zero-based occurrence in that source; "
+        "Use zero-based column indices. Optional unit_span identifies a supplied S source and inclusive "
+        "word_boundaries [first,last] using the displayed word indices; "
         "select only the literal unit in the supplied source. Same-shaped tables use the same field aliases for union; "
         "join fields identify the actual key correspondence. Include all tables in the requested population. "
         "For transposed tables select the period column and filter the requested metric row. "
@@ -655,15 +669,14 @@ class SemanticProjection:
     unresolved_need_ids: tuple[str, ...]
 
 
-def semantic_projection_schema(unit_ids, need_ids):
+def semantic_projection_schema(units, need_ids):
     def array(item):
         return {"type": "array", "items": item}
     def obj(properties):
         return {"type": "object", "properties": properties, "required": list(properties),
                 "additionalProperties": False}
-    address = obj({"unit_id": {"enum": list(unit_ids)},
-                   "text": {"type": "string", "minLength": 1},
-                   "occurrence": {"type": "integer", "minimum": 0}})
+    unit_ids = [f"S{i+1}" for i in range(len(units))]
+    address = _word_address_schema(units)
     optional_address = {"anyOf": [address, {"type": "null"}]}
     return obj({"covered_units": array({"enum": list(unit_ids)}),
         "unresolved_need_ids": array({"enum": list(need_ids)}),
@@ -680,7 +693,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
 
     def source(address):
         unit = units_by_id[address["unit_id"]]
-        return _literal_source(unit, address)
+        return _word_source(unit, address)
 
     tables, programs = [], []
     needs = {need.need_id: need for need in query.task.needs}
@@ -723,15 +736,13 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
 def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
     """Read only requested fields and eligibility once; use CPU aggregation afterwards."""
     import json
-    from controller.schema import EvidenceBlock
     units, need_ids = tuple(units), tuple(need_ids)
     population = tuple(population_unit_ids) if population_unit_ids is not None else tuple(unit.unit_id for unit in units)
-    blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
-        span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
+    blocks = _word_blocks(units)
     instruction = ("Project only the requested document fields. For each qualifying record, return its entity, "
         "requested measure, literal unit, grouping fields, and the period/condition qualifiers as exact source "
-        "literal references {unit_id,text,occurrence}; text is copied exactly and occurrence is zero-based "
-        "within that source. The CPU resolves the original character spans. "
+        "references {unit_id,word_boundaries:[first,last]} using inclusive displayed word indices. "
+        "The CPU resolves the original text and character spans. "
         "A record can serve several Need IDs: extract it once and list all applicable IDs. "
         "Apply each Need's stated entity, period and conditions in this same pass. Retain units and qualifiers "
         "from source headings or notes. Do not produce totals, summaries or a second selection list. "
@@ -741,7 +752,7 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
             "sources": [{"unit_id": f"S{index+1}", "title": unit.heading, "characters": len(unit.text)}
                         for index, unit in enumerate(units)]}, ensure_ascii=False, separators=(",", ":")))
     return SemanticBinding(blocks, instruction,
-        semantic_projection_schema(tuple(f"S{index+1}" for index in range(len(units))), need_ids),
+        semantic_projection_schema(units, need_ids),
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
@@ -750,28 +761,24 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
     import json
     from dataclasses import replace
     from controller.schema import EvidenceBlock
+    from controller.source_windows import numbered_lines
     units = tuple(units)
     identities, blocks, locations, choices = {}, [], {}, []
     for index, unit in enumerate(units):
         identity = f"S{index+1}"
         identities[identity] = unit
-        lines = unit.text.splitlines(keepends=True)
-        offsets, cursor = [], 0
-        for line in lines:
-            offsets.append((cursor, cursor+len(line)))
-            cursor += len(line)
+        body, offsets = numbered_lines(unit.text, tokenizer)
         locations[identity] = offsets
         origin = unit.source_spans[0]
         key = replace(origin.source_key,
             passage_id=f"{origin.source_key.passage_id}:indexed-lines:{origin.start}:{origin.end}")
-        body = "".join(f"[{number}; {len(tokenizer.encode(line, add_special_tokens=False))} tokens] {line}" + ("" if line.endswith("\n") else "\n")
-                       for number, line in enumerate(lines))
         blocks.append(EvidenceBlock(key, "", unit.heading, body))
-        bound = {"type": "integer", "minimum": 0, "maximum": len(lines)-1}
+        bound = {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}
         choices.append({"type": "object", "properties": {"source": {"const": identity},
             "first_line": bound, "last_line": bound}, "required": ["source", "first_line", "last_line"],
             "additionalProperties": False})
-    schema = {"type": "object", "properties": {"evidence": {"type": "array", "items": {"oneOf": choices}}},
+    line_count = sum(map(len, locations.values()))
+    schema = {"type": "object", "properties": {"evidence": {"type": "array", "maxItems": line_count, "items": {"oneOf": choices}}},
               "required": ["evidence"], "additionalProperties": False}
     instruction = ("Examine every supplied source. Select the original line ranges containing the fields and "
         "statements needed to answer the question. Preserve source entity/title, relevant attributes, directed "
@@ -779,7 +786,7 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
         "even when they are negative or ambiguous; the final answer decides which members satisfy the conditions. "
         "For global relationships keep relevant cross-source links even when the other source is in another batch. "
         "Exclude only material unrelated to the requested fields or relationships. Return source IDs and inclusive "
-        "line ranges, not copied text, summaries, final answers or rankings. "
+        "line ranges, not copied text, summaries, final answers or rankings. Merge adjacent selected lines into one range. "
         f"The selected original lines share a budget of {retained_tokens} tokens; their token counts are shown. "
         "Keep the necessary facts and leave unrelated lines out.\nQuestion: " + question)
 
@@ -803,7 +810,10 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
                 span=(origin.start+left, origin.start+right)) for left, right in merged)
         return tuple(result)
 
-    return SemanticBinding(tuple(blocks), instruction, schema, decode_evidence)
+    largest = {"evidence": [{"source": identity, "first_line": len(offsets)-1, "last_line": len(offsets)-1}
+        for identity, offsets in locations.items() for _ in offsets]}
+    output_tokens = len(tokenizer.encode(json.dumps(largest, separators=(",", ":")), add_special_tokens=False))
+    return SemanticBinding(tuple(blocks), instruction, schema, decode_evidence, output_tokens)
 
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""

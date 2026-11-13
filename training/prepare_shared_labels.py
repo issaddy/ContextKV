@@ -14,7 +14,8 @@ from adapters.retrieval import BM25SRetriever
 from adapters.shared_encoding import query_input
 from controller.schema import Message, from_history_messages
 from controller.serialization import to_jsonable
-from training.shared_collection import numbered_text, numbered_sources, word_reference_schema, word_offsets, source_bindings
+from controller.source_windows import numbered_text
+from training.shared_collection import numbered_sources, word_reference_schema, word_offsets, source_bindings
 
 
 TASK_INSTRUCTION = """Label a document-QA request for a shared query encoder. Use only the visible conversation and question.

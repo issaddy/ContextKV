@@ -210,11 +210,11 @@ class CooperativeController:
         covered = {program.projections[i].table_id for i in used} | set(program.excluded_table_ids)
         return set(program.population_table_ids) <= covered and not program.unresolved_conditions
 
-    def _source_packs(self, units, input_tokens):
+    def _source_packs(self, units, input_tokens, source_text):
         """Pack source windows by their actual input size."""
         pack, inputs = [], 0
         for unit in units:
-            tokens = len(self.template.tokenizer.encode(unit.text, add_special_tokens=False))
+            tokens = len(self.template.tokenizer.encode(source_text(unit), add_special_tokens=False))
             if pack and inputs + tokens > input_tokens:
                 yield tuple(pack)
                 pack, inputs = [], 0
@@ -228,6 +228,7 @@ class CooperativeController:
             merge_projections, semantic_binding, semantic_projection)
         from adapters.shared_retrieval import need_scope_signature
         from .schema import Message, history_messages
+        from .source_windows import numbered_text
         index = state.document_index
         output_tokens = self.settings.get("semantic_output_tokens", 8192)
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM),
@@ -244,7 +245,7 @@ class CooperativeController:
             packets = []
             for table in index.tables.values():
                 units = [unit for unit in table_units if unit.table_id == table.table_id]
-                tokens = sum(len(self.template.tokenizer.encode(unit.text, add_special_tokens=False)) for unit in units)
+                tokens = sum(len(self.template.tokenizer.encode(numbered_text(unit.text)[0], add_special_tokens=False)) for unit in units)
                 if pending and size + tokens > input_tokens:
                     packets.append(tuple(pending))
                     pending, size = [], 0
@@ -269,7 +270,7 @@ class CooperativeController:
         if outside:
             projections = []
             population = tuple(unit.unit_id for unit in outside)
-            for number, units in enumerate(self._source_packs(outside, input_tokens)):
+            for number, units in enumerate(self._source_packs(outside, input_tokens, lambda unit: numbered_text(unit.text)[0])):
                 projection = semantic_projection(state.query, units, sorted(need_ids), population_unit_ids=population)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, instruction=projection.instruction, future_sources=selected,
@@ -326,6 +327,7 @@ class CooperativeController:
 
     async def _population_sources(self, state, snapshot, computations, complete):
         from adapters.document_compute import semantic_evidence_projection
+        from .source_windows import numbered_lines
         budget, _ = self._answer_budget(state, snapshot, computations)
         units = state.population_units
         blocks = blocks_for_units(units, state.pool.source_blocks)
@@ -334,7 +336,8 @@ class CooperativeController:
                             add_special_tokens=False)) for i, block in enumerate(blocks)]
         if sum(sizes) <= budget:
             return blocks
-        packs = tuple(self._source_packs(units, self.settings.get("semantic_input_tokens", 8192)))
+        packs = tuple(self._source_packs(units, self.settings.get("semantic_input_tokens", 8192),
+            lambda unit: numbered_lines(unit.text, self.template.tokenizer)[0]))
         weights = [sum(len(encode(unit.text, add_special_tokens=False)) for unit in pack) for pack in packs]
         total, spent, projected = sum(weights), 0, {}
         for number, (pack, weight) in enumerate(zip(packs, weights)):
@@ -345,9 +348,9 @@ class CooperativeController:
             request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                 projection.blocks, instruction=projection.instruction,
                 system_prompt=self.policy.system_prompt or SYSTEM)
-            result = await complete(request, f"coverage:{number}", schema=projection.schema, output_tokens=quota)
-            if result["meta"]["finish_reason"]["type"] == "length":
-                raise ValueError("complete-population evidence exceeds its conclusion budget")
+            output_tokens = min(projection.output_tokens, self.settings.get("semantic_output_tokens", 8192),
+                                self.policy.max_total_model_tokens-len(request.input_ids))
+            result = await complete(request, f"coverage:{number}", schema=projection.schema, output_tokens=output_tokens)
             for block in projection.decode(result["text"]):
                 projected[source_address(block)] = block
         return tuple(projected.values())

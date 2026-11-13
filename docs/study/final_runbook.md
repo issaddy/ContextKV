@@ -1,6 +1,6 @@
 # ContextKV 运行手册
 
-当前版本已接通共享查询/证据编码、结构化文档计算、多步价值停止和 SGLang InfoFlow 执行。查询 LoRA 与任务头复用 190 个训练状态的权重，字段头复用 54 个训练状态的权重；对应开发集为 39、23。本轮重训 81 参数集合头，使用 34 个有集合监督的训练状态；停止资产重新采集并拟合，使用 16 个训练状态和 4 个开发状态。四项 benchmark 各 2 题完成交付与评分，普通 RAG 和 LlamaIndex 复用同题已有结果。非前缀逆序复读实际命中 2120 token，但完整耗时仍高于 Native；各项效果和剩余缺口见[本轮报告](shared_smoke.md)。
+当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，查询 LoRA 和 Jina 骨干继续复用；任务、字段、集合和停止头随当前协议更新。快速对照使用每个 benchmark、每种方法相同的 20 题。当前结果见[本轮报告](shared_smoke.md)。
 
 ## 路径与环境
 
@@ -52,6 +52,16 @@ python3 -m training.shared_training query \
   --data data/training/shared/query_labels.jsonl \
   --output models/shared-query --device cuda:2 --epochs 5
 
+python3 -m training.prepare_shared_labels \
+  --query-model models/qwen3-embedding-0.6b \
+  --refresh-coverage data/training/shared/query_labels.jsonl data/training/shared/labels.jsonl \
+  --output data/training/shared/query_labels.jsonl --concurrency 4
+
+python3 -m training.shared_training coverage \
+  --model models/qwen3-embedding-0.6b --init-asset models/shared-query \
+  --data data/training/shared/query_labels.jsonl \
+  --output models/shared-query --device cuda:2 --epochs 200 --learning-rate 0.001
+
 python3 -m training.shared_index \
   --corpus data/multidoc2dial/test/passages.jsonl \
   --snapshot multidoc2dial-test \
@@ -66,7 +76,7 @@ python3 -m training.shared_training evidence \
 
 python3 -m training.collect_shared_values sets \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \
-  --output data/training/shared/sets.jsonl --concurrency 4
+  --output data/training/shared/sets.jsonl --train-states 24 --dev-states 6 --concurrency 4
 
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
@@ -76,7 +86,7 @@ python3 -m training.shared_training evidence \
 
 python3 -m training.collect_shared_values stop \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \
-  --output data/training/shared/stop.jsonl --concurrency 4
+  --output data/training/shared/stop.jsonl --train-states 12 --dev-states 4 --concurrency 4
 
 python3 -m training.stop_value data/training/shared/stop.jsonl \
   --output models/shared-stop.pt --device cuda:2 \
@@ -91,17 +101,17 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ## 少量端到端评测
 
-当前工程收尾只做默认每个 benchmark、每种方法 2 题的跑通，暂不运行完整实验队列。`--limit-turns` 可指定规模；已有完成结果直接复用。正式比较使用相同题目与生成条件，每个 benchmark 单独评分和报告。
+默认每个 benchmark、每种方法 20 题。`--limit-turns` 可指定规模；固定种子分散选择会话并保留相邻轮次，各方法使用相同题目与生成条件，每个 benchmark 单独评分和报告。
 
 ```bash
 python3 -m bench.study evaluate \
   --config configs/study.yaml --matrix configs/study_matrix.yaml \
-  --split test --limit-turns 2 --concurrency 4 \
+  --split test --limit-turns 20 --concurrency 4 \
   --output runs/current/public
 
 python3 -m bench.study evaluate \
   --config configs/study.yaml --matrix configs/study_system_matrix.yaml \
-  --split test --limit-turns 2 --concurrency 4 \
+  --split test --limit-turns 20 --concurrency 4 \
   --output runs/current/actual-history
 ```
 

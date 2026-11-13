@@ -1,18 +1,14 @@
 """Evidence-set interventions and original-source field supervision."""
 from __future__ import annotations
 
+from controller.source_windows import numbered_text
+
 
 def candidate_sets(unit_ids):
     """Nested evidence and removal interventions for complementary/redundant material."""
     ids = tuple(unit_ids)
     variants = ((), ids[:1], ids[:2], ids[:4], ids, ids[1:])
     return tuple(dict.fromkeys(variants))
-
-
-def numbered_text(text):
-    import re
-    words = tuple(re.finditer(r"[\u3400-\u9fff]|\w+|[^\w\s]", text))
-    return " ".join(f"{index}:{word.group()}" for index, word in enumerate(words)), tuple(word.span() for word in words)
 
 
 def numbered_sources(units):

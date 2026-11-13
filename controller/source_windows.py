@@ -7,6 +7,21 @@ SOURCE_WINDOW_TOKENS = 2048
 SOURCE_WINDOW_LINES = 8
 
 
+def numbered_text(text):
+    words = tuple(re.finditer(r"[\u3400-\u9fff]|\w+|[^\w\s]", text))
+    return " ".join(f"{i}:{word.group()}" for i, word in enumerate(words)), tuple(word.span() for word in words)
+
+
+def numbered_lines(text, tokenizer):
+    shown, offsets, cursor = [], [], 0
+    for index, line in enumerate(text.splitlines(keepends=True)):
+        offsets.append((cursor, cursor+len(line)))
+        cursor += len(line)
+        shown.append(f"[{index}; {len(tokenizer.encode(line, add_special_tokens=False))} tokens] {line}" +
+                     ("" if line.endswith("\n") else "\n"))
+    return "".join(shown), tuple(offsets)
+
+
 def source_window_spans(text, tokenizer, *, tokens=SOURCE_WINDOW_TOKENS):
     """Partition literal text, preserving rows and preferring sentence boundaries.
 
