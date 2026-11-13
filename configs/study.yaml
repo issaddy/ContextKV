@@ -19,7 +19,7 @@ retrieval:
   candidate_k: 50
   evidence_batch: 24
 selection:
-  body_tokens: 16384
+  body_tokens: 32768
 execution:
   dialogue_mode: contextkv
   cache_start: cold

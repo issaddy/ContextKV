@@ -433,16 +433,27 @@ class CooperativeController:
             return blocks
         packs = tuple(self._source_packs(units, self.settings.get("semantic_input_tokens", 8192),
             lambda unit: numbered_lines(unit.text, self.template.tokenizer)[0]))
-        weights = [sum(len(encode(unit.text, add_special_tokens=False)) for unit in pack) for pack in packs]
-        total, spent, projected = sum(weights), 0, {}
-        for number, (pack, weight) in enumerate(zip(packs, weights)):
-            quota = budget-spent if number == len(packs)-1 else int(budget*weight/total)
-            spent += quota
+        retained = [blocks_for_units(pack, state.pool.source_blocks) for pack in packs]
+        def size(group):
+            return sum(len(encode(f"[S1] {block.title} | version={block.key.version}\n{block.text}\n\n",
+                                  add_special_tokens=False)) for block in group)
+        weights = [size(group) for group in retained]
+        total = remaining = sum(weights)
+        projected = set()
+        # Preserve the leading raw context for Native prefix reuse. Compress only
+        # as many trailing packs as needed for the actual final window.
+        for number in reversed(range(len(packs))):
+            if remaining <= budget:
+                break
+            pack, weight = packs[number], weights[number]
+            quota = int(budget*weight/total)
             projection = await asyncio.to_thread(semantic_evidence_projection,
                 state.query.task.raw_question, pack, retained_tokens=quota,
                 tokenizer=self.template.tokenizer, source_headers=state.source_headers)
             request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                 projection.blocks, instruction=projection.instruction,
+                future_sources=with_document_headers(tuple(block for group in retained[:number]
+                    for block in group), state.source_headers),
                 system_prompt=self.policy.system_prompt or SYSTEM)
             output_tokens = min(self.settings.get("semantic_output_tokens", 8192),
                                 self.policy.max_total_model_tokens-len(request.input_ids))
@@ -451,9 +462,11 @@ class CooperativeController:
                 state.budget_exhausted = True
                 break
             result = await complete(request, f"coverage:{number}", schema=projection.schema, output_tokens=allowance)
-            for block in projection.decode(result["text"]):
-                projected[source_address(block)] = block
-        return tuple(projected.values())
+            retained[number] = projection.decode(result["text"])
+            remaining += size(retained[number])-weight
+            projected.add(number)
+        return tuple(block for number, group in enumerate(retained)
+                     if not state.budget_exhausted or number in projected for block in group)
 
     def _value_state(self, state, totals, arrived, session_id):
         native = {**self.kv_policy["costs"], **self.native_state.get(session_id, {})}
