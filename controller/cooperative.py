@@ -261,9 +261,6 @@ class CooperativeController:
                                            output_tokens=output_tokens)
                 programs = binding.decode(generated["text"])
                 resolved_operations.update((program.need_id, program.operation) for program in programs)
-                ready = {program.need_id for program in programs if self._population_complete(subset, program)}
-                if ready != unbound:
-                    raise ValueError("document fields or table applicability remain unresolved")
                 parts.extend((subset, program) for program in programs)
         outside = index.outside_tables(state.pool.units)
         if outside:
@@ -281,8 +278,6 @@ class CooperativeController:
                 operations = projections[-1].operations
                 resolved_operations.update(operations)
             merged = merge_projections(projections)
-            if merged.unresolved_need_ids:
-                raise ValueError("document projection did not resolve the complete requested population")
             parts.extend((merged.index, program) for program in merged.programs)
         parts = [(part, replace(program, operation=resolved_operations.get(program.need_id, program.operation)))
                  for part, program in parts]
@@ -290,8 +285,6 @@ class CooperativeController:
         computations = []
         for program in programs:
             result = calculated_index.execute(program)
-            if not result.complete:
-                raise ValueError(f"document population incomplete for {program.need_id}")
             record = computation_record(program, result)
             record["scope"] = need_scope_signature(state.query, program.need_id, index)
             computations.append(record)
@@ -300,13 +293,9 @@ class CooperativeController:
         return computations
 
     def _answer_budget(self, state, snapshot, computations):
-        from .cooperative_request import compact_computations
+        from .cooperative_request import answer_task
         from .schema import Message, history_messages
-        import json
-        question = state.query.task.raw_question
-        if computations:
-            question += "\nComputed results with original-source addresses:\n" + json.dumps(
-                compact_computations(computations), ensure_ascii=False, separators=(",", ":"))
+        question = answer_task(state.query.task.raw_question, computations)
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", ""),
                                      *history_messages(snapshot.raw_history), Message("user", question)))
         body_tokens = self.policy.max_total_model_tokens-self.policy.max_new_tokens-len(fixed.input_ids)

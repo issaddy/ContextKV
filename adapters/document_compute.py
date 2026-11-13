@@ -354,7 +354,7 @@ class DocumentIndex:
                 value=value, unit=unit, conditions=program.condition_ids,
                 source_spans=sources, operation="project", entity=entity, relation=program.value_field,
                 version=" / ".join(dict.fromkeys(s.source_key.version for s in sources))))
-        if program.operation == "lookup":
+        if program.operation == "lookup" or not complete:
             return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete)
         if not groups and not program.group_by:
             groups[()] = []
@@ -548,9 +548,8 @@ def _query_description(query, need_ids):
     selected = tuple(need for need in query.task.needs if need.need_id in ids)
     condition_ids = {identity for need in selected for identity in need.condition_ids}
     return {"question": query.task.raw_question, "proposed_needs": [{"id": need.need_id,
-        "operation": need.operation, "subject": query.text(need.subject_refs),
-        "request": query.text(need.anchor_spans), "conditions": need.condition_ids,
-        "scope": need.scope} for need in selected], "proposed_conditions": [{
+        "subject": query.text(need.subject_refs),
+        "request": query.text(need.anchor_spans), "conditions": need.condition_ids} for need in selected], "proposed_conditions": [{
             "id": condition.condition_id, "type": condition.relation_type,
             "field": query.text((condition.key_span,)) if condition.key_span else "",
             "values": [query.text((ref,)) for ref in condition.value_spans],
@@ -651,7 +650,7 @@ def semantic_binding(query, index, need_ids):
     instruction = ("Bind the requested fields and conditions to the supplied table schemas. "
         "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
         "incorrect; resolve their intended meaning from the original question rather than imposing their text. "
-        "Need operations are proposals: choose the operation actually requested by the full question. "
+        "Choose the operation actually requested by the full question. "
         "Use lookup to return fields for semantic classification rather than forcing an arithmetic aggregate. "
         "Samples illustrate columns; the CPU will execute over every row of each selected table. "
         "Return projections and typed filters, explicit equality joins, and requested entity deduplication. "
@@ -673,7 +672,6 @@ def semantic_binding(query, index, need_ids):
 class SemanticProjection:
     index: DocumentIndex
     programs: tuple[DocumentProgram, ...]
-    unresolved_need_ids: tuple[str, ...]
     operations: dict
 
 
@@ -736,17 +734,16 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
             table_id = f"projection:{need_id}:{units_by_id[identity].unit_id}"
             tables.append(DocumentTable(table_id, headers, tuple(None for _ in headers), tuple(rows), origin))
             projections.append(Projection(table_id, tuple(Field(name, column) for column, name in enumerate(headers))))
-        if need_id not in data["unresolved_need_ids"]:
-            programs.append(DocumentProgram(need_id, tuple(projections),
-                tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
-                operation=operation, value_field="measure" if any(record["measure"] is not None for record in records) else "",
-                entity_fields=("entity",), group_by=tuple(headers[2:]),
-                distinct=("entity",) if need_id in query.distinct_needs else (),
-                condition_ids=need.condition_ids))
+        programs.append(DocumentProgram(need_id, tuple(projections),
+            tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
+            operation=operation, value_field="measure" if any(record["measure"] is not None for record in records) else "",
+            entity_fields=("entity",), group_by=tuple(headers[2:]),
+            distinct=("entity",) if need_id in query.distinct_needs else (),
+            condition_ids=need.condition_ids,
+            unresolved_conditions=(need_id,) if need_id in data["unresolved_need_ids"] else ()))
     blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
         span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
-    return SemanticProjection(DocumentIndex(tables, blocks), tuple(programs),
-                              tuple(data["unresolved_need_ids"]), data["operations"])
+    return SemanticProjection(DocumentIndex(tables, blocks), tuple(programs), data["operations"])
 
 
 def semantic_projection(query, units, need_ids, *, population_unit_ids=None, operations=None):
@@ -761,7 +758,7 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         "The CPU resolves the original text and character spans. "
         "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
         "incorrect; resolve their intended meaning from the original question. An incomplete auxiliary fragment "
-        "is not unresolved source information. Need operations are proposals. Choose the operation requested by the full question; use lookup to "
+        "is not unresolved source information. Choose the operation requested by the full question; use lookup to "
         "return fields for classification or semantic comparison instead of forcing an arithmetic aggregate. "
         "When the requested entity is the document itself, use {unit_id,document:true}; its identifier is shown "
         "below and the CPU binds that document identity. Otherwise use original word indices for the entity. "
@@ -830,21 +827,20 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""
     from dataclasses import replace
-    tables, blocks, programs, unresolved = {}, {}, {}, {}
+    tables, blocks, programs = {}, {}, {}
     for projection in projections:
         tables.update(projection.index.tables)
         blocks.update(projection.index.blocks)
-        unresolved.update(dict.fromkeys(projection.unresolved_need_ids))
         for program in projection.programs:
             previous = programs.get(program.need_id)
             if previous is not None:
                 program = replace(program, projections=(*previous.projections, *program.projections),
                     population_table_ids=tuple(dict.fromkeys((*previous.population_table_ids, *program.population_table_ids))),
-                    group_by=program.group_by or previous.group_by)
+                    group_by=program.group_by or previous.group_by,
+                    unresolved_conditions=tuple(dict.fromkeys((*previous.unresolved_conditions, *program.unresolved_conditions))))
             programs[program.need_id] = program
     return SemanticProjection(DocumentIndex(tables.values(), blocks.values()),
-                              tuple(program for need, program in programs.items() if need not in unresolved),
-                              tuple(unresolved), projections[0].operations)
+                              tuple(programs.values()), projections[0].operations)
 
 
 def combine_populations(parts):
@@ -860,9 +856,6 @@ def combine_populations(parts):
             row = [Cell(entity, sources[0], qualifiers=sources[1:])]
             if program.value_field:
                 cell = record.fields[program.value_field]
-                if program.operation in _NUMERIC_AGGREGATES:
-                    unit, value = quantity(cell)
-                    cell = Cell(str(value), cell.source, cell.header, unit, cell.qualifiers)
                 row.append(cell)
             else:
                 row.append(Cell("", sources[0], qualifiers=sources[1:]))

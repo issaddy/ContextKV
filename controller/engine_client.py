@@ -53,8 +53,9 @@ class SGLangEngineClient:
     async def close_session(self, session_id):
         return await self._post("/context/session/close", {"session_id": session_id})
 
-    async def evidence_state(self, source_ids, *, cache_scope="shared"):
-        return await self._post("/context/evidence/state", {"source_ids": list(source_ids), "cache_scope": cache_scope})
+    async def evidence_state(self, source_ids, *, cache_scope="shared", cache_namespace=None):
+        return await self._post("/context/evidence/state", {"source_ids": list(source_ids),
+            "cache_scope": cache_scope, "cache_namespace": cache_namespace})
 
     async def compute(self, request, *, session_id, request_id, max_new_tokens,
                       mode="auto", recompute_ratio=0.15, quality_loss=0.0,

@@ -98,17 +98,17 @@ async def collect(args):
     outputs, answers, windows, queries = [], [], {}, {}
     limit = asyncio.Semaphore(args.concurrency)
 
-    async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None, cache_scope=None):
+    async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None, cache_scope=None,
+                     cache_namespace=None):
         if args.stage == "stop":
             started = time.monotonic()
         request = compile_request(template, row["question"], working_history(queries[row["task_id"]], history(row)), source_blocks(units),
                                   future_sources=source_blocks(future))
-        # Every question owns its training source namespace. Warm branches share
-        # immutable independent KV; cold branches have distinct exact prefixes.
+        # A branch's residency quote and generation use the same source and prefix namespaces.
         scope = f"training:{row['task_id']}:"
         result = await engine.compute(request, session_id=scope, request_id=identity,
             max_new_tokens=config["execution"]["output_tokens"] if output_tokens is None else output_tokens, mode=mode,
-            cache_namespace=identity, cache_scope=cache_scope or scope,
+            cache_namespace=cache_namespace or identity, cache_scope=cache_scope or scope,
             **kv_policy)
         item = {"source": row, "answer": result["text"]}
         if args.stage == "stop":
@@ -138,14 +138,17 @@ async def collect(args):
             from controller.value_policy import StopValueHead
             paid_seconds = time.monotonic()-query_started
             warm = index % 2 == 1
-            native = {}
-            if warm:
-                warmup = await answer(row, units, f"warm:{row['task_id']}", future=units, mode="infoflow", output_tokens=1)
-                native = warmup["native"]
-                answers.remove(warmup)
             encoded, states = None, []
             batch_size = min(args.batch_size, max(1, len(units) // 2))
             for start in range(0, len(units), batch_size):
+                branch_id = f"stop:{row['task_id']}:{start}"
+                native = dict(kv_policy["costs"])
+                if warm:
+                    warmup = await answer(row, units, f"warm:{row['task_id']}:{start}", future=units,
+                        mode=config["shared"]["runtime"]["kv_mode"], output_tokens=1,
+                        cache_scope=branch_id, cache_namespace=branch_id)
+                    native.update(warmup["native"])
+                    answers.remove(warmup)
                 first = time.monotonic()
                 fresh = units[start:start + batch_size]
                 new = await asyncio.to_thread(evidence_encoder.encode, query, fresh)
@@ -156,7 +159,7 @@ async def collect(args):
                 observed = units[:start + len(fresh)]
                 blocks = source_blocks(observed)
                 native_view = await engine.evidence_state(tuple(source_address(block) for block in blocks),
-                    cache_scope=f"training:{row['task_id']}:")
+                    cache_scope=branch_id, cache_namespace=branch_id)
                 fixed = compile_request(template, row["question"], working_history(query, history(row)), ())
                 costs = EvidenceCosts(observed, blocks, template.tokenizer, native_view,
                     prompt_tokens=len(fixed.input_ids), output_tokens=config["execution"]["output_tokens"],
@@ -180,9 +183,9 @@ async def collect(args):
                         "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
                 by_id = {unit.unit_id: unit for unit in observed}
                 selected = tuple(by_id[identity] for identity in chosen)
-                item = await answer(row, selected, f"stop:{row['task_id']}:{start}",
+                item = await answer(row, selected, branch_id,
                     future=units if start+len(fresh) < len(units) else (), mode=config["shared"]["runtime"]["kv_mode"],
-                    cache_scope=f"training:{row['task_id']}:" if warm else f"stop:{row['task_id']}:{start}")
+                    cache_scope=branch_id, cache_namespace=branch_id)
                 states.append({"features": features, "answer": item})
             outputs.append((row, states))
 

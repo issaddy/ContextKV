@@ -149,11 +149,20 @@ def compact_computations(results):
             reference = sources.setdefault(address, f"C{len(sources) + 1}")
             references.append(reference)
         records.append({name: result[name] for name in (
-            "need_id", "operation", "fields", "conditions", "results")}
+            "need_id", "operation", "fields", "conditions", "results", "complete")}
             | {"sources": references})
     return {"sources": [{"id": reference, "corpus": address[0], "document": address[1],
                          "version": address[2], "passage": address[3], "span": address[4:]}
                         for address, reference in sources.items()], "results": records}
+
+
+def answer_task(question, results):
+    if not results:
+        return question
+    return question + "\nComputed results with original-source addresses:\n" + json.dumps(
+        compact_computations(results), ensure_ascii=False, separators=(",", ":")) + (
+        "\nComplete computations contain final results; incomplete computations contain source observations. "
+        "Use established observations and explain what remains unresolved.")
 
 
 @dataclass(frozen=True)
@@ -183,10 +192,7 @@ def compile_request(template, question, history, evidence, *, results=(),
                                   source_start=source_start, source_end=source_start + len(block.text)))
         segments.append((source_address(block), start, end))
         references.append((reference, block.key))
-    task = question
-    if results:
-        task += "\nComputed results with original-source addresses:\n" + json.dumps(
-            compact_computations(results), ensure_ascii=False, separators=(",", ":"))
+    task = answer_task(question, results)
     if instruction:
         task += "\n" + instruction
     messages = (Message("system", system_prompt), Message("user", body),

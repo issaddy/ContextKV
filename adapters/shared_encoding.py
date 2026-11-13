@@ -75,9 +75,9 @@ class QueryEncoding:
 
     @property
     def evidence_query(self):
-        needs = "\n".join(dict.fromkeys(self.search_texts[1:]))
-        versions = ", ".join(self.task.version_intent.version_ids)
-        return self.task.raw_question + ("\nRequested evidence:\n"+needs if needs else "") + ("\nVersions: "+versions if versions else "")
+        history = "\n".join(f"{speaker}: {text}" for (turn, speaker), text in self.texts.items()
+                            if turn != self.task.current_turn_id)
+        return ("Conversation:\n"+history+"\nCurrent question:\n" if history else "") + self.task.raw_question
 
 
 @dataclass(frozen=True)
