@@ -2,7 +2,7 @@
 
 当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，查询 LoRA 和 Jina 骨干继续复用；任务、字段、集合和停止头随当前协议更新。快速对照使用每个 benchmark、每种方法相同的 20 题。当前结果见[本轮报告](shared_smoke.md)。
 
-当前已完成可读事实交付、增量读取、实际计算状态驱动的继续决策、同执行器收益监督及线程独立 tokenizer。四项各 20 题已完成评测，Loong 两题补跑后完成交付。质量仍有差距，结果和全部已付费用见 `results/semantic-state-20261113.json` 与[当前报告](shared_smoke.md)。
+当前采用关系特征驱动的集合效用、明确版本绑定与 token 分窗，更新了集合头和停止头。四项各 20 题评测显示前三项质量提升、P95 上升；Loong 为 19/20，仍有终端预算衔接缺口。结果和后续单题尝试的全部费用见 `results/quality-iteration-20261113.json` 与[当前报告](shared_smoke.md)。
 
 ## 路径与环境
 
@@ -32,7 +32,7 @@
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
-现有可用资产：`models/shared-query`（286/63 个训练/开发输入状态，任务头和总体覆盖头）、`models/shared-evidence`（字段输入 54/23、实际集合 22/6 状态）、`models/shared-stop.pt`（实际 11/4 状态）。任务与覆盖监督共享输入，覆盖专用行不生成任务关系标签。本轮集合和停止分别采集 163、33 次真实答案；总体必需读取状态不参与可选集合/停止采集。查询 LoRA、Jina 骨干与 Qwen3-32B 权重保持固定。以下命令包含标签准备、已有资产增量更新与评测入口；现有数据和索引可直接复用。
+现有可用资产：`models/shared-query`（286/63 个训练/开发输入状态，任务头和总体覆盖头）、`models/shared-evidence`（字段输入 54/23、实际集合 22/5 状态）、`models/shared-stop.pt`（实际 11/4 状态）。任务与覆盖监督共享输入，覆盖专用行不生成任务关系标签。本轮集合和停止分别保留 158、33 个答案标签；总体必需读取状态不参与可选集合/停止采集。集合头使用当前事实完成度和关系特征，按开发损失选择拟合轮次。查询、字段和生成权重本轮固定。以下命令包含标签准备、资产更新与评测入口；现有数据和索引可直接复用。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -86,7 +86,7 @@ python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
   --init-asset models/shared-evidence --data data/training/shared/sets.jsonl \
-  --output models/shared-evidence --device cuda:3 --epochs 40 --learning-rate 0.001
+  --output models/shared-evidence --device cuda:3 --epochs 80 --learning-rate 0.001
 
 python3 -m training.collect_shared_values stop \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \

@@ -1,0 +1,515 @@
+{
+  "benchmarks": [
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "metric": "f1",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.1912076686822316,
+      "metrics": {
+        "exact_match": {
+          "mean": 0,
+          "scored": 20
+        },
+        "f1": {
+          "mean": 0.1912076686822316,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 22.579941481538118,
+      "total_input_tokens": 32703,
+      "total_output_tokens": 3999,
+      "gpu_gib_seconds": 2819.598728399418,
+      "host_gib_seconds": 824.5713447092704,
+      "gpu_peak_gib": 79.439453125,
+      "host_peak_gib": 23.506803512573242,
+      "actual_device_hit_tokens": 2496,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 30207
+    },
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "metric": "mtrageval_harmonic",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.5976959926289499,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.3970603836820729,
+          "scored": 20
+        },
+        "RB_alg_idk": {
+          "mean": 0.38908360911634915,
+          "scored": 20
+        },
+        "RB_llm": {
+          "mean": 0.835,
+          "scored": 20
+        },
+        "RB_llm_idk": {
+          "mean": 0.79,
+          "scored": 20
+        },
+        "RL_F": {
+          "mean": 0.87425403046,
+          "scored": 20
+        },
+        "RL_F_idk": {
+          "mean": 0.845087363795,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 50.249145184643574,
+      "total_input_tokens": 130996,
+      "total_output_tokens": 6844,
+      "gpu_gib_seconds": 5897.168673928223,
+      "host_gib_seconds": 1799.8338614728161,
+      "gpu_peak_gib": 80.609375,
+      "host_peak_gib": 24.735628128051758,
+      "actual_device_hit_tokens": 1216,
+      "actual_host_loaded_tokens": 768,
+      "actual_prefill_tokens": 129012
+    },
+    {
+      "dataset": "versionqa",
+      "method": "contextkv",
+      "metric": "versionqa_accuracy",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.85,
+      "metrics": {
+        "versionqa_accuracy": {
+          "mean": 0.85,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 45.25278537143023,
+      "total_input_tokens": 125282,
+      "total_output_tokens": 1865,
+      "gpu_gib_seconds": 4114.866848449194,
+      "host_gib_seconds": 1218.9182243680634,
+      "gpu_peak_gib": 82.013671875,
+      "host_peak_gib": 24.256471633911133,
+      "actual_device_hit_tokens": 1088,
+      "actual_host_loaded_tokens": 448,
+      "actual_prefill_tokens": 123746
+    },
+    {
+      "dataset": "loong",
+      "method": "contextkv",
+      "metric": "loong_reference_score",
+      "completed": 19,
+      "requested": 20,
+      "quality": 29.75,
+      "metrics": {
+        "loong_perfect_rate": {
+          "mean": 0.10526315789473684,
+          "scored": 19
+        },
+        "loong_reference_score": {
+          "mean": 31.31578947368421,
+          "scored": 19
+        }
+      },
+      "p95_seconds": null,
+      "total_input_tokens": 664708,
+      "total_output_tokens": 8799,
+      "gpu_gib_seconds": 17057.277870085207,
+      "host_gib_seconds": 4855.343542844783,
+      "gpu_peak_gib": 86.83984375,
+      "host_peak_gib": 24.51057243347168,
+      "actual_device_hit_tokens": 4032,
+      "actual_host_loaded_tokens": 64,
+      "actual_prefill_tokens": 660612
+    }
+  ],
+  "scoring": {
+    "loong": {
+      "identity": {
+        "protocol": "loong_reference_rubric_local_judge",
+        "upstream_commit": "6d2115b8b48a3d19412ccb52a0c9c4ee37869af4",
+        "judge": {
+          "model": "/data/models/qwen3-32b",
+          "revision": "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8",
+          "base_url": "http://127.0.0.1:30000/v1",
+          "temperature": 0,
+          "max_tokens": 2048,
+          "enable_thinking": false
+        },
+        "score_range": [
+          0,
+          100
+        ]
+      },
+      "primary_metric": "loong_reference_score",
+      "split": "test",
+      "normalization": 100,
+      "requested": 20,
+      "generated_answers": 19,
+      "scored": 19,
+      "judge_cost": {
+        "observed_input_tokens": 13098,
+        "observed_output_tokens": 1619,
+        "observed_elapsed_ms": 31138.083532452583,
+        "unknown_input_token_records": 0,
+        "unknown_output_token_records": 0,
+        "unknown_elapsed_records": 0
+      },
+      "wall_elapsed_ms": 31592.19091385603
+    },
+    "mtrag": {
+      "identity": {
+        "protocol": "pinned_mtrag_official_http",
+        "judge": {
+          "provider": "local_qwen3",
+          "model": "/data/models/qwen3-32b",
+          "revision": "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8",
+          "base_url": "http://127.0.0.1:30000/v1",
+          "max_tokens": 2048,
+          "enable_thinking": false
+        },
+        "official_source": {
+          "repository": "IBM/mt-rag-benchmark",
+          "commit": "53fef6f5917c7e10c436f697e69a955dbc795d81"
+        },
+        "requested_metrics": [
+          "RB_llm",
+          "RL_F"
+        ],
+        "answerability_adjustment": true,
+        "metric_scope": "MTRAGEval_generation_components",
+        "ragas_max_tokens": 4096
+      },
+      "primary_metric": "mtrageval_harmonic",
+      "split": "test",
+      "normalization": 1,
+      "requested": 20,
+      "generated_answers": 20,
+      "scored": 20,
+      "judge_cost": {
+        "http_calls": 80,
+        "input_tokens": 350669,
+        "output_tokens": 36550,
+        "elapsed_ms": 779964.6690115333,
+        "stage_wall_ms": 419468.4369638562
+      },
+      "wall_elapsed_ms": 519283.21762010455
+    },
+    "multidoc2dial": {
+      "identity": {
+        "protocol": "multidoc2dial_author_token_f1_em",
+        "score_range": [
+          0,
+          1
+        ],
+        "implementation": "bench.official.reference_overlap",
+        "upstream": "https://aclanthology.org/2021.emnlp-main.498/"
+      },
+      "primary_metric": "f1",
+      "split": "test",
+      "normalization": 1,
+      "requested": 20,
+      "generated_answers": 20,
+      "scored": 20,
+      "judge_cost": {
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "elapsed_ms": 4.6051181852817535,
+        "cost_scope": "offline_cpu"
+      },
+      "wall_elapsed_ms": 4.764363169670105
+    },
+    "versionqa": {
+      "identity": {
+        "protocol": "versionqa_author_binary_accuracy",
+        "upstream_commit": "2a2cbe8f285557f99dc7a79d6df7134e1e3eccff",
+        "judge": {
+          "model": "/data/models/qwen3-32b",
+          "revision": "local-snapshot:7442623e99dd0b456628ddc48805a4ea11249ee2ee66484b5d1ab44d2940beb8",
+          "base_url": "http://127.0.0.1:30000/v1",
+          "temperature": 0,
+          "max_tokens": 16,
+          "enable_thinking": false
+        },
+        "score_range": [
+          0,
+          1
+        ],
+        "judge_view": "original question, reference answer and model answer",
+        "adaptation": "author binary correctness rubric through the configured judge endpoint"
+      },
+      "primary_metric": "versionqa_accuracy",
+      "split": "test",
+      "normalization": 1,
+      "requested": 20,
+      "generated_answers": 20,
+      "scored": 20,
+      "judge_cost": {
+        "observed_input_tokens": 7036,
+        "observed_output_tokens": 40,
+        "observed_elapsed_ms": 1299.8669855296612,
+        "unknown_input_token_records": 0,
+        "unknown_output_token_records": 0,
+        "unknown_elapsed_records": 0
+      },
+      "wall_elapsed_ms": 2472.792509943247
+    }
+  },
+  "failed_attempts": [
+    {
+      "dataset": "loong",
+      "task_id": "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+      "status": "failed",
+      "error": "the remaining computation exceeds the request token budget",
+      "cost": {
+        "complete_ms": 158467.78149157763,
+        "total_input_tokens": 114600,
+        "total_output_tokens": 2460,
+        "auxiliary_ms": 3831.18811622262,
+        "online_compute_ms": 146762.34270259738,
+        "actual_prefill_tokens": 113768,
+        "actual_device_hit_tokens": 768,
+        "actual_host_loaded_tokens": 64
+      }
+    }
+  ],
+  "training": {
+    "evidence": {
+      "model": "models/jina-reranker-v3.5",
+      "states": 22,
+      "steps": 1760,
+      "loss": 0.09182916312405393,
+      "method": "shared_fields_generator_set_utility",
+      "quality_target": "bounded_answer_gain_listwise",
+      "phase": "sets",
+      "dev_states": 5,
+      "dev_loss": 0.014354416087735444,
+      "epoch": 33
+    },
+    "sets": {
+      "states": {
+        "train": 22,
+        "dev": 5
+      },
+      "retained_answers": 158
+    },
+    "stop": {
+      "states": {
+        "train": 11,
+        "dev": 4
+      },
+      "retained_answers": 33
+    },
+    "frozen": [
+      "Qwen3-32B",
+      "Qwen3-Embedding backbone and existing query LoRA/task heads",
+      "Jina backbone and existing field head"
+    ],
+    "candidates_per_state": [
+      3,
+      6
+    ]
+  },
+  "protocol": {
+    "date": "2026-11-13",
+    "questions_per_benchmark": 20,
+    "concurrency": 4,
+    "history": "P1 author/reference history",
+    "seed": 42,
+    "generator": "Qwen3-32B, fixed weights",
+    "gpu_ids": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "evaluation_commit": "9fc2a7d",
+    "current_commit": "818587b",
+    "cohort_reference": "results/core-mechanism-20-20261113.json",
+    "same_cohorts": {
+      "loong": true,
+      "mtrag": true,
+      "multidoc2dial": true,
+      "versionqa": true
+    },
+    "references": "Existing same-task ordinary_rag and llamaindex results in the cohort reference",
+    "previous_iteration": "results/semantic-state-20261113.json"
+  },
+  "targeted_attempts": [
+    {
+      "commit": "d3e589f",
+      "change": "larger semantic read packets",
+      "retained": false,
+      "summary": {
+        "dataset": "loong",
+        "method": "contextkv",
+        "metric": "loong_reference_score",
+        "completed": 0,
+        "requested": 1,
+        "quality": 0,
+        "metrics": {},
+        "p95_seconds": null,
+        "total_input_tokens": 111604,
+        "total_output_tokens": 1593,
+        "gpu_gib_seconds": 4121.236659940274,
+        "host_gib_seconds": 1152.300896254536,
+        "gpu_peak_gib": 80.728515625,
+        "host_peak_gib": 22.537424087524414,
+        "actual_device_hit_tokens": 512,
+        "actual_host_loaded_tokens": 0,
+        "actual_prefill_tokens": 111092
+      },
+      "task": {
+        "task_id": "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+        "status": "failed",
+        "error": "the remaining computation exceeds the request token budget",
+        "metrics": {},
+        "cost": {
+          "complete_ms": 51239.28225785494,
+          "total_input_tokens": 111604,
+          "total_output_tokens": 1593,
+          "auxiliary_ms": 5326.1682614684105,
+          "online_compute_ms": 50574.5849981904,
+          "actual_prefill_tokens": 111092,
+          "actual_device_hit_tokens": 512,
+          "actual_host_loaded_tokens": 0
+        }
+      }
+    },
+    {
+      "commit": "876a58c",
+      "change": "remaining output allowance",
+      "retained": true,
+      "summary": {
+        "dataset": "loong",
+        "method": "contextkv",
+        "metric": "loong_reference_score",
+        "completed": 0,
+        "requested": 1,
+        "quality": 0,
+        "metrics": {},
+        "p95_seconds": null,
+        "total_input_tokens": 114600,
+        "total_output_tokens": 9372,
+        "gpu_gib_seconds": 16400.06936930903,
+        "host_gib_seconds": 4584.2961073130455,
+        "gpu_peak_gib": 80.728515625,
+        "host_peak_gib": 22.557421684265137,
+        "actual_device_hit_tokens": 768,
+        "actual_host_loaded_tokens": 0,
+        "actual_prefill_tokens": 113832
+      },
+      "task": {
+        "task_id": "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+        "status": "failed",
+        "error": "the request input exhausts the remaining token budget",
+        "metrics": {},
+        "cost": {
+          "complete_ms": 203361.56728863716,
+          "total_input_tokens": 114600,
+          "total_output_tokens": 9372,
+          "auxiliary_ms": 5517.309010028839,
+          "online_compute_ms": 201221.870534122,
+          "actual_prefill_tokens": 113832,
+          "actual_device_hit_tokens": 768,
+          "actual_host_loaded_tokens": 0
+        }
+      }
+    },
+    {
+      "commit": "818587b",
+      "change": "reuse examined observations at the answer boundary",
+      "retained": true,
+      "summary": {
+        "dataset": "loong",
+        "method": "contextkv",
+        "metric": "loong_reference_score",
+        "completed": 0,
+        "requested": 1,
+        "quality": 0,
+        "metrics": {},
+        "p95_seconds": null,
+        "total_input_tokens": 126463,
+        "total_output_tokens": 2542,
+        "gpu_gib_seconds": 5666.935428068049,
+        "host_gib_seconds": 1584.2456332945612,
+        "gpu_peak_gib": 80.728515625,
+        "host_peak_gib": 22.543923377990723,
+        "actual_device_hit_tokens": 832,
+        "actual_host_loaded_tokens": 0,
+        "actual_prefill_tokens": 125631
+      },
+      "task": {
+        "task_id": "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+        "status": "failed",
+        "error": "the request input exhausts the remaining token budget",
+        "metrics": {},
+        "cost": {
+          "complete_ms": 70384.0181492269,
+          "total_input_tokens": 126463,
+          "total_output_tokens": 2542,
+          "auxiliary_ms": 5435.341104865074,
+          "online_compute_ms": 69637.74778693914,
+          "actual_prefill_tokens": 125631,
+          "actual_device_hit_tokens": 832,
+          "actual_host_loaded_tokens": 0
+        }
+      }
+    }
+  ],
+  "loong_all_paid": {
+    "dataset": "loong",
+    "completed_unique": 19,
+    "requested_unique": 20,
+    "quality": 29.75,
+    "p95_seconds": null,
+    "total_input_tokens": 1017375,
+    "total_output_tokens": 22306,
+    "gpu_gib_seconds": 43245.51932740256,
+    "host_gib_seconds": 12176.186179706925,
+    "actual_device_hit_tokens": 6144,
+    "actual_host_loaded_tokens": 64,
+    "actual_prefill_tokens": 1011167
+  },
+  "findings": [
+    {
+      "area": "set selection",
+      "evidence": "For disability application timing, the correct passage had Jina relevance 0.49467 but singleton utility 0.49849; an unrelated child-application heading had relevance 0.06806 and utility 0.80282.",
+      "change": "Replace absolute document features with relevance, semantic coverage/redundancy and known/remaining Need features."
+    },
+    {
+      "area": "source granularity",
+      "evidence": "Source windows were split after eight nonempty lines, so the first encoded batch could contain only the beginning of retrieved passages.",
+      "change": "Use the token budget and source boundaries; preserve table dependencies."
+    },
+    {
+      "area": "version binding",
+      "evidence": "An explicit 22.14.0 question was classified current and retrieved 23.11.0.",
+      "change": "Bind literal source-catalogue version identifiers before learned default intent."
+    },
+    {
+      "area": "document execution",
+      "evidence": "Collection hit truncated long table IDs and a predicate referring to an undeclared field.",
+      "change": "Use compact table IDs and source-column addresses for local predicates."
+    },
+    {
+      "area": "current tradeoff",
+      "evidence": "Mean selected source counts grew from 4.15 to 10.25 on MD2Dial, 4.25 to 16.0 on MT-RAG, and 5.55 to 11.75 on VersionQA. Training sets have 3 or 6 candidates; online initial batches use up to 24.",
+      "remaining": "Calibrate marginal quality gain and continue/stop values across candidate-set sizes."
+    },
+    {
+      "area": "long-document budget",
+      "evidence": "One Loong task still failed after the initial batch and three targeted attempts. The last attempt paid 126463 input and 2542 output tokens before the next input exhausted the remaining budget.",
+      "remaining": "Reserve the actual final conclusion input before further reading; make reading decisions use that completion cost."
+    }
+  ],
+  "validation": {
+    "utility": "Empty-set gain is zero with already-computed Needs; gradients are finite",
+    "table_filter": "A predicate on a non-output source column yields the correct sum 7",
+    "answer_boundary": "Already examined incomplete observations trigger no duplicate population read; unexamined source remains available",
+    "scope": "No expanded unit-test suite"
+  }
+}
