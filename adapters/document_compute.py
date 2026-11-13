@@ -561,7 +561,7 @@ def _query_description(query, need_ids):
 def _word_source(unit, address):
     from controller.source_windows import numbered_text
     _, offsets = numbered_text(unit.text)
-    first, last = sorted(address["word_boundaries"])
+    first, last = sorted(address[1:])
     start, cursor = offsets[first][0], offsets[last][1]
     origin = unit.source_spans[0]
     span = SourceSpan(f"{origin.span_id}:{start}:{cursor}", origin.source_key,
@@ -571,10 +571,9 @@ def _word_source(unit, address):
 
 def _word_address_schema(units):
     from controller.source_windows import numbered_text
-    return {"oneOf": [{"type": "object", "properties": {"unit_id": {"const": f"S{i+1}"},
-        "word_boundaries": {"type": "array", "minItems": 2, "maxItems": 2,
-            "items": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}}},
-        "required": ["unit_id", "word_boundaries"], "additionalProperties": False}
+    return {"oneOf": [{"type": "array", "prefixItems": [{"const": f"S{i+1}"},
+        *[{"type": "integer", "minimum": 0, "maximum": len(offsets)-1} for _ in range(2)]],
+        "minItems": 3, "items": False}
         for i, unit in enumerate(units) if (offsets := numbered_text(unit.text)[1])]}
 
 
@@ -619,7 +618,7 @@ def decode_programs(text, query, index):
         address = field["unit_span"]
         if address is None:
             return Field(field["name"], field["column"])
-        text, span = _word_source(fragments[address["unit_id"]], address)
+        text, span = _word_source(fragments[address[0]], address)
         return Field(field["name"], field["column"], text, span)
     for item in json.loads(text)["programs"]:
         need = needs[item["need_id"]]
@@ -654,8 +653,8 @@ def semantic_binding(query, index, need_ids):
         "Use lookup to return fields for semantic classification rather than forcing an arithmetic aggregate. "
         "Samples illustrate columns; the CPU will execute over every row of each selected table. "
         "Return projections and typed filters, explicit equality joins, and requested entity deduplication. "
-        "Use zero-based column indices. Optional unit_span identifies a supplied S source and inclusive "
-        "word_boundaries [first,last] using the displayed word indices; "
+        "Use zero-based column indices. Optional unit_span is [source_id,first_word,last_word], with inclusive "
+        "displayed word indices; "
         "select only the literal unit in the supplied source. Same-shaped tables use the same field aliases for union; "
         "join fields identify the actual key correspondence. Include all tables in the requested population. "
         "For transposed tables select the period column and filter the requested metric row. "
@@ -683,7 +682,8 @@ def semantic_projection_schema(units, need_ids, operations=None):
                 "additionalProperties": False}
     unit_ids = [f"S{i+1}" for i in range(len(units))]
     address = _word_address_schema(units)
-    entity = {"oneOf": [address, obj({"unit_id": {"enum": unit_ids}, "document": {"const": True}})]}
+    entity = {"oneOf": [address, {"type": "array", "prefixItems": [{"enum": unit_ids}],
+                                 "minItems": 1, "items": False}]}
     optional_address = {"anyOf": [address, {"type": "null"}]}
     return obj({"operations": obj({identity: ({"const": operations[identity]} if operations and identity in operations else
                                   {"enum": ["lookup", "group", "count", "sum", "mean", "min", "max"]})
@@ -701,7 +701,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
     units_by_id = {f"S{index+1}": unit for index, unit in enumerate(units)}
 
     def source(address):
-        unit = units_by_id[address["unit_id"]]
+        unit = units_by_id[address[0]]
         return _word_source(unit, address)
 
     tables, programs = [], []
@@ -714,8 +714,8 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
         headers = ("entity", "measure", *(f"group:{i}" for i in range(group_count)))
         grouped = {identity: [] for identity in units_by_id}
         for record in records:
-            if "document" in record["entity"]:
-                unit = units_by_id[record["entity"]["unit_id"]]
+            if len(record["entity"]) == 1:
+                unit = units_by_id[record["entity"][0]]
                 entity_text, entity_source = unit.source_spans[0].source_key.document_id, unit.source_spans[0]
             else:
                 entity_text, entity_source = source(record["entity"])
@@ -727,7 +727,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
             measure_text, measure_source = source(record["measure"]) if record["measure"] else ("", entity_source)
             measure = Cell(measure_text, measure_source, unit=unit_text, qualifiers=qualifiers)
             groups = tuple(Cell(*source(address), qualifiers=qualifiers) for address in record["group"])
-            grouped[record["entity"]["unit_id"]].append((entity, measure, *groups))
+            grouped[record["entity"][0]].append((entity, measure, *groups))
         projections = []
         for identity, rows in grouped.items():
             origin = units_by_id[identity].source_spans[0]
@@ -754,13 +754,13 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
     blocks = _word_blocks(units)
     instruction = ("Project only the requested document fields. For each qualifying record, return its entity, "
         "requested measure, literal unit, grouping fields, and the period/condition qualifiers as exact source "
-        "references {unit_id,word_boundaries:[first,last]} using inclusive displayed word indices. "
+        "references [source_id,first_word,last_word] using inclusive displayed word indices. "
         "The CPU resolves the original text and character spans. "
         "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
         "incorrect; resolve their intended meaning from the original question. An incomplete auxiliary fragment "
         "is not unresolved source information. Choose the operation requested by the full question; use lookup to "
         "return fields for classification or semantic comparison instead of forcing an arithmetic aggregate. "
-        "When the requested entity is the document itself, use {unit_id,document:true}; its identifier is shown "
+        "When the requested entity is the document itself, use [source_id]; its identifier is shown "
         "below and the CPU binds that document identity. Otherwise use original word indices for the entity. "
         "A record can serve several Need IDs: extract it once and list all applicable IDs. "
         "Apply the original question's entity, period and conditions in this same pass. Retain units and qualifiers "
