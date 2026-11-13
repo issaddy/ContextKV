@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
 import time
 
@@ -17,32 +17,38 @@ EVIDENCE_MODEL = "jinaai/jina-reranker-v3.5"
 
 
 class ReadyBatch:
-    """Drain ready jobs together while one thread owns the shared backbone."""
+    """One backbone worker batches ready inputs; callers wait only for their result."""
     def __init__(self, execute):
         self.execute, self.lock = execute, Lock()
         self.pending, self.running = [], False
+        self.worker = ThreadPoolExecutor(max_workers=1)
 
     def submit(self, value):
         future = Future()
         with self.lock:
             self.pending.append((value, future))
-            owner = not self.running
-            self.running = True
-        if owner:
-            while True:
-                with self.lock:
-                    jobs, self.pending = self.pending, []
-                    if not jobs:
-                        self.running = False
-                        break
-                try:
-                    results = self.execute([value for value, _ in jobs])
-                    for (_, target), result in zip(jobs, results):
-                        target.set_result(result)
-                except Exception as error:
-                    for _, target in jobs:
-                        target.set_exception(error)
+            if not self.running:
+                self.running = True
+                self.worker.submit(self._drain)
         return future.result()
+
+    def _drain(self):
+        while True:
+            with self.lock:
+                jobs, self.pending = self.pending, []
+                if not jobs:
+                    self.running = False
+                    return
+            try:
+                results = self.execute([value for value, _ in jobs])
+                for (_, target), result in zip(jobs, results):
+                    target.set_result(result)
+            except Exception as error:
+                for _, target in jobs:
+                    target.set_exception(error)
+
+    def close(self):
+        self.worker.shutdown(wait=True)
 
 
 @dataclass
@@ -470,6 +476,7 @@ class SharedQueryEncoder:
                           if int(self.heads.distinct(vector).argmax()) == 1))
 
     def close(self):
+        self.ready.close()
         self.model = self.heads = None
 
 
@@ -660,4 +667,5 @@ class SharedEvidenceEncoder:
             query_sum)
 
     def close(self):
+        self.ready.close()
         self.model = self.heads = None
