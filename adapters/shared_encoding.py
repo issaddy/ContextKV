@@ -81,6 +81,12 @@ class QueryEncoding:
         return self.token_states[index]
 
     @property
+    def coverage_vector(self):
+        positions = [i for i, ref in enumerate(self.token_refs)
+                     if ref is not None and ref.turn_id == self.task.current_turn_id and ref.speaker == "user"]
+        return self.token_states[positions].mean(0)
+
+    @property
     def search_texts(self):
         return (self.task.raw_question, *(self.text((*need.anchor_spans, *need.subject_refs,
             *(ref for condition in self.task.conditions if condition.condition_id in need.condition_ids
@@ -382,10 +388,13 @@ class SharedQueryEncoder:
         encoded, refs, texts, catalogue_positions = _prepared
         with torch.no_grad():
             states = _states
-            query_position = max(i for i, ref in enumerate(refs)
-                                 if ref is not None and ref.turn_id == current_turn_id and ref.speaker == "user")
+            current = [i for i, ref in enumerate(refs)
+                       if ref is not None and ref.turn_id == current_turn_id and ref.speaker == "user"]
+            query_position = current[-1]
             pooled = states[query_position]
             logits = self.heads(states, pooled)
+            coverage = self.heads.coverage(torch.nn.functional.layer_norm(
+                states[current].mean(0), (states.shape[-1],)))
             coordinates = [(ref.turn_id, ref.speaker, ref.start, ref.end) if ref is not None else None for ref in refs]
             labels = logits["span"].argmax(-1).tolist()
             spans = {kind: _spans([row[index] for row in labels], coordinates)
@@ -465,7 +474,7 @@ class SharedQueryEncoder:
                 temporal_relation=TEMPORAL_RELATIONS[int(logits["temporal_relation"].argmax())])
             task = TaskState(task_id, question, tuple(history_refs), tuple(conditions), needs, intent,
                              tuple(source_scope), current_turn_id, question,
-                             coverage_scope=SCOPES[int(logits["coverage_scope"].argmax())])
+                             coverage_scope=SCOPES[int(coverage.argmax())])
             projected = torch.nn.functional.normalize(self.heads.need_projection(need_vectors), dim=-1)
             return QueryEncoding(task, torch.nn.functional.normalize(pooled, dim=-1), projected,
                 states, refs, texts, operators, {"input_tokens": len(encoded["input_ids"]),

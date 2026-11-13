@@ -54,8 +54,11 @@ def task_loss(encoder, row, prepared=None):
         refs, catalog_positions, states, query_position, alignment_targets = prepared
         logits = encoder.heads(states, states[query_position])
     device = states.device
+    current = [i for i, ref in enumerate(refs)
+               if ref is not None and ref.turn_id == row["turn"] and ref.speaker == "user"]
+    coverage = encoder.heads.coverage(F.layer_norm(states[current].mean(0), (states.shape[-1],)))
     if row.get("coverage_only"):
-        return F.cross_entropy(logits["coverage_scope"][None], torch.tensor(
+        return F.cross_entropy(coverage[None], torch.tensor(
             [SCOPES.index(row["task_state"]["coverage_scope"])], device=device))
     task = task_label(row)
     labels = torch.zeros((len(refs), len(SPAN_KINDS)), dtype=torch.long, device=device)
@@ -87,7 +90,7 @@ def task_loss(encoder, row, prepared=None):
                 if positions((span,)):
                     tag((span,), "version")
     losses = [F.cross_entropy(logits["span"].reshape(-1, 3), labels.reshape(-1)),
-        F.cross_entropy(logits["coverage_scope"][None], torch.tensor(
+        F.cross_entropy(coverage[None], torch.tensor(
             [SCOPES.index(task.coverage_scope)], device=device))]
     historical = [i for i, ref in enumerate(refs) if ref is not None and ref.turn_id != row["turn"]]
     if historical:
@@ -378,7 +381,7 @@ def train_coverage(args):
         encoded = encoder.encode_many([dict(history=conversation(row), question=row["question"],
             task_id=row["task_id"], current_turn_id=row["turn"], catalogue=catalogue(row),
             history_turns=row.get("history_turns", ())) for row in batch])
-        vectors.extend(item.pooled.detach().clone() for item in encoded)
+        vectors.extend(item.coverage_vector.detach().clone() for item in encoded)
     features = F.layer_norm(torch.stack(vectors), (vectors[0].shape[-1],))
     labels = torch.tensor([SCOPES.index(row["task_state"]["coverage_scope"]) for row in data], device=args.device)
     train = torch.tensor([row["split"] == "train" for row in data], device=args.device)

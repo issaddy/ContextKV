@@ -61,7 +61,6 @@ class QueryHeads(nn.Module):
             "history": self.history(token_states).squeeze(-1),
             "version_mode": self.version_mode(pooled),
             "temporal_relation": self.temporal_relation(pooled),
-            "coverage_scope": self.coverage(pooled),
         }
 
     def edges(self, left, right):
