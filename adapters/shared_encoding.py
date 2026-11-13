@@ -133,6 +133,15 @@ class EvidenceEncoding:
         for unit in units:
             for dependency in unit.dependencies:
                 consumers[positions[dependency]].append(positions[unit.unit_id])
+        support = {}
+        for binding in self.bindings:
+            if binding.role == "source":
+                covered = sum(1 << positions[unit.unit_id] for unit in units if any(
+                    span.source_key == binding.source_span.source_key
+                    and span.start < binding.source_span.end and binding.source_span.start < span.end
+                    for span in unit.source_spans))
+                if covered:
+                    support[binding.need_id] = support.get(binding.need_id, 0) | covered
         costs = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids], dtype=np.int64)
         active = np.ones(count, dtype=bool)
         chosen = (1 << count)-1
@@ -163,10 +172,11 @@ class EvidenceEncoding:
             owners = [np.asarray(group, dtype=np.intp) for group in owners]
             total, cost = items.sum(axis=0), int(costs.sum())
             while chosen:
-                candidates = np.flatnonzero(active)
-                # The empty set is a training control. A document answer retains
-                # at least one source (or its complete dependency group).
-                candidates = candidates[total[width] - removal[candidates, width] > 0]
+                # Preserve each observed Need's support while pruning its redundant
+                # alternatives. Empty evidence remains only a training control.
+                candidates = np.asarray([index for index in np.flatnonzero(active)
+                    if (remaining := chosen & ~closures[index])
+                    and all(remaining & coverage for coverage in support.values())], dtype=np.intp)
                 if not len(candidates):
                     break
                 pooled = np.empty((len(candidates)+1, width+2), dtype=np.float32)

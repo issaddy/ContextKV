@@ -72,7 +72,7 @@ python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
   --init-asset models/shared-evidence --data data/training/shared/sets.jsonl \
-  --output models/shared-evidence --device cuda:3 --epochs 3
+  --output models/shared-evidence --device cuda:3 --epochs 40 --learning-rate 0.001
 
 python3 -m training.collect_shared_values stop \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \
@@ -87,7 +87,7 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
-标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样，覆盖更多会话；字段监督复用独立的来源标注。集合样本保存候选集合和相对无证据回答的实际质量增益；停止样本保存紧凑表示及多步回报需要的费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
+标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样，覆盖更多会话；字段监督复用独立的来源标注。集合头单独拟合，使用与采集、线上相同的推断任务表示；冻结骨干只编码一次，后续轮次复用表示。集合样本保存候选集合和相对无证据回答的实际质量增益；停止样本保存紧凑表示及多步回报需要的费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
 ## 少量端到端评测
 

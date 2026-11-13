@@ -120,6 +120,13 @@ def compile_request(template, question, history, evidence, *, results=(),
         while token_cursor < len(rendered.offsets) and rendered.offsets[token_cursor][0] < last:
             token_cursor += 1
         blocks.append({"source_id": source_id, "start": token_start, "end": token_cursor})
-    demand = tuple({"source_id": source_address(block), "uses": 1} for block in future_sources)
+    demand = []
+    common_prefix = True
+    for index, block in enumerate(future_sources):
+        item = {"source_id": source_address(block), "uses": 1}
+        common_prefix = common_prefix and index < len(evidence) and block == evidence[index]
+        if common_prefix:
+            item["native_prefix_end"] = blocks[index]["end"]
+        demand.append(item)
     return CompiledRequest(rendered.input_ids, messages, tuple(evidence), tuple(spans),
-                           tuple(references), tuple(blocks), demand)
+                           tuple(references), tuple(blocks), tuple(demand))

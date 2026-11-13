@@ -147,7 +147,7 @@ class ComputeRuntime:
         cold_consumers = {}
         for source_id, start, end, match, block_ids in blocks:
             item = request_demand.get(source_id)
-            if item is not None and match.device_prefix_len+match.host_hit_length < len(block_ids):
+            if item is not None and 'native_prefix_end' not in item and match.device_prefix_len+match.host_hit_length < len(block_ids):
                 consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, set()))[1]
                 consumers.update(item.get('consumer_ids', ()) or range(int(item.get('uses', 0))))
         build_value = sum(length * len(consumers) * marginal_value for length, consumers in cold_consumers.values())
@@ -186,7 +186,7 @@ class ComputeRuntime:
                 full = match.device_prefix_len + match.host_hit_length == len(block_ids)
                 if full:
                     block.node = match.best_match_node
-                    self.source_nodes[source_id] = block.node
+                    self.source_nodes[source_id, 'infoflow'] = block.node
                     if match.host_hit_length:
                         block.host_tokens = match.host_hit_length
                     else:
@@ -281,27 +281,24 @@ class ComputeRuntime:
                 values[block.slots[block.ready:]] = 0
             result = self.cache.insert(InsertParams(
                 key=self._key(block.source_id, block.cache_ids),
-                value=block.slots.clone(), priority=self._priority(block.source_id)))
+                value=block.slots.clone()))
             block.node = result.last_device_node
             block.lock = self._lock(block.node)
             block.slots = self._indices(self._match(block.source_id, block.cache_ids))
             state.row[block.start:block.end] = block.slots[:block.end-block.start]
             block.owned = False
             state.transferred_ranges.append((block.work_start, block.work_end))
-            self.source_nodes[block.source_id] = block.node
+            self.source_nodes[block.source_id, 'infoflow'] = block.node
 
-    def _consumers(self, source_id):
+    def _consumers(self, source_id, mode='infoflow'):
         values = {}
         for session, scope in self.demands.items():
             item = scope.get(source_id)
-            if item is not None:
+            if item is not None and (mode != 'exact' or 'native_prefix_end' in item):
                 for consumer in item.get('consumer_ids', ()) or range(int(item.get('uses', 0))):
-                    values[session, consumer] = max(0.0, self.costs.get('prefill_token_ms', 0.0)
-                        - item['recompute_ratio'] * self.costs.get('recompute_token_ms', 0.0))
+                    replay = item['recompute_ratio'] * self.costs.get('recompute_token_ms', 0.0) if mode == 'infoflow' else 0.0
+                    values[session, consumer] = max(0.0, self.costs.get('prefill_token_ms', 0.0) - replay)
         return values
-
-    def _priority(self, source_id):
-        return int(1000 * sum(self._consumers(source_id).values()))
 
     def _refresh_priorities(self):
         self.demands = {session: scope for session, scope in self.demands.items() if scope}
@@ -311,19 +308,35 @@ class ComputeRuntime:
                 node.priority = 0
         self.prioritized_nodes.clear()
         nodes = {}
-        for source_id, node_id in tuple(self.source_nodes.items()):
+        for identity, node_id in tuple(self.source_nodes.items()):
+            source_id, mode = identity
             node = self.cache.tree_core._node_arena.get(node_id)
             if node is None:
-                del self.source_nodes[source_id]
+                del self.source_nodes[identity]
             else:
-                consumers = self._consumers(source_id)
+                consumers = self._consumers(source_id, mode)
                 while node.parent is not None:
                     values = nodes.setdefault(node.id, {})
                     for consumer, value in consumers.items():
-                        values[consumer] = max(values.get(consumer, 0.0), value)
+                        key = consumer, mode
+                        values[key] = max(values.get(key, 0.0), value)
                     node = node.parent
+        benefits = {}
         for node_id, consumers in nodes.items():
-            priority = int(1000 * sum(consumers.values()))
+            component = self.cache.tree_core.node_by_id(node_id).component_data[0]
+            pages = component.value if component.value is not None else component.host_value
+            tokens = len(pages) if pages is not None else 0
+            for key, value in consumers.items():
+                benefits[key] = benefits.get(key, 0.0) + tokens * value
+        chosen = {}
+        for (consumer, mode), value in benefits.items():
+            previous = chosen.get(consumer)
+            if previous is None or value > benefits[consumer, previous] or (
+                    value == benefits[consumer, previous] and mode == 'exact'):
+                chosen[consumer] = mode
+        for node_id, consumers in nodes.items():
+            priority = int(1000 * sum(value for (consumer, mode), value in consumers.items()
+                                      if chosen[consumer] == mode))
             self.cache.tree_core.node_by_id(node_id).priority = priority
             if priority:
                 self.prioritized_nodes.add(node_id)
@@ -376,6 +389,15 @@ class ComputeRuntime:
         if state.mode == 'exact' and (prefill_tokens := len(state.input_ids) - req.cached_tokens):
             measured = (stats.prefill_finished_time - stats.forward_entry_time) * 1000 / prefill_tokens
             self.costs['prefill_token_ms'] = .8 * self.costs.get('prefill_token_ms', measured) + .2 * measured
+        if state.mode == 'exact':
+            scope = state.metadata.get('cache_scope', 'shared')
+            for item in state.metadata.get('demand', ()):
+                if 'native_prefix_end' in item:
+                    match = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
+                        array('q', state.input_ids[:item['native_prefix_end']]),
+                        req.extra_key, cache_salt=req.cache_salt)))
+                    if match.device_prefix_len + match.host_hit_length:
+                        self.source_nodes[((scope, item['source_id']), 'exact')] = match.best_match_node
         self._refresh_priorities()
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, input_tokens=len(state.input_ids),
