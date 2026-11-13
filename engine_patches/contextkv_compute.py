@@ -101,7 +101,7 @@ class ComputeRuntime:
             if end == start:
                 continue
             block_ids = list(ids[start:end])
-            block_ids += [0] * (-len(block_ids) % page)
+            block_ids += [-1] * (-len(block_ids) % page)
             source_id = scope, spec['source_id']
             match = self._match(source_id, block_ids)
             full = match.device_prefix_len + match.host_hit_length == len(block_ids)
@@ -192,7 +192,8 @@ class ComputeRuntime:
                 else:
                     block.owned = True
                     block.work_start = len(work)
-                    work.extend(block_ids)
+                    work.extend(ids[start:end])
+                    work.extend([0] * (len(block_ids) - (end-start)))
                     block.work_end = len(work)
                 state.blocks.append(block)
             state.prompt_positions = [index for index in range(len(ids)) if index not in source_positions]
