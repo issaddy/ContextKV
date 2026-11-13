@@ -98,8 +98,7 @@ def _cost_summary(rows):
     result = {"mean_complete_ms": statistics.fmean(timings) if complete_timings else None,
         "p95_complete_ms": _quantile(timings, .95) if complete_timings else None}
     for name in ("total_input_tokens", "total_output_tokens", "online_compute_ms",
-                 "auxiliary_input_tokens", "auxiliary_output_tokens", "reader_input_tokens",
-                 "reader_output_tokens", "actual_prefill_tokens", "actual_device_hit_tokens",
+                 "actual_prefill_tokens", "actual_device_hit_tokens",
                  "actual_host_loaded_tokens"):
         result[name] = _cost_total(rows, name)
     batches = [json.loads(path.read_text()) for directory in {
@@ -112,11 +111,7 @@ def _cost_summary(rows):
         result[peak] = max((batch[peak] for batch in batches), default=None)
     token_fields = (result["total_input_tokens"], result["total_output_tokens"])
     result["online_tokens"] = sum(token_fields) if all(v is not None for v in token_fields) else None
-    result["token_accounting"] = "all_online_models"
-    for name in ("gpu_capacity_tokens", "host_capacity_tokens", "gpu_peak_tokens", "host_peak_tokens",
-                 ):
-        values = [_number(row.get("cost", {}).get(name)) for row in rows if row["status"] != "blocked"]
-        result[name] = max(values) if values and all(value is not None for value in values) else None
+    result["token_accounting"] = "fixed_generation_model"
     return result
 
 

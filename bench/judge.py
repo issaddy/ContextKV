@@ -29,7 +29,6 @@ class CompletionResult:
     finish_reason: str | None = None
     input_tokens: int | None = None
     usage: dict | None = None
-    raw_response: object = None
     elapsed_ms: float = 0.0
     error: str | None = None
 
@@ -73,7 +72,7 @@ class OpenAICompletionClient:
             raw = response.json()
             choice = raw["choices"][0]
             return CompletionResult("completed", choice["message"]["content"], choice["finish_reason"],
-                count, raw.get("usage"), raw, (time.perf_counter()-started)*1000)
+                count, raw.get("usage"), (time.perf_counter()-started)*1000)
         except httpx.HTTPError as error:
             return CompletionResult("failed", input_tokens=count,
                                     elapsed_ms=(time.perf_counter()-started)*1000, error=str(error))

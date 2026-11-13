@@ -33,24 +33,19 @@ def descendants(process_ids):
 
 def physical_sample(gpu_devices, process_ids):
     before = time.monotonic()
-    output = subprocess.check_output(["nvidia-smi", "--query-gpu=index,uuid,memory.used",
+    output = subprocess.check_output(["nvidia-smi", "--query-gpu=index,memory.used",
         "--format=csv,noheader,nounits"], text=True, start_new_session=True)
-    devices = [{"index": int(row[0]), "uuid": row[1].strip(), "memory_mib": float(row[2])}
-               for row in csv.reader(io.StringIO(output)) if int(row[0]) in gpu_devices]
-    pss, exited = [], []
+    gpu_gib = sum(float(row[1]) for row in csv.reader(io.StringIO(output))
+                  if int(row[0]) in gpu_devices) / 1024
+    pss_kib = 0
     for pid in descendants((*process_ids, os.getpid())):
-        path = Path(f"/proc/{pid}/smaps_rollup")
         try:
-            contents = path.read_text()
+            contents = Path(f"/proc/{pid}/smaps_rollup").read_text()
         except (FileNotFoundError, ProcessLookupError):
-            exited.append(pid)
             continue
-        fields = dict(line.split(":", 1) for line in contents.splitlines() if ":" in line)
-        pss.append({"pid": pid, "pss_kib": int(fields["Pss"].split()[0])})
+        pss_kib += next(int(line.split()[1]) for line in contents.splitlines() if line.startswith("Pss:"))
     return {"timestamp": (before+time.monotonic())/2,
-        "gpu_gib": sum(row["memory_mib"] for row in devices)/1024,
-        "host_gib": sum(row["pss_kib"] for row in pss)/(1024**2),
-        "devices": devices, "process_pss": pss, "exited_before_pss_read": exited}
+            "gpu_gib": gpu_gib, "host_gib": pss_kib/(1024**2)}
 
 
 def integrate_physical(samples, start, end):
@@ -109,10 +104,3 @@ class StudyResourceSampler:
         self._stop.set()
         await self._task
         self.samples.append(await asyncio.to_thread(self.sample, self.gpu_devices, self.process_ids))
-
-    def observation(self):
-        return {"clock": "client_monotonic", "interval_seconds": self.interval,
-                "gpu_basis": "physical GPU used memory counted once per device",
-                "host_basis": "sum PSS across declared process groups and controller descendants",
-                "gpu_devices": self.gpu_devices, "process_roots": self.process_ids,
-                "samples": self.samples}

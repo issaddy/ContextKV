@@ -62,8 +62,7 @@ class DenseIndex:
                 print(json.dumps({"encoded_passages": completed, "total_passages": len(contexts),
                                   "elapsed_seconds": time.perf_counter()-started}), flush=True)
         (directory/"passages.jsonl").write_text("".join(json.dumps(asdict(c), ensure_ascii=False)+"\n" for c in contexts))
-        manifest.update(status="complete", dimensions=vectors.shape[1], build_seconds=time.perf_counter()-started,
-                        token_limit_hits=getattr(encoder, "token_limit_hits", None))
+        manifest.update(status="complete", dimensions=vectors.shape[1], build_seconds=time.perf_counter()-started)
         target.write_text(json.dumps(manifest, indent=2)+"\n")
         return cls(contexts, vectors, manifest)
 

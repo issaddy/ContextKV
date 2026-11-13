@@ -363,6 +363,6 @@ class CooperativeController:
             evaluation_evidence=tuple({(block.key, block.span): block
                 for block in (*request.evidence, *calculation_sources)}.values()))
         self.store.commit(snapshot.session_id, request_id, query, final["text"], evidence=response.evaluation_evidence,
-            task=task, facts={"task_state": to_jsonable(task), "computations": computations},
+            task=task, facts={"computations": computations},
             metrics={"complete_ms": response.complete_ms, **totals})
         return response

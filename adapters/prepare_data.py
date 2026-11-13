@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from hashlib import sha256
 import json
 from pathlib import Path
 import urllib.request
@@ -23,7 +22,6 @@ def fetch_metadata(destination: str | Path, *, cloud_corpus: bool = False) -> di
               (r["path"].startswith("mtrag-human/retrieval_tasks/") and r["path"].endswith("qrels/dev.tsv")) or
               r["path"] in {"LICENSE", "README.md", "corpora/README.md"} or
               (cloud_corpus and r["path"] == "corpora/passage_level/cloud.jsonl.zip"))]
-    records = []
     for entry in files:
         relative = entry["path"]
         path = root / relative
@@ -32,9 +30,7 @@ def fetch_metadata(destination: str | Path, *, cloud_corpus: bool = False) -> di
             with urllib.request.urlopen(BASE + relative) as response:
                 data = response.read()
             path.write_bytes(data)
-        records.append({"path": relative, "url": BASE + relative, "bytes": path.stat().st_size,
-                        "sha256": sha256(path.read_bytes()).hexdigest()})
-    manifest = {"repository": "IBM/mt-rag-benchmark", "commit": DATASET_COMMIT, "files": records,
+    manifest = {"repository": "IBM/mt-rag-benchmark", "commit": DATASET_COMMIT, "files": len(files),
                 "cloud_corpus_downloaded": cloud_corpus,
                 "cloud_corpus_url": BASE + "corpora/passage_level/cloud.jsonl.zip"}
     (root / "contextkv-source.json").write_text(json.dumps(manifest, indent=2))
@@ -53,7 +49,7 @@ def main(argv=None):
     parser.add_argument("--cloud-corpus", action="store_true", help="explicitly download the full Cloud passage archive")
     args = parser.parse_args(argv)
     manifest = fetch_metadata(args.output, cloud_corpus=args.cloud_corpus)
-    print(json.dumps({"output": str(Path(args.output).resolve()), "files": len(manifest["files"]),
+    print(json.dumps({"output": str(Path(args.output).resolve()), "files": manifest["files"],
                       "cloud_corpus_downloaded": manifest["cloud_corpus_downloaded"]}))
 
 

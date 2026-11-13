@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from importlib.resources import files
 import json
 from pathlib import Path
@@ -53,7 +52,10 @@ def score_answer(reference, prediction, client):
     value = (parse_score(completion.text) if completion.status == "completed" and
              completion.finish_reason == "stop" and isinstance(completion.text, str) else None)
     return {**base, "status": "scored" if value is not None else "unscored", "score": value,
-            "completion": asdict(completion)}
+            "error": completion.error,
+            "judge_cost": {"input_tokens": (completion.usage or {}).get("prompt_tokens"),
+                           "output_tokens": (completion.usage or {}).get("completion_tokens"),
+                           "elapsed_ms": completion.elapsed_ms}}
 
 
 def summarize(rows):

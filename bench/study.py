@@ -150,9 +150,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                                *resource_settings.get("process_ids", ())}))
     measurement_kind = "hardware" if run.engine.kind == "sglang" else "simulation"
     write_json(directory/"generation_manifest.json", {"method": method, "dataset": dataset_name,
-        "split": split, "protocol": protocol, "task_ids": expected, "scheduled_task_ids": expected,
+        "split": split, "protocol": protocol, "task_ids": expected,
         "concurrency": concurrency, "retrieval": provider.manifest,
-        "measurement_kind": measurement_kind, "capture_training": False,
+        "measurement_kind": measurement_kind,
         "resource_scope": {"gpu_devices": devices, "process_roots": process_ids}})
     catalogue_path = spec.get("supplied_source_catalogue")
     catalogue = ({row["source_id"]: {**row, "document_id": row["source_id"], "source": row["source_uri"]}
@@ -231,7 +231,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                         "actual_prefill_tokens": paid.get("prefill_tokens", 0),
                         "actual_device_hit_tokens": paid.get("device_hit_tokens", 0),
                         "actual_host_loaded_tokens": paid.get("host_loaded_tokens", 0)}, response={})
-            record["request_window"] = [arrival, time.monotonic()]
             results[task_id] = record
             append("results.jsonl", record)
         await service.close_session(session_id)
@@ -248,7 +247,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         await service.aclose()
         service.store.close()
     ordered = [results[key] for key in expected]
-    write_jsonl(directory/"results.jsonl", ordered)
     return ordered
 
 
@@ -276,8 +274,9 @@ async def evaluate(config, matrix, output, *, split, methods=None, datasets=None
                 expected_task_ids=[row["task_id"] for row in rows], split=split)
         if score:
             if all(row["status"] != "completed" or row["scoring"]["status"] == "scored" for row in rows):
-                retain_metrics(directory, rows)
-        write_task_metrics(directory, rows)
+                retain_metrics(directory)
+        else:
+            write_task_metrics(directory, rows)
         results.extend(rows)
     write_json(output/"result_sets.json", {"datasets": [str(directory.resolve())
         for _, _, directory, _ in generated]})

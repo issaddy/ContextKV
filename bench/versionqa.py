@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
@@ -43,7 +42,10 @@ def score_answer(reference, prediction, client):
     answer = completion.text.strip() if completion.status == "completed" and completion.finish_reason == "stop" else None
     score = int(answer) if answer in {"0", "1"} else None
     return {**base, "status": "scored" if score is not None else "unscored", "score": score,
-            "completion": asdict(completion)}
+            "error": completion.error,
+            "judge_cost": {"input_tokens": (completion.usage or {}).get("prompt_tokens"),
+                           "output_tokens": (completion.usage or {}).get("completion_tokens"),
+                           "elapsed_ms": completion.elapsed_ms}}
 
 
 def _digest(data):

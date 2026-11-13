@@ -195,14 +195,13 @@ def run_evaluator(checkout, mode, input_path, output_path, *, judge_revision=Non
                 for row in rows))
             input_path = projected
     command = evaluator_command(root, mode, input_path, output_path, **kwargs)
-    completed = subprocess.run(command, cwd=root, text=True, capture_output=True)
+    completed = subprocess.run(command, cwd=root, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     receipt = {"mode": mode, "source_commit": DATASET_COMMIT, "command": command,
                "returncode": completed.returncode,
                "status": "completed" if completed.returncode == 0 else "failed",
                "judge_revision": judge_revision, "judge_revision_provenance": "operator_declared" if judge_revision else None}
     if completed.returncode:
         receipt["error"] = completed.stderr.strip().splitlines()[-1:]
-    Path(str(output_path) + ".execution.json").write_text(json.dumps(receipt, indent=2))
     completed.check_returncode()
     return receipt
 
@@ -249,7 +248,7 @@ def create_http_judge(model, endpoint, *, max_tokens=2048, enable_thinking=None,
     client_type = RagasStructuredChatOpenAI if ragas_json_schema else ChatOpenAI
     client = client_type(model=model, base_url=endpoint,
         api_key=os.environ.get("OPENAI_API_KEY", "local"), temperature=0, top_p=1,
-        max_tokens=max_tokens, max_retries=0, timeout=180, cache=True, extra_body=extra)
+        max_tokens=max_tokens, max_retries=0, timeout=180, cache=False, extra_body=extra)
     judge = OfficialJudge(client)
     # RAGAS otherwise changes the declared greedy sampler to temperature 0.01.
     judge.bypass_temperature = True
@@ -281,15 +280,7 @@ def _structured_radbench(official, operation, provider, model, input_path, outpu
         score = partial(operation, provider, model)
         shards = [rows]
         if workers == 2 and len(rows) > 1:
-            # Identical prompts must share a worker so a cold SQLite cache key
-            # has one writer, with later occurrences taking the existing hit.
-            groups = defaultdict(list)
-            for row in rows:
-                groups[_radbench_prompt(official, row)].append(row)
-            shards = [[], []]
-            for group in sorted(groups.values(), key=len, reverse=True):
-                min(shards, key=len).extend(group)
-            shards = [shard for shard in shards if shard]
+            shards = [rows[::2], rows[1::2]]
         if len(shards) == 1:
             score(input_path, output_path)
         else:
@@ -363,7 +354,7 @@ def condition_metrics(official, rows, metrics):
 
 def score_http_stages(official, model, input_path, output_directory, *, answerability_adjustment=True,
                       metrics=("RB_llm", "RL_F"), rb_llm_workers=2):
-    """Reuse upstream metric functions; atomically retain each completed stage."""
+    """Reuse upstream metrics with compact stage scores and temporary source text."""
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
     rows = load_jsonl(input_path)
@@ -388,44 +379,31 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
     if has_underspecified:
         stages.append(("underspecified", "underspecified_eval", lambda provider, name, inp, out:
                        official.underspecified_eval(name, inp, out)))
-    previous = Path(input_path)
     scored_by_id = {row["task_id"]: row for row in rows}
-    reused_stages = []
-    rb_llm_execution = None
-    for name, metric, operation in stages:
-        target = output / f"{name}.jsonl"
-        provenance = output / "rb_llm.execution.json"
-        if target.exists():
-            reused_stages.append(name)
-            if name == "rb_llm" and provenance.exists():
-                rb_llm_execution = json.loads(provenance.read_text())
-        else:
-            pending = target.with_suffix(".pending.jsonl")
-            execution = operation("vllm", model, str(previous), str(pending))
-            scored_ids = [r["task_id"] for r in load_jsonl(pending)]
-            if sorted(scored_ids) != sorted(task_ids):
-                raise ValueError(f"official {name} output changed the task cohort")
-            if name == "rb_llm":
-                rb_llm_execution = execution
-                provenance.write_text(json.dumps(execution, indent=2)+"\n")
-            pending.replace(target)
-        # A completed stage may have been requested alone. Merge its own
-        # metric rather than assuming the last cached file contains all stages.
-        for row in load_jsonl(target):
-            scored_by_id[row["task_id"]].setdefault("metrics", {})[metric] = row["metrics"][metric]
-        previous = target
-        (output / "progress.json").write_text(json.dumps({"completed_stage": name, "tasks": len(rows)})+"\n")
+    with TemporaryDirectory(prefix="judge-stage-", dir=output) as temporary:
+        source, generated = Path(temporary)/"input.jsonl", Path(temporary)/"output.jsonl"
+        for name, metric, operation in stages:
+            target = output / f"{name}.jsonl"
+            if target.exists():
+                stage_rows = load_jsonl(target)
+            else:
+                source.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n"
+                                          for row in scored_by_id.values()))
+                operation("vllm", model, str(source), str(generated))
+                stage_rows = load_jsonl(generated)
+                if sorted(row["task_id"] for row in stage_rows) != sorted(task_ids):
+                    raise ValueError(f"official {name} output changed the task cohort")
+            stage_rows = [{"task_id": row["task_id"], "metrics": {metric: row["metrics"][metric]}}
+                          for row in stage_rows]
+            target.write_text("".join(json.dumps(row)+"\n" for row in stage_rows))
+            for row in stage_rows:
+                scored_by_id[row["task_id"]].setdefault("metrics", {})[metric] = row["metrics"][metric]
     scored = list(scored_by_id.values())
-    suffix = None
-    if answerability_adjustment:
-        suffix = condition_metrics(official, scored, metrics)
+    suffix = condition_metrics(official, scored, metrics) if answerability_adjustment else None
     target = output / "scores.jsonl"
-    pending = target.with_suffix(".pending.jsonl")
-    pending.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in scored))
-    pending.replace(target)
-    return {"tasks": len(scored), "stages": [name for name, _, _ in stages], "reused_stages": reused_stages,
-            "requested_metrics": list(metrics),
-            "rb_llm_execution": rb_llm_execution,
+    target.write_text("".join(json.dumps({key: row[key] for key in (
+        "task_id", "answerability", "Answerability", "metrics") if key in row})+"\n" for row in scored))
+    return {"tasks": len(scored), "requested_metrics": list(metrics),
             "conditioned_suffix": suffix, "output": str(target)}
 
 
@@ -433,7 +411,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
                        endpoint, max_tokens=2048, enable_thinking=None, answerability_adjustment=True,
                        metrics=("RB_llm", "RL_F"), ragas_json_schema=False, ragas_max_tokens=None,
                        rb_llm_workers=2):
-    """Offline official RB_llm/RL_F/IDK over frozen answers, with resumable HTTP calls.
+    """Offline official RB_llm/RL_F/IDK over frozen answers and completed stage scores.
 
     Run with the configured Python interpreter. This function does not start a
     server, load weights, regenerate answers or alter official metric prompts.
@@ -472,11 +450,8 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
     os.environ.setdefault("LANGSMITH_TRACING", "false")
-    from langchain_community.cache import SQLiteCache
-    from langchain_core.globals import set_llm_cache
     from ragas.prompt import pydantic_prompt
 
-    set_llm_cache(SQLiteCache(database_path=str(output / "judge-cache.sqlite3")))
     sys.path.insert(0, str(root / "scripts/evaluation"))
     official = importlib.import_module("judge_wrapper")
     loader = official.load_chat_openai_llm
@@ -494,14 +469,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     finally:
         official.load_chat_openai_llm = loader
         pydantic_prompt.extract_json = extract_json
-    receipt = {**result, **identity, "status": "completed", "endpoint": endpoint,
-               "rb_llm_workers_requested": rb_llm_workers,
-               "endpoint_scope": "current invocation; reused stages may have run on a different endpoint",
-               "backend": "OpenAI-compatible HTTP via the official vllm client branch",
-               "generation_answers_modified": False,
-               "scope": "Official metric functions on the declared task protocol; scorer identity and source/label differences accompany interpretation."}
-    (output / "completion.json").write_text(json.dumps(receipt, indent=2)+"\n")
-    return receipt
+    return result
 
 
 def main(argv=None):

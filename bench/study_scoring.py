@@ -16,8 +16,10 @@ import time
 
 import httpx
 
-from bench.official import load_jsonl, merge_offline_labels, reference_overlap
-from bench.study_metrics import (RB_AGG_ALIAS_SOURCE, _metric, _required,
+from bench.official import (load_jsonl, merge_offline_labels, reference_overlap,
+                            condition_metrics, load_conditioning_rules)
+from bench.result_records import retain_metrics, write_task_metrics
+from bench.study_metrics import (_metric, _required,
                                  split_metric_spec)
 
 
@@ -43,18 +45,8 @@ def _judge_config(config, settings):
         "max_tokens": settings.get("max_tokens", 2048), "enable_thinking": False}
 
 
-def _usage_cost(record):
-    if "judge_cost" in record:
-        return record["judge_cost"]
-    completion = record.get("completion") or {}
-    raw = record.get("judge_response") or completion.get("raw_response") or {}
-    usage = raw.get("usage", completion.get("usage") or {}) if isinstance(raw, dict) else {}
-    return {"input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens"),
-            "elapsed_ms": completion.get("elapsed_ms")}
-
-
 def _cost_totals(records):
-    costs = [_usage_cost(record) for record in records]
+    costs = [record["judge_cost"] for record in records if "judge_cost" in record]
     return {"observed_input_tokens": sum(cost.get("input_tokens") or 0 for cost in costs),
         "observed_output_tokens": sum(cost.get("output_tokens") or 0 for cost in costs),
         "observed_elapsed_ms": sum(cost.get("elapsed_ms") or 0 for cost in costs),
@@ -64,15 +56,14 @@ def _cost_totals(records):
 
 
 @contextmanager
-def record_judge_http(endpoint, journal_path):
-    """Record the actual scoring cost and completion status."""
+def record_judge_http(endpoint, totals_path):
+    """Accumulate scoring cost without saving per-call messages or logs."""
     endpoint = endpoint.rstrip("/")
     if not endpoint.endswith("/v1"):
         endpoint += "/v1"
     lock = Lock()
-    records = []
-    journal_path = Path(journal_path)
-    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    totals = (json.loads(totals_path.read_text()) if totals_path.exists() else
+              {"http_calls": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0.0})
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -82,15 +73,13 @@ def record_judge_http(endpoint, journal_path):
             with httpx.Client(timeout=180) as client:
                 response = client.post(endpoint+path, json=payload)
             raw = response.json()
-            record = {"status_code": response.status_code,
-                "finish_reason": next((choice["finish_reason"] for choice in raw.get("choices", ())), None),
-                "elapsed_ms": (time.perf_counter()-started)*1000,
-                "input_tokens": raw.get("usage", {}).get("prompt_tokens"),
-                "output_tokens": raw.get("usage", {}).get("completion_tokens")}
+            usage = raw.get("usage", {})
             with lock:
-                records.append(record)
-                with journal_path.open("a") as output:
-                    output.write(json.dumps(record, ensure_ascii=False)+"\n")
+                totals["http_calls"] += 1
+                totals["elapsed_ms"] += (time.perf_counter()-started)*1000
+                totals["input_tokens"] += usage.get("prompt_tokens", 0)
+                totals["output_tokens"] += usage.get("completion_tokens", 0)
+                totals_path.write_text(json.dumps(totals)+"\n")
             body = response.content
             self.send_response(response.status_code)
             self.send_header("Content-Type", "application/json")
@@ -105,22 +94,18 @@ def record_judge_http(endpoint, journal_path):
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/v1", records
+        yield f"http://127.0.0.1:{server.server_port}/v1", totals
     finally:
         server.shutdown()
         thread.join()
         server.server_close()
 
 
-async def _command(arguments, directory, label, *, environment=None):
+async def _command(arguments, *, environment=None):
     started = time.perf_counter()
-    result = await asyncio.to_thread(subprocess.run, arguments, text=True, capture_output=True, env=environment)
-    receipt = {"returncode": result.returncode, "elapsed_ms": (time.perf_counter()-started)*1000}
-    if result.returncode:
-        receipt["error"] = result.stderr.strip().splitlines()[-1:]
-    (directory/(label+".execution.json")).write_text(json.dumps(receipt, ensure_ascii=False, indent=2)+"\n")
+    result = await asyncio.to_thread(subprocess.run, arguments, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=environment)
     result.check_returncode()
-    return receipt
+    return {"elapsed_ms": (time.perf_counter()-started)*1000}
 
 
 async def _official_scores(config, spec, directory, settings):
@@ -136,9 +121,8 @@ async def _official_scores(config, spec, directory, settings):
     python = settings.get("python", sys.executable)
     checkout = settings.get("official_checkout", "data/mtrag-official")
     target = directory/"official"
-    journal = directory/"official.judge-http.jsonl"
     ragas_max_tokens = settings.get("ragas_max_tokens") if "RL_F" in metrics else None
-    with record_judge_http(judge["base_url"], journal) as (endpoint, calls):
+    with record_judge_http(judge["base_url"], directory/"judge_cost.json") as (endpoint, call_cost):
         command = [python, "-m", "bench.official", "generation-http", "--checkout", checkout,
             "--input", str(prepared), "--output", str(target), "--model", judge["model"],
             "--judge-revision", judge["revision"], "--endpoint", endpoint,
@@ -150,10 +134,8 @@ async def _official_scores(config, spec, directory, settings):
             command.append("--ragas-json-schema")
         if ragas_max_tokens is not None:
             command.extend(("--ragas-max-tokens", str(ragas_max_tokens)))
-        receipt = await _command(command, directory, "official-generation")
+        receipt = await _command(command)
     records = load_jsonl(target/"scores.jsonl")
-    raw_outputs = [str(target/"scores.jsonl"), str(journal), str(target/"identity.json"),
-                   str(directory/"official-generation.execution.json")]
     if primary == "mtrageval_harmonic":
         algorithmic = directory/"official.algorithmic.jsonl"
         if not algorithmic.exists():
@@ -163,44 +145,32 @@ async def _official_scores(config, spec, directory, settings):
             environment = dict(os.environ)
             if "gpu_devices" in settings:
                 environment["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, settings["gpu_devices"]))
-            await _command(command, directory, "official-algorithmic", environment=environment)
+            await _command(command, environment=environment)
             if sorted(row["task_id"] for row in load_jsonl(pending)) != sorted(row["task_id"] for row in merged):
                 raise ValueError("official algorithmic output changed the task cohort")
-            pending.replace(algorithmic)
+            _write(algorithmic, [{"task_id": row["task_id"], "metrics": {"RB_agg": row["metrics"]["RB_agg"]}}
+                                 for row in load_jsonl(pending)])
+            pending.unlink()
         algorithmic_rows = {row["task_id"]: row for row in load_jsonl(algorithmic)}
         for row in records:
-            row["metrics"] = {**row["metrics"], **algorithmic_rows[row["task_id"]]["metrics"]}
-        raw_outputs.extend([str(algorithmic), str(directory/"official-algorithmic.execution.json")])
-        combined, conditioned = directory/"official.all-components.jsonl", directory/"official.conditioned.jsonl"
-        _write(combined, records)
-        await _command([python, "-m", "bench.official", "condition", "--checkout", checkout,
-            "--input", str(combined), "--output", str(conditioned),
-            "--metrics", "RL_F", "RB_llm", "RB_agg"], directory, "official-condition")
-        records = load_jsonl(conditioned)
-        raw_outputs.extend([str(combined), str(conditioned), str(directory/"official-condition.execution.json")])
+            row["metrics"]["RB_agg"] = algorithmic_rows[row["task_id"]]["metrics"]["RB_agg"]
+        condition_metrics(load_conditioning_rules(checkout), records, ("RL_F", "RB_llm", "RB_agg"))
     identity = {"protocol": "pinned_mtrag_official_http", "judge": judge,
-        "official_source": json.loads((Path(checkout)/"contextkv-source.json").read_text()),
+        "official_source": {key: value for key, value in json.loads(
+            (Path(checkout)/"contextkv-source.json").read_text()).items() if key in {"repository", "commit"}},
         "requested_metrics": metrics, "answerability_adjustment": primary == "mtrageval_harmonic",
         "metric_scope": "project_RB_llm" if primary == "RB_llm" else "MTRAGEval_generation_components"}
     scorer = json.loads((target/"identity.json").read_text())
     if "ragas_max_tokens" in scorer:
         identity["ragas_max_tokens"] = scorer["ragas_max_tokens"]
-    journal_records = load_jsonl(journal) if journal.exists() else []
-    call_cost = {"http_calls": len(journal_records), "new_http_calls": len(calls),
-        "elapsed_ms": sum(call["elapsed_ms"] for call in journal_records),
-        "input_tokens": sum(call["input_tokens"] for call in journal_records if call["input_tokens"] is not None),
-        "output_tokens": sum(call["output_tokens"] for call in journal_records if call["output_tokens"] is not None),
-        "unknown_token_calls": sum(call["input_tokens"] is None or call["output_tokens"] is None for call in journal_records),
-        "stage_wall_ms": receipt["elapsed_ms"], "attribution": "shared_official_scoring_stage"}
-    return records, identity, raw_outputs, call_cost
+    call_cost["stage_wall_ms"] = receipt["elapsed_ms"]
+    return records, identity, call_cost
 
 
 def _overlap_scores(directory):
     started = time.perf_counter()
     report = reference_overlap(load_jsonl(directory.parent/"references.jsonl"),
                                load_jsonl(directory.parent/"official.jsonl"))
-    target = directory/"reference-overlap.json"
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2)+"\n")
     records = [{"task_id": task_id, "metrics": metrics,
         "judge_cost": {"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0}}
         for task_id, metrics in report["tasks"].items()]
@@ -209,7 +179,7 @@ def _overlap_scores(directory):
         "upstream": "https://aclanthology.org/2021.emnlp-main.498/"}
     cost = {"model_calls": 0, "input_tokens": 0, "output_tokens": 0,
             "elapsed_ms": (time.perf_counter()-started)*1000, "cost_scope": "offline_cpu"}
-    return records, identity, [str(target)], cost
+    return records, identity, cost
 
 
 async def _loong_scores(config, spec, directory, settings):
@@ -240,7 +210,7 @@ async def _loong_scores(config, spec, directory, settings):
     finally:
         client.close()
     return records, {"protocol": "loong_reference_rubric_local_judge", "upstream_commit": COMMIT,
-        "judge": client.manifest, "score_range": [0, 100]}, [str(target)], _cost_totals(records)
+        "judge": client.manifest, "score_range": [0, 100]}, _cost_totals(records)
 
 
 async def _versionqa_scores(config, spec, directory, settings):
@@ -272,7 +242,7 @@ async def _versionqa_scores(config, spec, directory, settings):
     return records, {"protocol": "versionqa_author_binary_accuracy", "upstream_commit": SOURCE_COMMIT,
         "judge": client.manifest, "score_range": [0, 1],
         "judge_view": "original question, reference answer and model answer",
-        "adaptation": "author binary correctness rubric through the configured judge endpoint"}, [str(target)], _cost_totals(records)
+        "adaptation": "author binary correctness rubric through the configured judge endpoint"}, _cost_totals(records)
 
 
 def _record_metrics(record, spec, settings):
@@ -308,23 +278,22 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
     dataset_spec = split_metric_spec(dataset_spec, split)
     if expected_task_ids is None and declaration:
         expected_task_ids = declaration["task_ids" if "task_ids" in declaration else "expected_tasks"]
-    declared = expected_task_ids is not None
-    expected = list(expected_task_ids) if declared else [row["task_id"] for row in rows]
+    expected = list(expected_task_ids) if expected_task_ids is not None else [row["task_id"] for row in rows]
     settings = _settings(config, dataset_spec)
     started = time.perf_counter()
     primary = dataset_spec["primary_metric"]
     if not any(row["status"] == "completed" for row in rows):
-        records, outputs = [], []
+        records = []
         identity = {"protocol": primary, "generated_answers": 0}
         judge_cost = {"model_calls": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0}
     elif primary == "f1":
-        records, identity, outputs, judge_cost = _overlap_scores(directory)
+        records, identity, judge_cost = _overlap_scores(directory)
     elif primary in {"RB_llm", "mtrageval_harmonic"}:
-        records, identity, outputs, judge_cost = await _official_scores(config, dataset_spec, directory, settings)
+        records, identity, judge_cost = await _official_scores(config, dataset_spec, directory, settings)
     elif primary == "loong_reference_score":
-        records, identity, outputs, judge_cost = await _loong_scores(config, dataset_spec, directory, settings)
+        records, identity, judge_cost = await _loong_scores(config, dataset_spec, directory, settings)
     elif primary == "versionqa_accuracy":
-        records, identity, outputs, judge_cost = await _versionqa_scores(config, dataset_spec, directory, settings)
+        records, identity, judge_cost = await _versionqa_scores(config, dataset_spec, directory, settings)
     else:
         raise ValueError(f"No declared scorer for {primary}")
     by_id = {str(record["task_id"]): record for record in records}
@@ -334,36 +303,21 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
     for row in rows:
         record = by_id.get(str(row["task_id"]))
         metrics = _record_metrics(record, dataset_spec, settings) if record is not None else {}
-        previous_metrics = row.get("metrics", {})
-        observed_metrics = {**previous_metrics, **metrics}
+        observed_metrics = metrics
         has_primary = all(_metric({"metrics": observed_metrics}, name, dataset_spec)[0] is not None
                           for name in _required(dataset_spec))
-        aliases = {"RB_alg"+suffix: {"from": "RB_agg"+suffix, "source": RB_AGG_ALIAS_SOURCE}
-                   for suffix in ("", "_idk", "_idk_underspecified")
-                   if "RB_agg"+suffix in metrics and "RB_alg"+suffix in metrics}
         updated.append({**row, "metrics": observed_metrics,
-            "scoring": {"identity": identity, "raw_outputs": outputs,
+            "scoring": {
                 "status": "failed" if record is not None and record.get("status") == "failed" else "scored" if has_primary else "missing",
                 "error": record.get("error") if record is not None else None,
-                "metric_aliases": aliases, "judge_cost": _usage_cost(record) if record else None,
-                "shared_scoring_cost_manifest": str(directory/"manifest.json")}})
-    executed_ids = {row["task_id"] for row in rows}
-    scored_ids = {row["task_id"] for row in updated if row["scoring"]["status"] == "scored"}
+                "judge_cost": record.get("judge_cost") if record else None}})
     manifest = {"identity": identity, "primary_metric": dataset_spec["primary_metric"], "split": split,
-        "normalization": dataset_spec.get("normalization", 1.0),
-        "requested": len(expected), "cohort_declared": declared, "task_ids": expected,
-        "generated_answers": sum(row["status"] == "completed" for row in rows), "score_records": len(records),
+        "normalization": dataset_spec.get("normalization", 1.0), "requested": len(expected),
+        "generated_answers": sum(row["status"] == "completed" for row in rows),
         "scored": sum(row["scoring"]["status"] == "scored" for row in updated),
-        "failed_task_ids": [row["task_id"] for row in updated if row["scoring"]["status"] == "failed"],
-        "missing_execution_task_ids": [task_id for task_id in expected
-            if task_id not in executed_ids],
-        "missing_task_ids": [task_id for task_id in expected
-            if task_id not in scored_ids],
-        "raw_outputs": outputs, "judge_cost": judge_cost,
-        "wall_elapsed_ms": (time.perf_counter()-started)*1000,
-        "cost_scope": "offline_scoring_separate_from_online_answer_cost"}
+        "judge_cost": judge_cost, "wall_elapsed_ms": (time.perf_counter()-started)*1000}
     (directory/"manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+"\n")
-    _write(Path(generation_dir)/"results.jsonl", updated)
+    write_task_metrics(generation_dir, updated)
     return updated
 
 
@@ -385,8 +339,10 @@ def main(argv=None):
     else:
         from bench.study import saved_study_rows
         rows = [row for row in saved_study_rows(args.generation_dir) if row["status"] == "completed"]
-    asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir,
+    scored = asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir,
         expected_task_ids=matrix.get("cohorts", {}).get(args.split, {}).get(args.dataset), split=args.split))
+    if all(row["status"] != "completed" or row["scoring"]["status"] == "scored" for row in scored):
+        retain_metrics(args.generation_dir)
     print((Path(args.generation_dir)/"scoring/manifest.json").read_text())
 
 
