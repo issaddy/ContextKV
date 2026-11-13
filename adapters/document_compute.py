@@ -546,10 +546,10 @@ def _query_description(query, need_ids):
     ids = set(need_ids)
     selected = tuple(need for need in query.task.needs if need.need_id in ids)
     condition_ids = {identity for need in selected for identity in need.condition_ids}
-    return {"question": query.task.raw_question, "needs": [{"id": need.need_id,
+    return {"question": query.task.raw_question, "proposed_needs": [{"id": need.need_id,
         "operation": need.operation, "subject": query.text(need.subject_refs),
         "request": query.text(need.anchor_spans), "conditions": need.condition_ids,
-        "scope": need.scope} for need in selected], "conditions": [{
+        "scope": need.scope} for need in selected], "proposed_conditions": [{
             "id": condition.condition_id, "type": condition.relation_type,
             "field": query.text((condition.key_span,)) if condition.key_span else "",
             "values": [query.text((ref,)) for ref in condition.value_spans],
@@ -647,6 +647,8 @@ def semantic_binding(query, index, need_ids):
         {"column": column, "header": header} for column, header in enumerate(table.headers)],
         "caption": table.caption, "rows": len(table.rows), "source_start": table.source.start} for table in index.tables.values()]
     instruction = ("Bind the requested fields and conditions to the supplied table schemas. "
+        "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
+        "incorrect; resolve their intended meaning from the original question rather than imposing their text. "
         "Need operations are proposals: choose the operation actually requested by the full question. "
         "Use lookup to return fields for semantic classification rather than forcing an arithmetic aggregate. "
         "Samples illustrate columns; the CPU will execute over every row of each selected table. "
@@ -755,12 +757,14 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         "requested measure, literal unit, grouping fields, and the period/condition qualifiers as exact source "
         "references {unit_id,word_boundaries:[first,last]} using inclusive displayed word indices. "
         "The CPU resolves the original text and character spans. "
-        "Need operations are proposals. Choose the operation requested by the full question; use lookup to "
+        "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
+        "incorrect; resolve their intended meaning from the original question. An incomplete auxiliary fragment "
+        "is not unresolved source information. Need operations are proposals. Choose the operation requested by the full question; use lookup to "
         "return fields for classification or semantic comparison instead of forcing an arithmetic aggregate. "
         "When the requested entity is the document itself, use {unit_id,document:true}; its identifier is shown "
         "below and the CPU binds that document identity. Otherwise use original word indices for the entity. "
         "A record can serve several Need IDs: extract it once and list all applicable IDs. "
-        "Apply each Need's stated entity, period and conditions in this same pass. Retain units and qualifiers "
+        "Apply the original question's entity, period and conditions in this same pass. Retain units and qualifiers "
         "from source headings or notes. Do not produce totals, summaries or a second selection list. "
         "Examine each source completely. No matching field in a window is an empty projection; other windows "
         "can supply it. Follow the question's missing-data policy. Report unresolved Need IDs for ambiguous "
