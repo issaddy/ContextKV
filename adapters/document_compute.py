@@ -630,7 +630,8 @@ def semantic_binding_schema(index, need_ids, operations=None):
     string = {"type": "string"}
     predicate = obj({"field": string, "operation": {"enum": [*list(_COMPARISONS), "in", "contains"]},
         "value": {"anyOf": [string, {"type": "number"}, array(string)]}, "unit": string})
-    projection = obj({"table_id": {"enum": list(index.tables)}, "fields": array(obj({
+    table_ids = [f"T{i+1}" for i in range(len(index.tables))]
+    projection = obj({"table_id": {"enum": table_ids}, "fields": array(obj({
         "name": string, "column": {"type": "integer", "minimum": 0},
         "unit_span": {"anyOf": [{"type": "null"}, _word_address_schema(index.binding_units())]}})),
         "predicates": array(predicate)})
@@ -642,7 +643,7 @@ def semantic_binding_schema(index, need_ids, operations=None):
             "right_index": {"type": "integer", "minimum": 1},
             "left_fields": array(string), "right_fields": array(string)})),
         "group_by": array(string), "distinct": array(string), "unresolved_conditions": array(string),
-        "excluded_table_ids": array({"enum": list(index.tables)})}) for identity in need_ids}
+        "excluded_table_ids": array({"enum": table_ids})}) for identity in need_ids}
     return obj({"programs": obj(programs)})
 
 
@@ -651,6 +652,7 @@ def decode_programs(text, query, index):
     needs = {need.need_id: need for need in query.task.needs}
     result = []
     fragments = {f"S{i+1}": unit for i, unit in enumerate(index.binding_units())}
+    tables = {f"T{i+1}": identity for i, identity in enumerate(index.tables)}
     def field_binding(field):
         address = field["unit_span"]
         if address is None:
@@ -659,7 +661,7 @@ def decode_programs(text, query, index):
         return Field(field["name"], field["column"], text, span)
     for identity, item in json.loads(text)["programs"].items():
         need = needs[identity]
-        projections = tuple(Projection(projection["table_id"],
+        projections = tuple(Projection(tables[projection["table_id"]],
             tuple(field_binding(field) for field in projection["fields"]),
             tuple(Predicate(**predicate) for predicate in projection["predicates"]))
             for projection in item["projections"])
@@ -669,7 +671,8 @@ def decode_programs(text, query, index):
             tuple(Predicate(**predicate) for predicate in item["predicates"]),
             tuple(Join(join["right_index"], tuple(join["left_fields"]), tuple(join["right_fields"]))
                   for join in item["joins"]), tuple(item["group_by"]), tuple(item["distinct"]),
-            need.condition_ids, tuple(item["unresolved_conditions"]), tuple(item["excluded_table_ids"])))
+            need.condition_ids, tuple(item["unresolved_conditions"]),
+            tuple(tables[identity] for identity in item["excluded_table_ids"])))
     return tuple(result)
 
 
@@ -678,7 +681,8 @@ def semantic_binding(query, index, need_ids, *, operations=None):
     import json
     units = index.binding_units()
     blocks = _word_blocks(units)
-    catalogue = [{"table_id": table.table_id, "columns": [
+    table_ids = {identity: f"T{i+1}" for i, identity in enumerate(index.tables)}
+    catalogue = [{"table_id": table_ids[table.table_id], "columns": [
         {"column": column, "header": header} for column, header in enumerate(table.headers)],
         "caption": table.caption, "rows": len(table.rows), "source_start": table.source.start} for table in index.tables.values()]
     instruction = ("Bind the requested fields and conditions to the supplied table schemas. "
@@ -696,7 +700,7 @@ def semantic_binding(query, index, need_ids, *, operations=None):
         "Put explicitly unrelated tables in excluded_table_ids; leave undecided tables unprojected and unexcluded. "
         "Keep conditions that cannot be bound in unresolved_conditions. Do not calculate totals.\n"
         + json.dumps({"task": _query_description(query, need_ids), "tables": catalogue,
-                         "sources": [{"unit_id": f"S{i+1}", "table_id": unit.table_id} for i, unit in enumerate(units)]},
+                         "sources": [{"unit_id": f"S{i+1}", "table_id": table_ids[unit.table_id]} for i, unit in enumerate(units)]},
                      ensure_ascii=False, separators=(",", ":")))
     return SemanticBinding(blocks, instruction, semantic_binding_schema(index, need_ids, operations),
                            lambda text: decode_programs(text, query, index))
