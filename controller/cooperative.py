@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+import json
 import time
 from weakref import WeakValueDictionary
 
@@ -455,8 +456,10 @@ class CooperativeController:
                 future_sources=with_document_headers(tuple(block for group in retained[:number]
                     for block in group), state.source_headers),
                 system_prompt=self.policy.system_prompt or SYSTEM)
-            output_tokens = min(self.settings.get("semantic_output_tokens", 8192),
-                                self.policy.max_total_model_tokens-len(request.input_ids))
+            full_selection = {identity: list(range(spec["maxItems"]))
+                              for identity, spec in projection.schema["properties"].items()}
+            output_tokens = len(encode(json.dumps(full_selection, separators=(",", ":")),
+                                       add_special_tokens=False))+1
             allowance = self._reading_allowance(state, snapshot, request, output_tokens)
             if not allowance:
                 state.budget_exhausted = True
