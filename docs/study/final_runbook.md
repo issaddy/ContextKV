@@ -2,7 +2,7 @@
 
 当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，查询 LoRA 和 Jina 骨干继续复用；任务、字段、集合和停止头随当前协议更新。快速对照使用每个 benchmark、每种方法相同的 20 题。当前结果见[本轮报告](shared_smoke.md)。
 
-当前恢复任务聚焦重排，保留事实完整性、紧凑来源地址与缓存监督修正。最新 MultiDoc2Dial 20 题复测 F1 为 19.09、P95 为 11.30 秒；通用投影与关系计算检查已交付答案，但语义质量仍不足。既有四项参照、本轮试验及恢复后的复测见 `results/dynamic-flow-20261113.json` 和[当前报告](shared_smoke.md)。当前方案尚未对其余三项重跑。
+当前已完成可读事实交付、增量读取、实际计算状态驱动的继续决策、同执行器收益监督及线程独立 tokenizer。四项各 20 题已完成评测，Loong 两题补跑后完成交付。质量仍有差距，结果和全部已付费用见 `results/semantic-state-20261113.json` 与[当前报告](shared_smoke.md)。
 
 ## 路径与环境
 
@@ -32,7 +32,7 @@
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
-现有可用资产：`models/shared-query`（任务头 222/47 状态，总体覆盖头 286/63 状态）、`models/shared-evidence`（字段 54/23、集合 24/6 状态）、`models/shared-stop.pt`（12/4 状态）。斜线两侧为训练/开发数；覆盖监督与任务监督有重叠。本轮集合和停止分别采集 180、32 次真实答案。查询 LoRA、Jina 骨干与 Qwen3-32B 权重保持固定。以下命令是训练入口，已有资产可直接用于评测。
+现有可用资产：`models/shared-query`（286/63 个训练/开发输入状态，任务头和总体覆盖头）、`models/shared-evidence`（字段输入 54/23、实际集合 22/6 状态）、`models/shared-stop.pt`（实际 11/4 状态）。任务与覆盖监督共享输入，覆盖专用行不生成任务关系标签。本轮集合和停止分别采集 163、33 次真实答案；总体必需读取状态不参与可选集合/停止采集。查询 LoRA、Jina 骨干与 Qwen3-32B 权重保持固定。以下命令包含标签准备、已有资产增量更新与评测入口；现有数据和索引可直接复用。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -52,9 +52,9 @@ python3 -m training.prepare_shared_labels \
   --train-states 24 --dev-states 8 --candidates 6 --concurrency 4
 
 python3 -m training.shared_training query \
-  --model models/qwen3-embedding-0.6b \
+  --model models/qwen3-embedding-0.6b --init-asset models/shared-query \
   --data data/training/shared/query_labels.jsonl \
-  --output models/shared-query --device cuda:2 --epochs 5
+  --output models/shared-query --device cuda:2 --heads-only --epochs 20 --learning-rate 0.0002
 
 python3 -m training.prepare_shared_labels \
   --query-model models/qwen3-embedding-0.6b \
@@ -75,8 +75,8 @@ python3 -m training.shared_index \
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
-  --data data/training/shared/labels.jsonl \
-  --output models/shared-evidence --device cuda:3 --field-only --epochs 3
+  --init-asset models/shared-evidence --data data/training/shared/labels.jsonl \
+  --output models/shared-evidence --device cuda:3 --field-only --epochs 1
 
 python3 -m training.collect_shared_values sets \
   --config configs/study.yaml --data data/training/shared/labels.jsonl \
@@ -101,7 +101,7 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
-标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样，覆盖更多会话；字段监督复用独立的来源标注。集合头单独拟合，使用与采集、线上相同的推断任务表示；冻结骨干只编码一次，后续轮次复用表示。集合样本保存候选集合和相对无证据回答的实际质量增益；停止样本保存紧凑表示及多步回报需要的费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
+标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样；仅更新任务头时仍训练 Need 与冻结检索空间的对齐。字段监督按原消息坐标将标注对应到预测 Need。集合头单独拟合，冻结骨干只编码一次，后续轮次复用表示。集合/停止采集共用线上读取、状态准备、回答编译和预算执行器；最终质量来自实际结论与原文组成的回答，扩展费用包含新增编码、读取和计算。集合样本保存相对无证据回答的质量增益；停止样本保存紧凑表示与多步回报费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
 ## 少量端到端评测
 
