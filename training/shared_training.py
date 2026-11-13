@@ -330,19 +330,28 @@ def train_coverage(args):
         encoded = encoder.encode_many([dict(history=conversation(row), question=row["question"],
             task_id=row["task_id"], current_turn_id=row["turn"], catalogue=catalogue(row),
             history_turns=row.get("history_turns", ())) for row in batch])
-        vectors.extend(item.pooled.detach() for item in encoded)
+        vectors.extend(item.pooled.detach().clone() for item in encoded)
     features = F.layer_norm(torch.stack(vectors), (vectors[0].shape[-1],))
     labels = torch.tensor([SCOPES.index(row["task_state"]["coverage_scope"]) for row in data], device=args.device)
     train = torch.tensor([row["split"] == "train" for row in data], device=args.device)
     head = encoder.heads.coverage
     with torch.no_grad():
         before = float((head(features)[~train].argmax(-1) == labels[~train]).float().mean())
+        head.weight.zero_()
+        head.bias.zero_()
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate)
-    for _ in range(args.epochs):
+    best_loss, best_epoch, best = float("inf"), 0, None
+    for epoch in range(args.epochs):
         loss = F.cross_entropy(head(features[train]), labels[train])
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        with torch.no_grad():
+            dev_loss = float(F.cross_entropy(head(features[~train]), labels[~train]))
+            if dev_loss < best_loss:
+                best_loss, best_epoch = dev_loss, epoch+1
+                best = {name: value.clone() for name, value in head.state_dict().items()}
+    head.load_state_dict(best)
     with torch.no_grad():
         prediction = head(features)[~train].argmax(-1)
         truth = labels[~train]
@@ -352,7 +361,7 @@ def train_coverage(args):
     metadata = json.loads((output/"training.json").read_text())
     metadata["coverage"] = {"train": int(train.sum()), "dev": int((~train).sum()),
         "dev_accuracy_before": before, "dev_accuracy": float((prediction == truth).float().mean()),
-        "dev_confusion": confusion, "loss": float(loss.detach())}
+        "dev_confusion": confusion, "dev_loss": best_loss, "epoch": best_epoch}
     (output/"training.json").write_text(json.dumps(metadata, indent=2)+"\n")
     print(json.dumps(metadata["coverage"]))
 

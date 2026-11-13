@@ -33,11 +33,43 @@ def coverage_states():
         ("请给出一个符合标准的产品实例。", "请检查全部检验记录是否存在不符合标准的产品。"),
         ("这篇研究介绍了什么方法？", "整理全部研究之间的依赖关系并判断是否存在闭环。"),
     )
-    return [{"task_id": f"coverage-{index}-{kind}", "conversation_id": f"coverage-{index}",
+    result = [{"task_id": f"coverage-{index}-{kind}", "conversation_id": f"coverage-{index}",
         "split": "dev" if index >= 16 else "train", "turn": 1, "history": [], "question": question,
         "coverage_only": True, "task_state": {"coverage_scope": scope}}
         for index, pair in enumerate(pairs) for kind, (question, scope) in enumerate(zip(pair,
             ("selected_sources", "all_supplied_documents")))]
+    domains = (
+        ("buffer manager", "retention limit", "缓存管理器", "保留期限"),
+        ("message broker", "delivery guarantee", "消息服务", "交付保证"),
+        ("transport contract", "expiry date", "运输合同", "到期日期"),
+        ("grant programme", "eligibility rule", "资助项目", "申请条件"),
+        ("sensor module", "operating range", "传感器模块", "运行范围"),
+        ("insurance policy", "coverage amount", "保险条款", "保障金额"),
+        ("filing procedure", "submission deadline", "申报流程", "提交期限"),
+        ("data format", "required fields", "数据格式", "必填字段"),
+        ("payment service", "transaction limit", "支付服务", "交易限额"),
+        ("maintenance plan", "inspection interval", "维护方案", "检查间隔"),
+    )
+    for index, (entity, attribute, chinese_entity, chinese_attribute) in enumerate(domains):
+        version = f"{index+1}.3.2"
+        variants = (
+            (f"What is the {attribute} of the {entity} in version {version}?", 0, ()),
+            (f"How does the {entity} behave in version {version}?", 0, ()),
+            (f"List every {attribute} change across all supplied versions of the {entity}.", 1, ()),
+            (f"Find all inconsistent {attribute} statements throughout the supplied documents.", 1, ()),
+            (f"在 {version} 版中，{chinese_entity}的{chinese_attribute}是什么？", 0, ()),
+            (f"请找出全部资料中{chinese_entity}的每项{chinese_attribute}变更。", 1, ()),
+            (f"The {attribute}?", 0, (f"Explain the {entity} in version {version}.",)),
+            (f"Now include every {entity} in all the supplied records.", 1,
+             (f"What is the {attribute} of the first {entity}?",)),
+        )
+        for kind, (question, population, history) in enumerate(variants):
+            result.append({"task_id": f"coverage-domain-{index}-{kind}", "conversation_id": f"coverage-domain-{index}",
+                "split": "train" if index < 8 else "dev", "turn": len(history)+1,
+                "history": [{"turn_id": i+1, "speaker": "user", "text": text} for i, text in enumerate(history)],
+                "question": question, "coverage_only": True,
+                "task_state": {"coverage_scope": "all_supplied_documents" if population else "selected_sources"}})
+    return result
 
 
 def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
