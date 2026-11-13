@@ -66,7 +66,7 @@ def computation_record(program, result):
 
 
 class CooperativeController:
-    def __init__(self, store, engine, template, *, settings, policy, dialogue_mode="contextkv"):
+    def __init__(self, store, engine, template, *, settings, policy, dialogue_mode="contextkv", stop_model=None):
         self.store, self.engine, self.template = store, engine, template
         self.settings, self.policy, self.dialogue_mode = settings, policy, dialogue_mode
         self._locks = WeakValueDictionary()
@@ -75,7 +75,7 @@ class CooperativeController:
         self.kv_policy = {}
         if dialogue_mode == "contextkv":
             from .value_policy import StopValueHead, ValuePrices
-            self.stop = StopValueHead.load(settings["stop_asset"])
+            self.stop = stop_model if stop_model is not None else StopValueHead.load(settings["stop_asset"])
             self.prices = ValuePrices(**settings.get("prices", {}))
             from .config import load_kv_policy
             self.kv_policy = load_kv_policy(settings)

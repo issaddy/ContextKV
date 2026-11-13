@@ -153,7 +153,7 @@ class EvidenceEncoding:
     def frontier(self, units):
         """Nested relevance-ranked sets, each containing its source dependencies."""
         by_id = {unit.unit_id: unit for unit in units}
-        order = sorted(range(len(self.unit_ids)), key=lambda i: -float(self.relevance[i]))
+        order = self.relevance.argsort(descending=True).tolist()
         active, seen, sets = [], set(), [()]
         def add(identity):
             if identity in seen:

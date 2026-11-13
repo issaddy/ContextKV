@@ -92,7 +92,9 @@ async def collect(args):
     evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"], train=args.stage == "sets")
     evidence_encoder.model.eval()
     evidence_encoder.heads.eval()
-    controller = CooperativeController(None, engine, template, settings=run.cooperative, policy=run.context)
+    from controller.value_policy import StopValueHead
+    controller = CooperativeController(None, engine, template, settings=run.cooperative,
+        policy=run.context, stop_model=StopValueHead())
     kv_policy = controller.kv_policy
     if args.stage == "stop":
         from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
@@ -165,7 +167,6 @@ async def collect(args):
                 save_record({**row, "completed_needs": sorted(state.completed_needs),
                     "sets": [{"unit_ids": chosen, "quality": item["quality"]} for chosen, item in observations]})
                 return
-            from controller.value_policy import StopValueHead
             paid_seconds = time.monotonic()-started
             warm = index % 2 == 1
             state, encoded, states = None, None, []

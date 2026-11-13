@@ -88,7 +88,7 @@ class EvidenceHeads(nn.Module):
 
     @staticmethod
     def features(embeddings, relevance, selected, support, completed):
-        """Size-independent information state shared by selection and stopping."""
+        """Bounded information state shared by selection and stopping."""
         selected = selected.bool()
         mask = selected.to(embeddings.dtype)
         count = mask.sum(-1, keepdim=True)
