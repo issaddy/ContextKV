@@ -344,7 +344,27 @@ class CooperativeController:
         from adapters.document_compute import semantic_evidence_projection
         from .source_windows import numbered_lines
         budget, _ = self._answer_budget(state, snapshot, computations)
-        units = state.population_units
+        consumed = {}
+        for record in computations:
+            for span in record["sources"]:
+                consumed.setdefault(decode(EvidenceKey, span["source_key"]), []).append((span["start"], span["end"]))
+
+        def unread(unit):
+            span = unit.source_spans[0]
+            cursor = span.start
+            for first, last in sorted(consumed.get(span.source_key, ())):
+                if first >= span.end:
+                    break
+                if last <= cursor:
+                    continue
+                if unit.text[cursor-span.start:max(cursor, first)-span.start].strip():
+                    return True
+                cursor = max(cursor, last)
+            return bool(unit.text[cursor-span.start:].strip())
+
+        units = tuple(unit for unit in state.population_units if unread(unit))
+        if not units:
+            return ()
         blocks = blocks_for_units(units, state.pool.source_blocks)
         encode = self.template.tokenizer.encode
         sizes = [len(encode(f"[S{i+1}] {block.title} | version={block.key.version}\n{block.text}\n\n",
