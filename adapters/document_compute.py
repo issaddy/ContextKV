@@ -834,7 +834,7 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
-def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer):
+def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer, source_headers=()):
     """Select original line indices; the model never reconstructs source text."""
     import json
     from dataclasses import replace
@@ -858,10 +858,14 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
         "Preserve source entity/title, relevant attributes, directed relationships, conditions, exceptions, dates, "
         "units and versions. Retain facts needed to decide eligibility even when they are negative or ambiguous; "
         "the final answer decides which members satisfy the conditions. For global relationships keep relevant "
-        "cross-source links even when the other source is in another batch. Return each selected line number once, "
+        "cross-source links even when the other source is in another batch. The document catalogue identifies "
+        "the supplied population. For relationships within that population, retain links to its members, "
+        "not unrelated external entities. Return each selected line number once, "
         "in original order. Return only source IDs and arrays of line numbers, without copied text or explanations. "
         f"The selected original lines share a budget of {retained_tokens} tokens; their token counts are shown. "
-        "Keep necessary facts and leave unrelated lines out.\nQuestion: " + question)
+        "Keep necessary facts and leave unrelated lines out.\nQuestion: " + question +
+        "\nDocument catalogue (literal openings, not complete evidence):\n" +
+        "\n".join(f"{block.title}\n{block.text}" for block in source_headers))
 
     def decode_evidence(text):
         selected = json.loads(text)

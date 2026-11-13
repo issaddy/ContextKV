@@ -69,6 +69,41 @@ def coverage_states():
                 "history": [{"turn_id": i+1, "speaker": "user", "text": text} for i, text in enumerate(history)],
                 "question": question, "coverage_only": True,
                 "task_state": {"coverage_scope": "all_supplied_documents" if population else "selected_sources"}})
+    # Different domains share the same quantifier and relationship semantics.
+    # Long formatting instructions are deliberately independent of the scope label.
+    populations = (
+        ("warehouses", "storage capacity", "仓库", "容量"),
+        ("farms", "annual rainfall", "农场", "年降水量"),
+        ("machines", "operating temperature", "机器", "运行温度"),
+        ("schools", "enrolment", "学校", "招生人数"),
+        ("batteries", "cycle life", "电池", "循环寿命"),
+        ("reservoirs", "water level", "水库", "水位"),
+        ("stations", "daily passengers", "车站", "日客流量"),
+        ("hospitals", "bed capacity", "医院", "床位数量"),
+    )
+    for index, (entities, field, cn_entities, cn_field) in enumerate(populations):
+        questions = (
+            (f"Group the {entities} in the supplied records by {field}, using low (below 40), medium (40 to 80), and high (above 80).", 1),
+            (f"What is the {field} of the named {entities} in record A?", 0),
+            (f"For record A, identify the incoming and outgoing dependencies among these {entities}.", 1),
+            (f"Explain the meaning of {field} and give an example from the records.", 0),
+            (f"将资料中的{cn_entities}按{cn_field}分为低于40、40至80和超过80三组。每个成员只计入对应的一组。", 1),
+            (f"编号A的{cn_entities}，其{cn_field}是多少？", 0),
+            (f"找出所给{cn_entities}中与A有直接依赖关系的成员，分别列出依赖A和A依赖的成员。", 1),
+            (f"解释资料中{cn_field}的含义，并提供一个实例。", 0),
+        )
+        for kind, (question, population) in enumerate(questions):
+            for long_form in (False, True):
+                wrapper = (("请根据提供的资料完成以下任务。保持实体、单位和时期的对应关系；"
+                    "没有提及的信息无需推测。输出JSON，不添加解释。\n任务：" if kind >= 4 else
+                    "Use the supplied records to complete the task. Preserve entities, units and periods. "
+                    "Leave unmentioned information unspecified. Output JSON without explanations.\nTask: ")
+                    if long_form else "")
+                result.append({"task_id": f"coverage-population-{index}-{kind}-{int(long_form)}",
+                    "conversation_id": f"coverage-population-{index}",
+                    "split": "train" if index < 6 else "dev", "turn": 1, "history": [],
+                    "question": wrapper+question, "coverage_only": True,
+                    "task_state": {"coverage_scope": "all_supplied_documents" if population else "selected_sources"}})
     return result
 
 

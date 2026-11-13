@@ -47,6 +47,7 @@ class SharedEvidenceState:
     pending_units: tuple = ()
     body_tokens: int = 0
     population_units: tuple = ()
+    source_headers: tuple = ()
     costs: object = None
     computations: tuple = ()
     table_parts: tuple = ()
@@ -132,6 +133,9 @@ class SharedEvidenceProvider:
         corpus, directory, sparse, dense, versions = self.corpus, self.directory, self.sparse, self.dense, self.versions
         cached = None
         if supplied_blocks is not None:
+            supplied_blocks = tuple(replace(block,
+                title=block.title or next((line.strip().lstrip("#").strip()
+                    for line in block.text.splitlines() if line.strip()), "")) for block in supplied_blocks)
             key = tuple(block.key for block in supplied_blocks)
             if key not in self._supplied:
                 supplied_corpus = CorpusIndex(supplied_blocks, corpus_id=self.corpus.corpus_id,
@@ -173,7 +177,8 @@ class SharedEvidenceProvider:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         query.task = replace(query.task, effective_source_scope=legal)
-        complete_population = "all_supplied_documents" in (coverage_scope, query.task.coverage_scope)
+        complete_population = "all_supplied_documents" in (
+            coverage_scope, query.task.coverage_scope, *(need.scope for need in query.task.needs))
         if complete_population:
             query.task = replace(query.task, coverage_scope="all_supplied_documents")
         full = complete_population and (supplied_blocks is not None or bool(families))
@@ -298,6 +303,9 @@ class SharedEvidenceProvider:
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units)
+        if supplied_blocks is not None:
+            from controller.cooperative_request import document_headers
+            state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
         state.computations = state.reused_claims

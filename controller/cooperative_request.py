@@ -51,6 +51,25 @@ def source_address(block):
         key.corpus_id, key.document_id, key.version, key.passage_id, f"{start}:{end}"))
 
 
+def document_headers(blocks, tokenizer, tokens=128):
+    """Keep the literal document identity beside excerpts from its later pages."""
+    result = []
+    for block in blocks:
+        offsets = tokenizer(block.text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
+        end = offsets[min(tokens, len(offsets))-1][1] if offsets else 0
+        start = block.span[0] if block.span else 0
+        result.append(replace(block, text=block.text[:end], span=(start, start+end), token_ids=()))
+    return tuple(result)
+
+
+def with_document_headers(evidence, headers):
+    """A retained beginning already carries the identity; add only missing headers."""
+    missing = [header for header in headers if not any(block.key == header.key
+        and (block.span or (0, len(block.text)))[0] <= header.span[0]
+        and header.span[1] <= (block.span or (0, len(block.text)))[1] for block in evidence)]
+    return (*missing, *evidence)
+
+
 def blocks_for_units(units, source_blocks):
     sources = {}
     for block in source_blocks:

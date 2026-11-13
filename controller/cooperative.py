@@ -7,7 +7,7 @@ import time
 from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, EvidenceCosts, blocks_for_units, compile_request,
-                                  source_address, working_history)
+                                  source_address, with_document_headers, working_history)
 from .schema import EvidenceBlock, EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -240,6 +240,7 @@ class CooperativeController:
             selected = await self._population_sources(state, snapshot, state.computations, complete)
         else:
             selected = selected_blocks(state)
+        selected = with_document_headers(selected, state.source_headers)
         return compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
             instruction=("The source population is only partially examined. Use the established observations; "
@@ -372,7 +373,9 @@ class CooperativeController:
         from .cooperative_request import answer_task
         from .schema import Message, history_messages
         question = answer_task(state.query.task.raw_question, computations)
-        fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", ""),
+        headers = "".join(f"[D{i+1}] {block.title}\n{block.text}\n\n"
+                          for i, block in enumerate(state.source_headers))
+        fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", headers),
                                      *history_messages(snapshot.raw_history), Message("user", question)))
         remaining = self.settings["max_total_tokens"]-state.totals["input_tokens"]-state.totals["output_tokens"]
         body_tokens = min(state.body_tokens,
@@ -435,8 +438,9 @@ class CooperativeController:
         for number, (pack, weight) in enumerate(zip(packs, weights)):
             quota = budget-spent if number == len(packs)-1 else int(budget*weight/total)
             spent += quota
-            projection = semantic_evidence_projection(state.query.task.raw_question, pack,
-                retained_tokens=quota, tokenizer=self.template.tokenizer)
+            projection = await asyncio.to_thread(semantic_evidence_projection,
+                state.query.task.raw_question, pack, retained_tokens=quota,
+                tokenizer=self.template.tokenizer, source_headers=state.source_headers)
             request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                 projection.blocks, instruction=projection.instruction,
                 system_prompt=self.policy.system_prompt or SYSTEM)

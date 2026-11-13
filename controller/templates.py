@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from copy import deepcopy
+from copy import copy, deepcopy
 from threading import local
 
 
 class _TokenizerWorker(local):
     def __init__(self, prototype):
-        self.value = deepcopy(prototype)
+        self.value = copy(prototype)
+        self.value._tokenizer = deepcopy(prototype.backend_tokenizer)
 
 
 class ThreadTokenizer:
