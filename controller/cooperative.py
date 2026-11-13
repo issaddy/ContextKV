@@ -206,6 +206,7 @@ class CooperativeController:
         records = {record["need_id"]: record for record in state.computations}
         for program in bound:
             records[program.need_id] = computation_record(program, state.document_index.execute(program))
+            state.processed_tables.update(projection.table_id for projection in program.projections)
         state.computations = tuple(records.values())
         budget, _ = self._answer_budget(state, snapshot, state.computations)
         raw_size = sum(len(self.template.tokenizer.encode(
@@ -326,13 +327,13 @@ class CooperativeController:
         outside = index.outside_tables(state.pool.units)
         fresh = tuple(unit for unit in outside if unit.unit_id not in state.read_units)
         operations_by_need = {need.need_id: need.operation for need in state.query.task.needs} | resolved_operations
-        prose_needs = {identity for identity in need_ids
+        aggregate_needs = {identity for identity in need_ids
                        if operations_by_need[identity] in {"count", "sum", "mean", "min", "max"}}
-        if fresh and prose_needs and not state.budget_exhausted:
+        if fresh and aggregate_needs and not state.budget_exhausted:
             operations = resolved_operations or None
             population = tuple(unit.unit_id for unit in outside)
             for number, units in enumerate(self._source_packs(fresh, input_tokens, lambda unit: numbered_text(unit.text)[0])):
-                projection = semantic_projection(state.query, units, sorted(prose_needs),
+                projection = semantic_projection(state.query, units, sorted(need_ids),
                     population_unit_ids=population, operations=operations)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, instruction=projection.instruction, future_sources=selected,
