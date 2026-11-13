@@ -146,6 +146,13 @@ class CorpusIndex:
     def blocks(self) -> tuple[EvidenceBlock, ...]:
         return tuple(self._blocks.values())
 
+    def document_keys(self, anchors, legal_keys):
+        """Expand located passages within their original document and version."""
+        documents = {(self._source_document_ids.get(key, key.document_id), key.version)
+                     for key in anchors}
+        return tuple(key for key in legal_keys
+                     if (self._source_document_ids.get(key, key.document_id), key.version) in documents)
+
     def enrich(self, contexts: Iterable[Any]) -> tuple[EvidenceBlock, ...]:
         """Resolve retrieved original text into its source reading body and conditions.
 

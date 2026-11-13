@@ -9,7 +9,7 @@ from adapters.document_compute import DocumentIndex
 from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
-from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder
+from adapters.shared_encoding import EvidenceEncoding, SharedEvidenceEncoder, SharedQueryEncoder
 from adapters.version_structure import VersionIndex
 from controller.context_schema import EvidencePool, SourceSpan
 from controller.schema import OnlineContext, QueryContext, history_messages
@@ -152,8 +152,9 @@ class SharedEvidenceProvider:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         query.task = replace(query.task, effective_source_scope=legal)
-        full = coverage_scope == "all_supplied_documents" or any(
+        complete_population = coverage_scope == "all_supplied_documents" or any(
             need.scope == "all_supplied_documents" for need in query.task.needs)
+        full = complete_population and (supplied_blocks is not None or bool(families))
         if full:
             document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
             pool = directory.full_scope(legal)
@@ -227,14 +228,52 @@ class SharedEvidenceProvider:
         pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
         evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
-        usage["compute_ms"] = (time.perf_counter()-started)*1000
         selected = evidence.select(initial, body_tokens=available)
+        if complete_population and not full:
+            # An open search collection is not the population supplied for computation.
+            anchors = tuple(span.source_key for identity in selected for span in by_id[identity].source_spans)
+            population_keys = corpus.document_keys(anchors, legal)
+            pool = replace(directory.full_scope(population_keys), scope_id="located_documents")
+            document_index = DocumentIndex.from_blocks(pool.source_blocks)
+            population_keys = {block.key for block in pool.source_blocks}
+            positions = [index for index, unit in enumerate(initial)
+                         if all(span.source_key in population_keys for span in unit.source_spans)]
+            retained = tuple(initial[index] for index in positions)
+            binding_units = document_index.binding_units()
+            outside = self._outside_tables(pool.units, document_index)
+            aliases = {}
+            for unit in (*binding_units, *outside):
+                original = next((prior for prior in retained if all(any(
+                    old.source_key == span.source_key and old.start <= span.start and span.end <= old.end
+                    for old in prior.source_spans) for span in unit.source_spans)), None)
+                aliases[unit.unit_id] = original.unit_id if original is not None else unit.unit_id
+            fresh = tuple(replace(unit,
+                dependencies=tuple(dict.fromkeys(aliases[dependency] for dependency in unit.dependencies)))
+                for unit in (*binding_units, *outside) if aliases[unit.unit_id] == unit.unit_id)
+            fresh = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in fresh)
+            evidence = replace(evidence, unit_ids=tuple(unit.unit_id for unit in retained),
+                embeddings=evidence.embeddings[positions], relevance=evidence.relevance[positions],
+                bindings=tuple(binding for binding in evidence.bindings
+                               if binding.source_span.source_key in population_keys),
+                token_states=(), token_sources=())
+            if fresh:
+                extra = self.evidence_encoder.encode(query, fresh)
+                usage["input_tokens"] += extra.usage["input_tokens"]
+                evidence = EvidenceEncoding((*evidence.unit_ids, *extra.unit_ids),
+                    torch.cat((evidence.embeddings, extra.embeddings)),
+                    torch.cat((evidence.relevance, extra.relevance)),
+                    (*evidence.bindings, *extra.bindings), evidence.heads)
+            initial, pending = (*retained, *fresh), ()
+            selected = evidence.select(initial, body_tokens=available)
+            query.task = replace(query.task,
+                effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), provider=self, body_tokens=available)
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
         context = QueryContext(question, "shared", task_state=query.task,
             history_turns=tuple(dict.fromkeys(ref.turn_id for ref in query.task.working_history)))
+        usage["compute_ms"] = (time.perf_counter()-started)*1000
         return EvidenceSelection(pool.source_blocks, tuple(block.key for block in pool.source_blocks),
             context, auxiliary_usage=usage, shared_state=state)
 
