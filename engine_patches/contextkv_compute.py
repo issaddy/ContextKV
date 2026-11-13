@@ -93,7 +93,7 @@ class ComputeRuntime:
         prefill = self.costs.get('prefill_token_ms', 1.0)
         replay = self.costs.get('recompute_token_ms', prefill)
         marginal_value = max(0.0, prefill - ratio * replay)
-        request_demand = {(scope, item['source_id']): {**item, 'value_per_token_ms': marginal_value}
+        request_demand = {(scope, item['source_id']): {**item, 'recompute_ratio': ratio}
                           for item in metadata.get('demand', ())}
         self.demands[session] = request_demand
         self._refresh_priorities()
@@ -296,7 +296,8 @@ class ComputeRuntime:
             item = scope.get(source_id)
             if item is not None:
                 for consumer in item.get('consumer_ids', ()) or range(int(item.get('uses', 0))):
-                    values[session, consumer] = item['value_per_token_ms']
+                    values[session, consumer] = max(0.0, self.costs.get('prefill_token_ms', 0.0)
+                        - item['recompute_ratio'] * self.costs.get('recompute_token_ms', 0.0))
         return values
 
     def _priority(self, source_id):

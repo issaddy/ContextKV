@@ -164,6 +164,11 @@ class EvidenceEncoding:
             total, cost = items.sum(axis=0), int(costs.sum())
             while chosen:
                 candidates = np.flatnonzero(active)
+                # The empty set is a training control. A document answer retains
+                # at least one source (or its complete dependency group).
+                candidates = candidates[total[width] - removal[candidates, width] > 0]
+                if not len(candidates):
+                    break
                 pooled = np.empty((len(candidates)+1, width+2), dtype=np.float32)
                 pooled[0] = total
                 pooled[1:] = total-removal[candidates]
@@ -302,7 +307,7 @@ class QwenDocumentEncoder:
         input_tokens = int(batch["attention_mask"].sum())
         batch = batch.to(self.model.device)
         with torch.no_grad():
-            states = self.model(**batch).last_hidden_state
+            states = self.model(**batch, use_cache=False).last_hidden_state
             return torch.nn.functional.normalize(states[:, -1].float(), dim=-1).cpu().numpy(), input_tokens
 
     def close(self):
