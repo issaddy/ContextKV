@@ -317,9 +317,49 @@ def train_evidence(args):
         "quality_target": "bounded_answer_gain_listwise", "phase": "fields" if args.field_only else "sets"}, indent=2)+"\n")
 
 
+def train_coverage(args):
+    """Fit population coverage with equal example weights, independently of task-head count."""
+    import torch
+    from torch.nn import functional as F
+    from adapters.shared_heads import SCOPES
+    torch.manual_seed(args.seed)
+    encoder = SharedQueryEncoder(args.model, args.init_asset, device=args.device, history_tokens=args.history_tokens)
+    data, vectors = rows(args.data), []
+    for start in range(0, len(data), 16):
+        batch = data[start:start+16]
+        encoded = encoder.encode_many([dict(history=conversation(row), question=row["question"],
+            task_id=row["task_id"], current_turn_id=row["turn"], catalogue=catalogue(row),
+            history_turns=row.get("history_turns", ())) for row in batch])
+        vectors.extend(item.pooled.detach() for item in encoded)
+    features = F.layer_norm(torch.stack(vectors), (vectors[0].shape[-1],))
+    labels = torch.tensor([SCOPES.index(row["task_state"]["coverage_scope"]) for row in data], device=args.device)
+    train = torch.tensor([row["split"] == "train" for row in data], device=args.device)
+    head = encoder.heads.coverage
+    with torch.no_grad():
+        before = float((head(features)[~train].argmax(-1) == labels[~train]).float().mean())
+    optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate)
+    for _ in range(args.epochs):
+        loss = F.cross_entropy(head(features[train]), labels[train])
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    with torch.no_grad():
+        prediction = head(features)[~train].argmax(-1)
+        truth = labels[~train]
+        confusion = [[int(((truth == i) & (prediction == j)).sum()) for j in range(2)] for i in range(2)]
+    output = Path(args.output)
+    torch.save(encoder.heads.state_dict(), output/"heads.pt")
+    metadata = json.loads((output/"training.json").read_text())
+    metadata["coverage"] = {"train": int(train.sum()), "dev": int((~train).sum()),
+        "dev_accuracy_before": before, "dev_accuracy": float((prediction == truth).float().mean()),
+        "dev_confusion": confusion, "loss": float(loss.detach())}
+    (output/"training.json").write_text(json.dumps(metadata, indent=2)+"\n")
+    print(json.dumps(metadata["coverage"]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("query", "evidence"))
+    parser.add_argument("stage", choices=("query", "coverage", "evidence"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--data", required=True)
     parser.add_argument("--output", required=True)
@@ -335,7 +375,7 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    {"query": train_query, "evidence": train_evidence}[args.stage](args)
+    {"query": train_query, "coverage": train_coverage, "evidence": train_evidence}[args.stage](args)
 
 
 if __name__ == "__main__":

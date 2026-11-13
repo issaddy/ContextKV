@@ -762,7 +762,8 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
             cursor += len(line)
         locations[identity] = offsets
         origin = unit.source_spans[0]
-        key = replace(origin.source_key, passage_id=origin.source_key.passage_id+":indexed-lines")
+        key = replace(origin.source_key,
+            passage_id=f"{origin.source_key.passage_id}:indexed-lines:{origin.start}:{origin.end}")
         body = "".join(f"[{number}; {len(tokenizer.encode(line, add_special_tokens=False))} tokens] {line}" + ("" if line.endswith("\n") else "\n")
                        for number, line in enumerate(lines))
         blocks.append(EvidenceBlock(key, "", unit.heading, body))

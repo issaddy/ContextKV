@@ -52,11 +52,15 @@ def source_address(block):
 
 
 def blocks_for_units(units, source_blocks):
-    sources = {block.key: block for block in source_blocks}
+    sources = {}
+    for block in source_blocks:
+        sources.setdefault(block.key, []).append(block)
     result = {}
     for unit in units:
         for span in unit.source_spans:
-            block = sources[span.source_key]
+            block = next(block for block in sources[span.source_key]
+                         if (block.span or (0, len(block.text)))[0] <= span.start
+                         and span.end <= (block.span or (0, len(block.text)))[1])
             base = block.span[0] if block.span else 0
             item = replace(block, text=block.text[span.start-base:span.end-base],
                            span=(span.start, span.end), token_ids=())
