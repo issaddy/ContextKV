@@ -186,7 +186,9 @@ class SharedEvidenceProvider:
             sparse_rows = [sparse.retrieve([text], legal_ids=legal_ids, top_k=self.candidate_k)
                            for text in query.search_texts]
             fused = reciprocal_rank_fusion([[context.document_id for context in rows]
-                                            for pair in zip(sparse_rows, dense_rows) for rows in pair])
+                for pair in zip(sparse_rows, dense_rows) for rows in pair],
+                weights=[weight for index in range(len(sparse_rows))
+                         for weight in ([1.0, 1.0] if index == 0 else [1.0/(len(sparse_rows)-1)]*2)])
             contexts = tuple(dense.by_id[identity] for identity, _ in fused[:self.candidate_k])
             if supplied_blocks is None:
                 keys = corpus.retrieved_keys(contexts)

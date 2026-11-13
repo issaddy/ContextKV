@@ -762,6 +762,8 @@ def semantic_evidence_projection(question, units):
         "all facts needed for the requested result. Preserve qualifying entities, directed relationships, "
         "exceptions, conditions, dates, units and versions together. For a complete list or a global relationship "
         "question, retain every relevant member or relationship in this batch, not just representative examples. "
+        "Keep each source's own entity/title with its relationships so different batches can be joined later. "
+        "Keep relevant cross-source relationships even when the other source is in a different batch. "
         "Apply the question's scope and eligibility restrictions, retaining the evidence for each qualifying result. "
         "Omit a source only after examining it and finding no relevant evidence. Do not answer the question or "
         "produce a selection ranking. Text must be copied exactly; occurrence is its zero-based occurrence "

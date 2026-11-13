@@ -71,6 +71,18 @@ async def collect(args):
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
+    source = [row for row in source if row["task_state"]["coverage_scope"] == "selected_sources" and not any(
+        need["operation"] in {"count", "sum", "group", "mean", "min", "max"} for need in row["task_state"]["needs"])]
+    selected = []
+    for split, count in (("train", args.train_states), ("dev", args.dev_states)):
+        groups = {}
+        for row in source:
+            if row["split"] == split:
+                groups.setdefault(row["conversation_id"], []).append(row)
+        ordered = [rows[index] for index in range(max(map(len, groups.values()), default=0))
+                   for rows in groups.values() if index < len(rows)]
+        selected.extend(ordered if count is None else ordered[:count])
+    source = selected
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
     query_encoder = SharedQueryEncoder(**config["shared"]["query"])
     kv_policy = (load_kv_policy(config["shared"]["runtime"]) if args.stage == "stop"
@@ -79,10 +91,6 @@ async def collect(args):
     if args.stage == "stop":
         from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
         await engine.profile_prepare("cold")
-        # Full-population arithmetic completes by its execution contract. The
-        # learned STOP action is trained on optional evidence expansion.
-        source = [row for row in source if row["task_state"]["coverage_scope"] == "selected_sources" and not any(need["operation"] in {
-            "count", "sum", "group", "mean", "min", "max"} for need in row["task_state"]["needs"])]
         evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
         roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
         sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
@@ -119,10 +127,6 @@ async def collect(args):
                 row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
             queries[row["task_id"]] = query
             if args.stage == "sets":
-                if all(need["operation"] in {"count", "sum", "group", "mean", "min", "max"}
-                       for need in row["task_state"]["needs"]):
-                    outputs.append((row, ()))
-                    return
                 by_id = {unit.unit_id: unit for unit in units}
                 observations = []
                 for number, chosen in enumerate(candidate_sets(by_id)):
@@ -227,6 +231,8 @@ def main():
     parser.add_argument("--gpu-devices", type=int, nargs="+", default=[4, 5, 6, 7])
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--train-states", type=int)
+    parser.add_argument("--dev-states", type=int)
     args = parser.parse_args()
     print(json.dumps(asyncio.run(collect(args))))
 

@@ -34,14 +34,10 @@ class EvidenceSelection:
 
 
 def working_history(query, history):
-    task = query.task
-    refs = list(task.working_history)
-    for need in task.needs:
-        refs.extend((*need.anchor_spans, *need.subject_refs))
-    for condition in task.conditions:
-        refs.extend(ref for ref in (condition.key_span, condition.predicate_span, *condition.value_spans)
-                    if ref is not None)
-    selected = {(ref.turn_id, ref.speaker) for ref in refs if ref.turn_id != task.current_turn_id}
+    # query_input already selected complete messages within the history budget.
+    # Preserve those visible messages; token-level predictions do not erase history.
+    selected = {(ref.turn_id, ref.speaker) for ref in query.token_refs
+                if ref is not None and ref.turn_id != query.task.current_turn_id}
     return tuple(replace(turn,
         user_text=turn.user_text if (turn.turn_id, "user") in selected else None,
         assistant_text=turn.assistant_text if (turn.turn_id, "assistant") in selected else None)
