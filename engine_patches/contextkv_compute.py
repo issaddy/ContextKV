@@ -88,7 +88,13 @@ class ComputeRuntime:
         metadata = dict(metadata)
         session = metadata['session_id']
         scope = metadata.get('cache_scope', 'shared')
-        request_demand = {(scope, item['source_id']): item for item in metadata.get('demand', ())}
+        self.costs = {**metadata.get('costs', {}), **self.costs}
+        ratio = float(metadata.get('recompute_ratio', .15))
+        prefill = self.costs.get('prefill_token_ms', 1.0)
+        replay = self.costs.get('recompute_token_ms', prefill)
+        marginal_value = max(0.0, prefill - ratio * replay)
+        request_demand = {(scope, item['source_id']): {**item, 'value_per_token_ms': marginal_value}
+                          for item in metadata.get('demand', ())}
         self.demands[session] = request_demand
         self._refresh_priorities()
         ids = tuple(req.origin_input_ids)
@@ -119,8 +125,7 @@ class ComputeRuntime:
                         new_gpu_pins += len(component.value)
                     node = node.parent
             blocks.append((source_id, start, end, match, block_ids))
-        costs = dict(metadata.get('costs', {}))
-        costs.update(self.costs)
+        costs = self.costs
         prefill = costs.get('prefill_token_ms', 1.0)
         build = costs.get('build_token_ms', prefill)
         score = costs.get('score_token_ms', prefill)
@@ -145,7 +150,7 @@ class ComputeRuntime:
             if item is not None and match.device_prefix_len+match.host_hit_length < len(block_ids):
                 consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, set()))[1]
                 consumers.update(item.get('consumer_ids', ()) or range(int(item.get('uses', 0))))
-        build_value = sum(length * len(consumers) * build for length, consumers in cold_consumers.values())
+        build_value = sum(length * len(consumers) * marginal_value for length, consumers in cold_consumers.values())
         quality_loss = float(metadata.get('quality_loss', 0.0))
         quality_price_ms = float(metadata.get('quality_price_ms', 0.0))
         mode = metadata.get('mode', 'auto')
@@ -285,18 +290,17 @@ class ComputeRuntime:
             state.transferred_ranges.append((block.work_start, block.work_end))
             self.source_nodes[block.source_id] = block.node
 
-    def _priority(self, source_id):
-        consumers, anonymous = set(), 0
+    def _consumers(self, source_id):
+        values = {}
         for session, scope in self.demands.items():
             item = scope.get(source_id)
-            if item is None:
-                continue
-            ids = item.get('consumer_ids', ())
-            consumers.update((session, consumer) for consumer in ids)
-            if not ids:
-                anonymous += int(item.get('uses', 0))
-        avoided_ms = self.costs.get('build_token_ms', 0.0)
-        return int(1000 * (len(consumers) + anonymous) * avoided_ms)
+            if item is not None:
+                for consumer in item.get('consumer_ids', ()) or range(int(item.get('uses', 0))):
+                    values[session, consumer] = item['value_per_token_ms']
+        return values
+
+    def _priority(self, source_id):
+        return int(1000 * sum(self._consumers(source_id).values()))
 
     def _refresh_priorities(self):
         self.demands = {session: scope for session, scope in self.demands.items() if scope}
@@ -311,17 +315,14 @@ class ComputeRuntime:
             if node is None:
                 del self.source_nodes[source_id]
             else:
-                consumers = set()
-                for session, scope in self.demands.items():
-                    item = scope.get(source_id)
-                    if item:
-                        consumers.update((session, consumer) for consumer in
-                            (item.get('consumer_ids', ()) or range(int(item.get('uses', 0)))))
+                consumers = self._consumers(source_id)
                 while node.parent is not None:
-                    nodes.setdefault(node.id, set()).update(consumers)
+                    values = nodes.setdefault(node.id, {})
+                    for consumer, value in consumers.items():
+                        values[consumer] = max(values.get(consumer, 0.0), value)
                     node = node.parent
         for node_id, consumers in nodes.items():
-            priority = int(1000 * len(consumers) * self.costs.get('build_token_ms', 0.0))
+            priority = int(1000 * sum(consumers.values()))
             self.cache.tree_core.node_by_id(node_id).priority = priority
             if priority:
                 self.prioritized_nodes.add(node_id)

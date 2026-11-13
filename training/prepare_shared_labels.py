@@ -25,6 +25,8 @@ Use the ID of the message actually containing the intended words. Do not return 
 needs: [{need_id,anchor_refs,subject_refs,operation,scope,condition_ids,predecessor_need_ids,query,join,distinct}].
 operation: lookup/enumerate/procedure/compare/count/sum/mean/min/max/group/infer; scope: selected_sources/all_supplied_documents.
 operation names the requested result: grouped totals use sum, grouped counts use count, and group means listing rows by category.
+scope describes the requested computation population. Ordinary lookup/procedure/inference uses selected_sources;
+all_supplied_documents is for an aggregate or complete listing across the declared documents, not a synonym for using evidence.
 Split independent requested results into separate Needs. query is a standalone search query for that Need.
 Give each Need one concise contiguous anchor reference; keep subjects and conditions in their own references.
 Every Need anchor must belong to current_message_id; history supplies subject, condition and history_refs.

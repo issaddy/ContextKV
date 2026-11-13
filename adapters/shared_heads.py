@@ -98,17 +98,15 @@ class EvidenceHeads(nn.Module):
 
     def utility_pooled(self, summed, count, total_score):
         means = summed / count.clamp_min(1)
-        features = torch.cat((summed, means, count, total_score), dim=-1)
-        return self.set_utility(features).squeeze(-1)
+        features = torch.cat((summed / (count + 1), means, count / (count + 1),
+                              total_score / count.clamp_min(1)), dim=-1)
+        values = self.set_utility(features).sigmoid()
+        empty = self.set_utility(torch.zeros_like(features)).sigmoid()
+        return (values - empty).squeeze(-1)
 
     def loss(self, embeddings, relevance, masks, qualities):
         predictions = self.utility(embeddings, relevance, masks)
         empty = (masks == 0).all(dim=-1)
         gains = qualities-qualities[empty].mean()
         loss = F.mse_loss(predictions, gains)
-        pair = gains[:, None] - gains[None, :]
-        ordered = pair > 0
-        if ordered.any():
-            margins = predictions[:, None] - predictions[None, :]
-            loss = loss + F.softplus(-margins[ordered]).mean()
-        return loss
+        return loss + F.kl_div(predictions.log_softmax(-1), gains.softmax(-1), reduction="sum")

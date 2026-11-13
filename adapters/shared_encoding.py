@@ -122,7 +122,7 @@ class EvidenceEncoding:
             self.relevance[~mask].mean().item() if len(rest) else 0.])
         return torch.cat((mean, maximum, remaining, stats))
 
-    def select(self, units, *, body_tokens):
+    def select(self, units, *, body_tokens, token_price=0.0):
         """Prune a joint evidence set by generator utility, retaining complementary groups."""
         import numpy as np
         import torch
@@ -170,7 +170,7 @@ class EvidenceEncoding:
                 pooled = torch.from_numpy(pooled).to(self.embeddings.device)
                 values = self.heads.utility_pooled(pooled[:, :width], pooled[:, width:width+1],
                     pooled[:, width+1:]).cpu().numpy()
-                gains = values[1:]-values[0]
+                gains = values[1:]-values[0] + token_price*removal_cost[candidates]
                 if cost > body_tokens:
                     index = int((gains/removal_cost[candidates].astype(values.dtype)).argmax())
                 else:

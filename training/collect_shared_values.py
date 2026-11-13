@@ -90,7 +90,7 @@ async def collect(args):
     outputs, answers, windows, queries = [], [], {}, {}
     limit = asyncio.Semaphore(args.concurrency)
 
-    async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None):
+    async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None, cache_scope=None):
         if args.stage == "stop":
             started = time.monotonic()
         request = compile_request(template, row["question"], working_history(queries[row["task_id"]], history(row)), source_blocks(units),
@@ -100,7 +100,7 @@ async def collect(args):
         scope = f"training:{row['task_id']}:"
         result = await engine.compute(request, session_id=scope, request_id=identity,
             max_new_tokens=config["execution"]["output_tokens"] if output_tokens is None else output_tokens, mode=mode,
-            cache_namespace=identity, cache_scope=scope,
+            cache_namespace=identity, cache_scope=cache_scope or scope,
             **kv_policy)
         item = {"source": row, "answer": result["text"]}
         if args.stage == "stop":
@@ -150,7 +150,8 @@ async def collect(args):
                 else:
                     encoded = encoded.merge(new)
                 observed = units[:start + len(fresh)]
-                chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"])
+                chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"],
+                    token_price=config["shared"]["runtime"]["prices"]["seconds"] * kv_policy["costs"]["prefill_token_ms"] / 1000)
                 transition_id = f"expand:{row['task_id']}:{start}"
                 windows[transition_id] = first, time.monotonic()
                 paid_seconds += windows[transition_id][1]-first
@@ -167,7 +168,8 @@ async def collect(args):
                         "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
                 selected = tuple(unit for unit in observed if unit.unit_id in chosen)
                 item = await answer(row, selected, f"stop:{row['task_id']}:{start}",
-                    future=units if start+len(fresh) < len(units) else (), mode=config["shared"]["runtime"]["kv_mode"])
+                    future=units if start+len(fresh) < len(units) else (), mode=config["shared"]["runtime"]["kv_mode"],
+                    cache_scope=f"training:{row['task_id']}:" if warm else f"stop:{row['task_id']}:{start}")
                 states.append({"features": features, "complete_scope": True, "answer": item})
             outputs.append((row, states))
 

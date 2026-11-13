@@ -47,6 +47,7 @@ class SharedEvidenceState:
     semantic_work: tuple = ()
     pending_units: tuple = ()
     body_tokens: int = 0
+    token_price: float = 0.0
 
 
 class SharedEvidenceProvider:
@@ -55,6 +56,9 @@ class SharedEvidenceProvider:
         settings, retrieval = config["shared"], config["retrieval"]
         self.query_encoder = SharedQueryEncoder(**settings["query"])
         self.evidence_encoder = SharedEvidenceEncoder(**settings["evidence"])
+        from controller.config import load_kv_policy
+        policy = load_kv_policy(settings["runtime"])
+        self.token_price = settings["runtime"]["prices"]["seconds"] * policy["costs"]["prefill_token_ms"] / 1000
         if retrieval.get("corpus_path"):
             self.sparse = BM25SRetriever.load(retrieval["sparse_index"])
             self.dense = DenseIndex.load(retrieval["dense_index"])
@@ -138,13 +142,16 @@ class SharedEvidenceProvider:
                 for family, version in versions.versions if (not families or family in families)
                 and version in wanted_versions)
             wanted_versions = tuple(dict.fromkeys((*wanted_versions, *filter(None, related)))) if intent.mode == "compare" else tuple(filter(None, related))
-        version_keys = versions.legal_keys(families=families, versions=wanted_versions, current=intent.mode == "current")
-        if intent.mode in {"explicit", "as_of"} and not wanted_versions:
+        as_of = query.text(intent.time_refs).strip() if intent.mode == "as_of" else None
+        version_keys = versions.legal_keys(families=families, versions=wanted_versions,
+            as_of=as_of, current=intent.mode == "current")
+        if intent.mode == "explicit" and not wanted_versions:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         query.task = replace(query.task, effective_source_scope=legal)
         complete_population = coverage_scope == "all_supplied_documents" or any(
-            need.scope == "all_supplied_documents" for need in query.task.needs)
+            need.scope == "all_supplied_documents" and need.operation in {"count", "sum", "mean", "min", "max", "group"}
+            for need in query.task.needs)
         full = complete_population and (supplied_blocks is not None or bool(families))
         if full:
             document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
@@ -219,7 +226,7 @@ class SharedEvidenceProvider:
         pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
         evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
-        selected = evidence.select(initial, body_tokens=available)
+        selected = evidence.select(initial, body_tokens=available, token_price=self.token_price)
         if complete_population and not full:
             # An open search collection is not the population supplied for computation.
             anchors = tuple(span.source_key for identity in selected for span in by_id[identity].source_spans)
@@ -252,11 +259,11 @@ class SharedEvidenceProvider:
                 usage["input_tokens"] += extra.usage["input_tokens"]
                 evidence = evidence.merge(extra)
             initial, pending = (*retained, *fresh), ()
-            selected = evidence.select(initial, body_tokens=available)
+            selected = evidence.select(initial, body_tokens=available, token_price=self.token_price)
             query.task = replace(query.task,
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
-            document_index, pending_units=tuple(pending), body_tokens=available)
+            document_index, pending_units=tuple(pending), body_tokens=available, token_price=self.token_price)
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
         context = QueryContext(question, "shared", task_state=query.task,
@@ -341,7 +348,7 @@ class SharedEvidenceProvider:
         new = self.evidence_encoder.encode(state.query, fresh)
         evidence = state.evidence.merge(new)
         units = (*state.pool.units, *fresh)
-        selected = evidence.select(units, body_tokens=state.body_tokens)
+        selected = evidence.select(units, body_tokens=state.body_tokens, token_price=state.token_price)
         fresh_ids = {unit.unit_id for unit in fresh}
         result = replace(state, evidence=evidence, pool=replace(state.pool, units=units), selected_ids=selected,
                          pending_units=tuple(unit for unit in state.pending_units if unit.unit_id not in fresh_ids))

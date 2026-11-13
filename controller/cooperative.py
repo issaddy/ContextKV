@@ -92,6 +92,7 @@ class CooperativeController:
 
     async def close_session(self, session_id):
         self._locks.pop(session_id, None)
+        self.native_state.pop(session_id, None)
 
     def _lock(self, session_id):
         lock = self._locks.get(session_id)
@@ -132,7 +133,7 @@ class CooperativeController:
                     **self.kv_policy, response_schema=schema)
                 meta = result["meta"]
                 native = meta["contextkv_compute"]
-                self.native_state = native
+                self.native_state[session_id] = native
                 totals["input_tokens"] += meta["prompt_tokens"]
                 totals["output_tokens"] += meta["completion_tokens"]
                 totals["elapsed_ms"] += result["elapsed_ms"]
@@ -169,7 +170,7 @@ class CooperativeController:
                             computed_needs.add(program.need_id)
                     complete_scope = required <= computed_needs
                     selected = selected_blocks(state)
-                    feature_state = self._value_state(state, totals, arrived, complete_scope)
+                    feature_state = self._value_state(state, totals, arrived, complete_scope, session_id)
                     action = self.stop.choose(state.evidence.summary(state.selected_ids), feature_state,
                         self.prices, can_continue=bool(state.pending_units), complete_scope=complete_scope)
                     if action == "continue":
@@ -305,11 +306,11 @@ class CooperativeController:
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", ""),
                                      *history_messages(snapshot.raw_history), Message("user", question)))
         body_tokens = min(state.body_tokens, self.policy.max_total_model_tokens-self.policy.max_new_tokens-len(fixed.input_ids))
-        state.selected_ids = state.evidence.select(state.pool.units, body_tokens=body_tokens)
+        state.selected_ids = state.evidence.select(state.pool.units, body_tokens=body_tokens, token_price=state.token_price)
         return selected_blocks(state)
 
-    def _value_state(self, state, totals, arrived, complete_scope):
-        native = self.native_state
+    def _value_state(self, state, totals, arrived, complete_scope, session_id):
+        native = {**self.kv_policy["costs"], **self.native_state.get(session_id, {})}
         row_count = sum(len(table.rows) for table in state.document_index.tables.values())
         return {"remaining_sources": len(state.pending_units),
                 "open_needs": len(state.semantic_work), "required_rows": row_count,

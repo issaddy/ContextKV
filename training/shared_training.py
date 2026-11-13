@@ -178,7 +178,7 @@ def train_query(args):
         "steps": steps, "loss": total/steps, "method": "rcem_shared_task_structure_alignment", "history_tokens": args.history_tokens}, indent=2)+"\n")
 
 
-def evidence_loss(encoder, query, units, row, *, field_only=False):
+def field_loss(encoder, query, units, row):
     import torch
     from torch.nn import functional as F
     from adapters.shared_heads import FIELD_ROLES
@@ -214,12 +214,6 @@ def evidence_loss(encoder, query, units, row, *, field_only=False):
                 target = bool(binding.get("relation_group")) and binding["relation_group"] == other.get("relation_group")
                 losses.append(F.binary_cross_entropy_with_logits(encoder.heads.join(vector, other_vector).squeeze(-1),
                                                                   states.new_tensor(target)))
-    unit_ids = [unit.unit_id for unit in units]
-    if not field_only and row.get("sets"):
-        candidates = row["sets"]
-        masks = states.new_tensor([[identity in candidate["unit_ids"] for identity in unit_ids] for candidate in candidates])
-        qualities = states.new_tensor([candidate["quality"] for candidate in candidates])
-        losses.append(encoder.heads.loss(embeddings, relevance, masks, qualities))
     return torch.stack(losses).mean()
 
 
@@ -231,40 +225,64 @@ def train_evidence(args):
     encoder.model.requires_grad_(False).eval()
     optimizer = torch.optim.AdamW(encoder.heads.parameters(), lr=args.learning_rate)
     training = [row for row in rows(args.data) if row["split"] == "train"
-                and ((row["task_state"]["needs"] and row["units"]) or (not args.field_only and row.get("sets")))]
+                and (bool(row["task_state"]["needs"] and row["units"]) if args.field_only else bool(row.get("sets")))]
     steps, total = 0, 0.
-    for _ in range(args.epochs):
+    if not args.field_only:
+        # The set collector uses inferred tasks. Encode that same query view once;
+        # only the lightweight set head changes across fitting epochs.
+        encoded = []
         for row in training:
             query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
                 catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
-            # Field supervision uses annotated Need ownership on the same visible input.
-            task = task_label(row)
-            with torch.no_grad():
-                features = query_encoder.heads.contextualize(query.token_states, query.token_states[-1])
-            def pool(refs):
-                indices = [i for i, token in enumerate(query.token_refs) if token is not None and any(
-                    token.turn_id == ref.turn_id and token.speaker == ref.speaker
-                    and token.start < ref.end and ref.start < token.end for ref in refs)]
-                return features[indices].mean(0)
-            query.task = task
-            query.need_vectors = (torch.nn.functional.normalize(query_encoder.heads.need_projection(
-                torch.stack([pool(need.anchor_spans) for need in task.needs])), dim=-1).detach()
-                if task.needs else query.token_states[:0])
-            query.condition_vectors = torch.stack([pool((condition.predicate_span or condition.key_span,))
-                for condition in task.conditions]).detach() if task.conditions else query.token_states[:0]
             units = tuple(decode(EvidenceUnit, item) for item in row["units"])
-            optimizer.zero_grad(set_to_none=True)
-            loss = evidence_loss(encoder, query, units, row, field_only=args.field_only)
-            loss.backward()
-            optimizer.step()
-            total += loss.item()
-            steps += 1
+            with torch.no_grad():
+                _, embeddings, relevance, _, _ = encoder.forward_evidence(query, units)
+            masks = embeddings.new_tensor([[unit.unit_id in item["unit_ids"] for unit in units] for item in row["sets"]])
+            qualities = embeddings.new_tensor([item["quality"] for item in row["sets"]])
+            encoded.append((embeddings, relevance, masks, qualities))
+        optimizer = torch.optim.AdamW([*encoder.heads.set_item.parameters(), *encoder.heads.set_utility.parameters()],
+                                      lr=args.learning_rate)
+        for _ in range(args.epochs):
+            for example in encoded:
+                optimizer.zero_grad(set_to_none=True)
+                loss = encoder.heads.loss(*example)
+                loss.backward()
+                optimizer.step()
+                total += loss.item()
+                steps += 1
+    else:
+        for _ in range(args.epochs):
+            for row in training:
+                query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
+                    catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
+                # Field supervision uses annotated Need ownership on the same visible input.
+                task = task_label(row)
+                with torch.no_grad():
+                    features = query_encoder.heads.contextualize(query.token_states, query.token_states[-1])
+                def pool(refs):
+                    indices = [i for i, token in enumerate(query.token_refs) if token is not None and any(
+                        token.turn_id == ref.turn_id and token.speaker == ref.speaker
+                        and token.start < ref.end and ref.start < token.end for ref in refs)]
+                    return features[indices].mean(0)
+                query.task = task
+                query.need_vectors = (torch.nn.functional.normalize(query_encoder.heads.need_projection(
+                    torch.stack([pool(need.anchor_spans) for need in task.needs])), dim=-1).detach()
+                    if task.needs else query.token_states[:0])
+                query.condition_vectors = torch.stack([pool((condition.predicate_span or condition.key_span,))
+                    for condition in task.conditions]).detach() if task.conditions else query.token_states[:0]
+                units = tuple(decode(EvidenceUnit, item) for item in row["units"])
+                optimizer.zero_grad(set_to_none=True)
+                loss = field_loss(encoder, query, units, row)
+                loss.backward()
+                optimizer.step()
+                total += loss.item()
+                steps += 1
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     torch.save(encoder.heads.state_dict(), output / "heads.pt")
     (output / "training.json").write_text(json.dumps({"model": args.model, "states": len(training),
         "steps": steps, "loss": total/steps, "method": "shared_fields_generator_set_utility",
-        "quality_target": "answer_quality_minus_empty"}, indent=2)+"\n")
+        "quality_target": "bounded_answer_gain_listwise", "phase": "fields" if args.field_only else "sets"}, indent=2)+"\n")
 
 
 def main():
