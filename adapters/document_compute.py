@@ -538,7 +538,6 @@ class SemanticBinding:
     instruction: str
     schema: dict
     decode: object
-    output_tokens: int | None = None
 
 
 def _query_description(query, need_ids):
@@ -757,13 +756,12 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None):
 
 
 def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer):
-    """Select indexed original lines; the model never reconstructs source text."""
+    """Select original line indices; the model never reconstructs source text."""
     import json
     from dataclasses import replace
     from controller.schema import EvidenceBlock
     from controller.source_windows import numbered_lines
-    units = tuple(units)
-    identities, blocks, locations, choices = {}, [], {}, []
+    identities, blocks, locations, properties = {}, [], {}, {}
     for index, unit in enumerate(units):
         identity = f"S{index+1}"
         identities[identity] = unit
@@ -773,47 +771,36 @@ def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer)
         key = replace(origin.source_key,
             passage_id=f"{origin.source_key.passage_id}:indexed-lines:{origin.start}:{origin.end}")
         blocks.append(EvidenceBlock(key, "", unit.heading, body))
-        bound = {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}
-        choices.append({"type": "object", "properties": {"source": {"const": identity},
-            "first_line": bound, "last_line": bound}, "required": ["source", "first_line", "last_line"],
-            "additionalProperties": False})
-    line_count = sum(map(len, locations.values()))
-    schema = {"type": "object", "properties": {"evidence": {"type": "array", "maxItems": line_count, "items": {"oneOf": choices}}},
-              "required": ["evidence"], "additionalProperties": False}
-    instruction = ("Examine every supplied source. Select the original line ranges containing the fields and "
-        "statements needed to answer the question. Preserve source entity/title, relevant attributes, directed "
-        "relationships, conditions, exceptions, dates, units and versions. Retain facts needed to decide eligibility "
-        "even when they are negative or ambiguous; the final answer decides which members satisfy the conditions. "
-        "For global relationships keep relevant cross-source links even when the other source is in another batch. "
-        "Exclude only material unrelated to the requested fields or relationships. Return source IDs and inclusive "
-        "line ranges, not copied text, summaries, final answers or rankings. Merge adjacent selected lines into one range. "
+        properties[identity] = {"type": "array", "maxItems": len(offsets),
+            "items": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}}
+    schema = {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+    instruction = ("Examine every supplied source. For each source ID return the selected original line numbers "
+        "containing the fields and statements needed to answer the question. Use an empty list for unrelated sources. "
+        "Preserve source entity/title, relevant attributes, directed relationships, conditions, exceptions, dates, "
+        "units and versions. Retain facts needed to decide eligibility even when they are negative or ambiguous; "
+        "the final answer decides which members satisfy the conditions. For global relationships keep relevant "
+        "cross-source links even when the other source is in another batch. Return each selected line number once, "
+        "in original order. Return only source IDs and arrays of line numbers, without copied text or explanations. "
         f"The selected original lines share a budget of {retained_tokens} tokens; their token counts are shown. "
-        "Keep the necessary facts and leave unrelated lines out.\nQuestion: " + question)
+        "Keep necessary facts and leave unrelated lines out.\nQuestion: " + question)
 
     def decode_evidence(text):
-        ranges = {}
-        for entry in json.loads(text)["evidence"]:
-            first, last = sorted((entry["first_line"], entry["last_line"]))
-            offsets = locations[entry["source"]]
-            ranges.setdefault(entry["source"], []).append((offsets[first][0], offsets[last][1]))
+        selected = json.loads(text)
         result = []
-        for identity in identities:
-            merged = []
-            for left, right in sorted(ranges.get(identity, ())):
-                if merged and left <= merged[-1][1]:
-                    merged[-1] = merged[-1][0], max(right, merged[-1][1])
+        for identity, unit in identities.items():
+            offsets, merged = locations[identity], []
+            for number in sorted(set(selected[identity])):
+                left, right = offsets[number]
+                if merged and left == merged[-1][1]:
+                    merged[-1] = merged[-1][0], right
                 else:
                     merged.append((left, right))
-            unit = identities[identity]
             origin = unit.source_spans[0]
             result.extend(EvidenceBlock(origin.source_key, "", unit.heading, unit.text[left:right],
                 span=(origin.start+left, origin.start+right)) for left, right in merged)
         return tuple(result)
 
-    largest = {"evidence": [{"source": identity, "first_line": len(offsets)-1, "last_line": len(offsets)-1}
-        for identity, offsets in locations.items() for _ in offsets]}
-    output_tokens = len(tokenizer.encode(json.dumps(largest, separators=(",", ":")), add_special_tokens=False))
-    return SemanticBinding(tuple(blocks), instruction, schema, decode_evidence, output_tokens)
+    return SemanticBinding(tuple(blocks), instruction, schema, decode_evidence)
 
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""

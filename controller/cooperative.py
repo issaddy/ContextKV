@@ -348,7 +348,7 @@ class CooperativeController:
             request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                 projection.blocks, instruction=projection.instruction,
                 system_prompt=self.policy.system_prompt or SYSTEM)
-            output_tokens = min(projection.output_tokens, self.settings.get("semantic_output_tokens", 8192),
+            output_tokens = min(self.settings.get("semantic_output_tokens", 8192),
                                 self.policy.max_total_model_tokens-len(request.input_ids))
             result = await complete(request, f"coverage:{number}", schema=projection.schema, output_tokens=output_tokens)
             for block in projection.decode(result["text"]):
