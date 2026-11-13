@@ -7,6 +7,7 @@ generation:
   teacher_url: http://127.0.0.1:30000
 scoring:
   python: python3
+  gpu_devices: [5]
   official_checkout: data/mtrag-official
   max_tokens: 2048
   ragas_json_schema: true
