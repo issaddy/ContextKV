@@ -27,6 +27,9 @@ def source_window_spans(text, tokenizer, *, tokens=SOURCE_WINDOW_TOKENS):
     Only the original text and reader tokenizer determine boundaries. A source
     row longer than the window is split; adjacent ordinary rows stay together.
     """
+    if len(tokenizer.encode(text, add_special_tokens=False)) <= tokens:
+        return ((0, len(text)),) if text else ()
+
     def size(start, end):
         return len(tokenizer.encode(text[start:end], add_special_tokens=False))
 
