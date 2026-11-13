@@ -178,11 +178,12 @@ async def collect(args):
                     "answer_cost_ms": costs.estimate(chosen),
                     **{name: native.get(name, 0) for name in ("queue_depth", "gpu_ready_tokens", "host_ready_tokens",
                         "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
-                selected = tuple(unit for unit in observed if unit.unit_id in chosen)
+                by_id = {unit.unit_id: unit for unit in observed}
+                selected = tuple(by_id[identity] for identity in chosen)
                 item = await answer(row, selected, f"stop:{row['task_id']}:{start}",
                     future=units if start+len(fresh) < len(units) else (), mode=config["shared"]["runtime"]["kv_mode"],
                     cache_scope=f"training:{row['task_id']}:" if warm else f"stop:{row['task_id']}:{start}")
-                states.append({"features": features, "complete_scope": True, "answer": item})
+                states.append({"features": features, "answer": item})
             outputs.append((row, states))
 
     try:
@@ -209,7 +210,7 @@ async def collect(args):
             states = []
             for state in observed:
                 item = state["answer"]
-                value = {"features": state["features"], "complete_scope": state["complete_scope"],
+                value = {"features": state["features"],
                          "stop": {"quality": item["quality"], **item["costs"]}}
                 if "transition_id" in state:
                     identity = state["transition_id"]

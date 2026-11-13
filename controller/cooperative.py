@@ -147,38 +147,34 @@ class CooperativeController:
                 required = {need.need_id for need in state.query.task.needs
                             if need.operation in {"count", "sum", "mean", "min", "max"}}
                 population = state.query.task.coverage_scope == "all_supplied_documents"
-                while True:
-                    if not population:
-                        await self._select_evidence(state, snapshot, computations)
-                    outside = state.document_index.outside_tables(state.pool.units)
-                    if not outside:
-                        from adapters.shared_retrieval import need_scope_signature
-                        for program in state.programs:
-                            if program.need_id in computed_needs or not self._population_complete(state.document_index, program):
-                                continue
-                            result = state.document_index.execute(program)
-                            record = computation_record(program, result)
-                            record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
-                            record["conditions"] = record["scope"]["conditions"]
-                            computations.append(record)
-                            computed_needs.add(program.need_id)
-                    complete_scope = required <= computed_needs
-                    selected = selected_blocks(state)
-                    feature_state = self._value_state(state, totals, arrived, complete_scope, session_id)
-                    action = ("answer" if population else self.stop.choose(
+                # Stop controls optional evidence acquisition. Required document
+                # computation runs once, after the candidate set is settled.
+                while not population:
+                    await self._select_evidence(state, snapshot, computations)
+                    feature_state = self._value_state(state, totals, arrived, required <= computed_needs, session_id)
+                    action = self.stop.choose(
                         state.evidence.summary(state.selected_ids), feature_state, self.prices,
-                        can_continue=bool(state.pending_units), complete_scope=complete_scope))
-                    if action == "continue":
-                        state = await provider.expand(state)
-                        auxiliary = {**auxiliary,
-                            "compute_ms": auxiliary["compute_ms"] + state.evidence.usage["compute_ms"]}
-                        continue
-                    if not complete_scope:
-                        unfinished = {need.need_id for need in state.query.task.needs} - computed_needs
-                        computations.extend(await self._compute_documents(state, unfinished,
-                                                                           snapshot, complete,
-                            selected if any(need.need_id not in required for need in state.query.task.needs) else ()))
-                    break
+                        can_continue=bool(state.pending_units))
+                    if action == "finish":
+                        break
+                    state = await provider.expand(state)
+                    auxiliary = {**auxiliary,
+                        "compute_ms": auxiliary["compute_ms"] + state.evidence.usage["compute_ms"]}
+                selected = selected_blocks(state)
+                if not state.document_index.outside_tables(state.pool.units):
+                    from adapters.shared_retrieval import need_scope_signature
+                    for program in state.programs:
+                        if program.need_id in computed_needs or not self._population_complete(state.document_index, program):
+                            continue
+                        result = state.document_index.execute(program)
+                        record = computation_record(program, result)
+                        record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
+                        computations.append(record)
+                        computed_needs.add(program.need_id)
+                if not required <= computed_needs:
+                    unfinished = {need.need_id for need in state.query.task.needs} - computed_needs
+                    computations.extend(await self._compute_documents(state, unfinished, snapshot, complete,
+                        selected if any(need.need_id not in required for need in state.query.task.needs) else ()))
                 if population and (not state.query.task.needs or any(
                         need.need_id not in {item["need_id"] for item in computations} for need in state.query.task.needs)):
                     selected = await self._population_sources(state, snapshot, computations, complete)
@@ -298,7 +294,6 @@ class CooperativeController:
                 raise ValueError(f"document population incomplete for {program.need_id}")
             record = computation_record(program, result)
             record["scope"] = need_scope_signature(state.query, program.need_id, index)
-            record["conditions"] = record["scope"]["conditions"]
             computations.append(record)
         if {item["need_id"] for item in computations} != need_ids:
             raise ValueError("requested document computation has no complete source population")

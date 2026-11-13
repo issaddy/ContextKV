@@ -522,7 +522,8 @@ def build_programs(query, evidence, index):
                 continue
         if need.operation == "group" and not grouping:
             continue
-        population = tuple(index.tables) if need.scope == "all_supplied_documents" else tuple(
+        population = tuple(index.tables) if "all_supplied_documents" in (
+            query.task.coverage_scope, need.scope) else tuple(
             projection.table_id for projection in projections)
         unresolved = tuple(identity for identity in need.condition_ids
             if conditions[identity].relation_type != "VERSION" and identity not in mapped_conditions)
@@ -627,7 +628,8 @@ def decode_programs(text, query, index):
             tuple(field_binding(field) for field in projection["fields"]),
             tuple(Predicate(**predicate) for predicate in projection["predicates"]))
             for projection in item["projections"])
-        population = tuple(index.tables) if need.scope == "all_supplied_documents" else tuple(
+        population = tuple(index.tables) if "all_supplied_documents" in (
+            query.task.coverage_scope, need.scope) else tuple(
             projection.table_id for projection in projections)
         result.append(DocumentProgram(need.need_id, projections, population, item["operation"],
             item["value_field"], tuple(item["entity_fields"]),

@@ -28,8 +28,7 @@ def lambda_targets(model, trajectory, prices, trace_lambda):
     predicted, tails = model(features)
     count = len(rows)
     observed = torch.stack([observed_values(row["stop"], model.mean.device) for row in rows])
-    mask = torch.tensor([[row["complete_scope"], index < count-1]
-                         for index, row in enumerate(rows)], device=model.mean.device)
+    mask = torch.tensor([[True, index < count-1] for index in range(count)], device=model.mean.device)
     target = torch.zeros_like(predicted)
     target[:, 0] = observed
     realised_seconds = torch.zeros_like(tails)

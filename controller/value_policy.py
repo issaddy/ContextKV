@@ -52,14 +52,12 @@ class StopValueHead(nn.Module):
         return torch.cat((summary, summary.new_tensor([state[name] for name in STATE_FIELDS])))
 
     @torch.inference_mode()
-    def choose(self, summary, state, prices, *, can_continue, complete_scope):
+    def choose(self, summary, state, prices, *, can_continue):
         if not can_continue:
-            return "answer"
-        if not complete_scope:
-            return "continue"
+            return "finish"
         values, tails = self(self.features(summary, state).to(self.mean.device))
         utilities = prices.utility(values, tails)
-        return "continue" if utilities[1] > utilities[0] else "answer"
+        return "continue" if utilities[1] > utilities[0] else "finish"
 
     def save(self, path):
         torch.save({"summary_size": self.summary_size, "hidden_size": self.hidden_size,

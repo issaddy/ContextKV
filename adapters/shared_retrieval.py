@@ -25,7 +25,7 @@ def computation_signature(program):
 def need_scope_signature(query, need_id, index):
     need = next(item for item in query.task.needs if item.need_id == need_id)
     conditions = [item for item in query.task.conditions if item.condition_id in need.condition_ids]
-    return {"operation": need.operation, "request": query.text(need.anchor_spans).strip().casefold(),
+    return {"operation": need.operation, "request": query.task.raw_question.strip().casefold(),
         "subjects": [query.text((ref,)).strip().casefold() for ref in need.subject_refs],
         "conditions": [{"type": item.relation_type, "key": query.text((item.key_span,)) if item.key_span else "",
             "values": [query.text((ref,)) for ref in item.value_spans],
