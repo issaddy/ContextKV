@@ -75,12 +75,6 @@ class QueryEncoding:
         return " ".join(self.texts[(ref.turn_id, ref.speaker)][ref.start:ref.end] for ref in merged)
 
     @property
-    def pooled(self):
-        index = max(i for i, ref in enumerate(self.token_refs)
-                    if ref is not None and ref.turn_id == self.task.current_turn_id and ref.speaker == "user")
-        return self.token_states[index]
-
-    @property
     def coverage_vector(self):
         positions = [i for i, ref in enumerate(self.token_refs)
                      if ref is not None and ref.turn_id == self.task.current_turn_id and ref.speaker == "user"]
