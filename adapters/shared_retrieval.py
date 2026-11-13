@@ -133,9 +133,9 @@ class SharedEvidenceProvider:
         corpus, directory, sparse, dense, versions = self.corpus, self.directory, self.sparse, self.dense, self.versions
         cached = None
         if supplied_blocks is not None:
-            supplied_blocks = tuple(replace(block,
-                title=block.title or next((line.strip().lstrip("#").strip()
-                    for line in block.text.splitlines() if line.strip()), "")) for block in supplied_blocks)
+            supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + (block.title or next(
+                (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")))
+                for index, block in enumerate(supplied_blocks))
             key = tuple(block.key for block in supplied_blocks)
             if key not in self._supplied:
                 supplied_corpus = CorpusIndex(supplied_blocks, corpus_id=self.corpus.corpus_id,

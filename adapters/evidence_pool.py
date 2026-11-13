@@ -80,7 +80,8 @@ class SourceDirectory:
                     unit.source_spans[0].start < base+anchor.end and base+anchor.start < unit.source_spans[0].end
                     for anchor in anchors))
                 units = [replace(unit, table_id=metadata.get("table_id") or table_id,
-                    heading=" / ".join(span.text for span in row.parent_path) or unit.heading,
+                    heading=" / ".join(filter(None, (block.title,
+                        " / ".join(span.text for span in row.parent_path)))) or unit.heading,
                     dependencies=tuple(dict.fromkeys((*unit.dependencies,
                         *(identity for identity in dependency_ids if identity != unit.unit_id)))))
                     if unit.source_spans[0].start < base+row.row_span.end
