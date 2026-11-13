@@ -346,10 +346,8 @@ class DocumentIndex:
             for span in (self.tables[table_id].coverage or (self.tables[table_id].source,)))
         complete = (set(program.population_table_ids) <= set(covered) | set(program.excluded_table_ids)
                     and not program.unresolved_conditions)
-        claims, groups = [], {}
+        claims = []
         for index, record in enumerate(records):
-            group = _record_key(record, program.group_by)
-            groups.setdefault(group, []).append(index)
             entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(index)
             sources = _record_sources(record)
             value = record.fields[program.value_field].text if program.value_field else {name: c.text for name, c in record.fields.items()}
@@ -361,6 +359,9 @@ class DocumentIndex:
                 version=" / ".join(dict.fromkeys(s.source_key.version for s in sources))))
         if program.operation == "lookup" or not complete:
             return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete)
+        groups = {}
+        for index, record in enumerate(records):
+            groups.setdefault(_record_key(record, program.group_by), []).append(index)
         if not groups and not program.group_by:
             groups[()] = []
         conclusions = []
@@ -852,6 +853,8 @@ def combine_populations(parts):
     """Normalize table and prose projections, then aggregate each Need once."""
     tables, blocks, grouped = [], {}, {}
     for part_index, (index, program) in enumerate(parts):
+        if program.operation == "lookup":
+            program = replace(program, group_by=())
         blocks.update(index.blocks)
         rows = []
         names = ("entity", "measure", *(f"group:{i}" for i in range(len(program.group_by))))
