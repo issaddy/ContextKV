@@ -102,11 +102,12 @@ class CooperativeController:
     def executor(self, session_id, request_id, totals, *, cache_scope="shared", cache_namespace=None):
         async def complete(request, name, *, schema=None, output_tokens=None):
             output_tokens = self.policy.max_new_tokens if output_tokens is None else output_tokens
-            if len(request.input_ids) + output_tokens > self.policy.max_total_model_tokens:
-                raise ValueError("selected evidence and results exceed the answer window")
-            if (totals["input_tokens"] + totals["output_tokens"] + len(request.input_ids) + output_tokens
-                    > self.settings["max_total_tokens"]):
-                raise ValueError("the remaining computation exceeds the request token budget")
+            remaining = self.settings["max_total_tokens"]-totals["input_tokens"]-totals["output_tokens"]
+            answer_output = self.policy.max_new_tokens if schema is not None else 0
+            output_tokens = min(output_tokens, self.policy.max_total_model_tokens-len(request.input_ids),
+                                remaining-len(request.input_ids)-answer_output)
+            if output_tokens <= 0:
+                raise ValueError("the request input exhausts the remaining token budget")
             result = await self.engine.compute(request, session_id=session_id,
                 request_id=f"{request_id}:{totals['calls']}:{name}", max_new_tokens=output_tokens,
                 mode=self.settings.get("kv_mode", "auto") if self.dialogue_mode == "contextkv" else "exact",
