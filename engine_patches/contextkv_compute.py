@@ -385,7 +385,9 @@ class ComputeRuntime:
         stats = req.time_stats
         elapsed = (stats.completion_time - stats.scheduler_recv_time) * 1000
         output_count = len(req.output_ids_through_stop)
-        self.output_tokens_mean = (.8 * (self.output_tokens_mean or output_count) + .2 * output_count)
+        # A length-capped prefill/warmup is a censored sample, not a short answer.
+        if req.finished_reason.to_json()['type'] == 'stop':
+            self.output_tokens_mean = (.8 * (self.output_tokens_mean or output_count) + .2 * output_count)
         if output_count > 1:
             name = state.mode + '_decode_token_ms'
             measured = (stats.completion_time - stats.prefill_finished_time) * 1000 / (output_count - 1)

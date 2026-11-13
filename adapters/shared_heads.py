@@ -70,14 +70,13 @@ class QueryHeads(nn.Module):
 
 
 class EvidenceHeads(nn.Module):
-    def __init__(self, hidden_size=1024, query_size=1024, embedding_size=512):
+    def __init__(self, hidden_size=1024, query_size=1024):
         super().__init__()
         self.query = nn.Sequential(nn.LayerNorm(query_size), nn.Linear(query_size, hidden_size, bias=False))
         self.field = nn.Linear(hidden_size, len(FIELD_ROLES) * 3)
         self.binding = ScaledBilinear(hidden_size, hidden_size, len(FIELD_ROLES))
         self.join = ScaledBilinear(hidden_size, hidden_size, 1)
-        self.set_item = nn.Sequential(nn.Linear(embedding_size, 256), nn.GELU(), nn.Linear(256, 256))
-        self.set_utility = nn.Sequential(nn.Linear(256 * 2 + 2, 128), nn.GELU(), nn.Linear(128, 1))
+        self.set_utility = nn.Sequential(nn.Linear(3, 16), nn.GELU(), nn.Linear(16, 1))
 
     def field_logits(self, states, need_vectors):
         queries = F.layer_norm(self.query(need_vectors), (states.shape[-1],))
@@ -87,19 +86,18 @@ class EvidenceHeads(nn.Module):
         return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
 
     def utility(self, embeddings, relevance, selected):
-        return self.utility_encoded(self.set_item(embeddings), relevance, selected)
-
-    def utility_encoded(self, encoded, relevance, selected):
-        mask = selected.to(encoded.dtype)
+        mask = selected.to(embeddings.dtype)
         count = mask.sum(-1, keepdim=True)
-        summed = mask @ encoded
+        summed = mask @ embeddings
         total_score = mask @ relevance[:, None]
         return self.utility_pooled(summed, count, total_score)
 
     def utility_pooled(self, summed, count, total_score):
         means = summed / count.clamp_min(1)
-        features = torch.cat((summed / (count + 1), means, count / (count + 1),
-                              total_score / count.clamp_min(1)), dim=-1)
+        # Frozen Jina relevance and mean-vector coherence transfer across domains;
+        # the small head learns their generator utility and set-size interaction.
+        features = torch.cat((total_score / count.clamp_min(1),
+                              means.square().sum(-1, keepdim=True), count / (count + 1)), dim=-1)
         values = self.set_utility(features).sigmoid()
         empty = self.set_utility(torch.zeros_like(features)).sigmoid()
         return (values - empty).squeeze(-1)

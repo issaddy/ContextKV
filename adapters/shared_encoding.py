@@ -146,7 +146,7 @@ class EvidenceEncoding:
         active = np.ones(count, dtype=bool)
         chosen = (1 << count)-1
         with torch.no_grad():
-            encoded = self.heads.set_item(self.embeddings)
+            encoded = self.embeddings
             width = encoded.shape[-1]
             vectors = torch.cat((encoded, self.relevance[:, None]), dim=-1).cpu().numpy()
             items = np.empty((count, width+2), dtype=np.float64)
@@ -492,7 +492,11 @@ class SharedEvidenceEncoder:
         self.heads = EvidenceHeads(self.model.config.hidden_size).to(device)
         if not train or asset_path is not None:
             path = Path(asset_path)
-            self.heads.load_state_dict(torch.load(path / "heads.pt", map_location=device, weights_only=True))
+            weights = torch.load(path / "heads.pt", map_location=device, weights_only=True)
+            if train:
+                weights = {**self.heads.state_dict(),
+                           **{name: value for name, value in weights.items() if not name.startswith("set_")}}
+            self.heads.load_state_dict(weights)
         self.model.train(train)
         self.heads.train(train)
         self.batch_tokens = batch_tokens

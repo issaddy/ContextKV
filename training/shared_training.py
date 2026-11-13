@@ -240,8 +240,7 @@ def train_evidence(args):
             masks = embeddings.new_tensor([[unit.unit_id in item["unit_ids"] for unit in units] for item in row["sets"]])
             qualities = embeddings.new_tensor([item["quality"] for item in row["sets"]])
             encoded.append((embeddings, relevance, masks, qualities))
-        optimizer = torch.optim.AdamW([*encoder.heads.set_item.parameters(), *encoder.heads.set_utility.parameters()],
-                                      lr=args.learning_rate)
+        optimizer = torch.optim.AdamW(encoder.heads.set_utility.parameters(), lr=args.learning_rate)
         for _ in range(args.epochs):
             for example in encoded:
                 optimizer.zero_grad(set_to_none=True)
