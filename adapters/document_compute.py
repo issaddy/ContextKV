@@ -239,14 +239,16 @@ class DocumentIndex:
                     table.caption.text if table.caption else block.title))
         return cls(tables, blocks)
 
-    def project(self, projection):
+    def project(self, projection, required_fields=()):
         table = self.tables[projection.table_id]
+        required = {*required_fields, *(predicate.field for predicate in projection.predicates)}
         records = []
         for row in table.rows:
-            fields = {field.name: (replace(row[field.column], unit=field.unit,
+            fields = {name: cell for name, cell in zip(table.headers, row) if name in required}
+            fields.update({field.name: (replace(row[field.column], unit=field.unit,
                 qualifiers=(*row[field.column].qualifiers, field.unit_source))
                 if field.unit_source is not None and not row[field.column].unit else row[field.column])
-                for field in projection.fields}
+                for field in projection.fields})
             sources = _unique_spans(span for cell in fields.values() for span in _cell_sources(cell))
             record = _Record(fields, sources)
             if all(_matches(record, predicate) for predicate in projection.predicates):
@@ -302,7 +304,10 @@ class DocumentIndex:
 
     def records(self, program):
         """Materialize only the projected, joined and selected fields."""
-        projected = tuple(self.project(projection) for projection in program.projections)
+        required = {program.value_field, *program.entity_fields, *program.group_by, *program.distinct,
+                    *(predicate.field for predicate in program.predicates),
+                    *(name for join in program.joins for name in (*join.left_fields, *join.right_fields))}
+        projected = tuple(self.project(projection, required) for projection in program.projections)
         if program.joins:
             records = projected[0]
             for join in program.joins:
