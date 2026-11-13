@@ -278,9 +278,7 @@ def _structured_radbench(official, operation, provider, model, input_path, outpu
     try:
         rows = load_jsonl(input_path)
         score = partial(operation, provider, model)
-        shards = [rows]
-        if workers == 2 and len(rows) > 1:
-            shards = [rows[::2], rows[1::2]]
+        shards = [rows[index::workers] for index in range(min(workers, len(rows)))]
         if len(shards) == 1:
             score(input_path, output_path)
         else:
@@ -422,8 +420,6 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
         raise ValueError("official source checkout is not the frozen MTRAG revision")
     if not model or not judge_revision or not endpoint:
         raise ValueError("HTTP scoring requires model, judge revision and endpoint")
-    if rb_llm_workers not in {1, 2}:
-        raise ValueError("RB_llm requires one or two workers")
     if ragas_max_tokens is not None and (
             not ragas_json_schema or type(ragas_max_tokens) is not int or ragas_max_tokens <= 0):
         raise ValueError("ragas_max_tokens requires ragas_json_schema and a positive integer budget")
@@ -455,6 +451,7 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     sys.path.insert(0, str(root / "scripts/evaluation"))
     official = importlib.import_module("judge_wrapper")
     loader = official.load_chat_openai_llm
+    run_config = official.RunConfig
     extract_json = pydantic_prompt.extract_json
     if ragas_json_schema:
         # Native structured output is already JSON, including braces inside strings.
@@ -462,12 +459,16 @@ def run_http_evaluator(checkout, input_path, output_directory, *, model, judge_r
     official.load_chat_openai_llm = lambda name, max_new_tokens=None: create_http_judge(
         name, endpoint, max_tokens=max_tokens, enable_thinking=enable_thinking,
         ragas_json_schema=ragas_json_schema, ragas_max_tokens=ragas_max_tokens)
+    # The upstream local-model path serializes RAGAS. HTTP requests can share
+    # the same native batch scheduler as RB_llm, without changing its metric.
+    official.RunConfig = lambda **kwargs: run_config(**{**kwargs, "max_workers": rb_llm_workers})
     try:
         result = score_http_stages(official, model, input_path, output,
                                    answerability_adjustment=answerability_adjustment, metrics=metrics,
                                    rb_llm_workers=rb_llm_workers)
     finally:
         official.load_chat_openai_llm = loader
+        official.RunConfig = run_config
         pydantic_prompt.extract_json = extract_json
     return result
 

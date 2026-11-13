@@ -92,13 +92,14 @@ class EvidenceCosts:
 
     def _native(self, addresses):
         costs = self.costs
+        transfer = costs.get("transfer_token_ms", costs["prefill_token_ms"] * .05)
         tokens = self.prompt_tokens + sum(self.lengths[address]+20 for address in addresses)
         saved = 0.0
         for prefix in self.snapshot["prefixes"]:
             chain = tuple(prefix["source_ids"])
             if addresses[:len(chain)] == chain:
                 saved = max(saved, prefix["gpu_tokens"]*costs["prefill_token_ms"] +
-                    prefix["host_tokens"]*(costs["prefill_token_ms"]-costs.get("transfer_token_ms", 0)))
+                    prefix["host_tokens"]*(costs["prefill_token_ms"]-transfer))
         return max(0.0, tokens*costs["prefill_token_ms"]-saved) + self.output_tokens*costs["exact_decode_token_ms"]
 
     def order(self, ids):
@@ -130,7 +131,8 @@ class EvidenceCosts:
                 cold += length
         body = sum(self.lengths[address] for address in addresses)
         prompt = self.prompt_tokens+20*len(addresses)
-        infoflow = (cold*costs["build_token_ms"] + host*costs.get("transfer_token_ms", 0) +
+        transfer = costs.get("transfer_token_ms", costs["prefill_token_ms"] * .05)
+        infoflow = (cold*costs["build_token_ms"] + host*transfer +
             prompt*costs["score_token_ms"] + (prompt+self.ratio*body)*costs["recompute_token_ms"] +
             self.output_tokens*costs["infoflow_decode_token_ms"] + self.quality_cost)
         return infoflow if self.mode == "infoflow" else min(native, infoflow)
