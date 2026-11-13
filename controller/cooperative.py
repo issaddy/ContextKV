@@ -158,12 +158,14 @@ class CooperativeController:
                 population = state.query.task.coverage_scope == "all_supplied_documents"
                 while True:
                     await self.prepare_state(state, snapshot, complete)
-                    feature_state = self._value_state(state, totals, arrived, session_id)
-                    if population or state.budget_exhausted or self.stop.choose(
-                        state.evidence.summary(state.selected_ids, state.pool.units,
-                            tuple(need.need_id for need in state.query.task.needs), state.completed_needs),
-                        feature_state, self.prices,
-                        can_continue=bool(state.pending_units)) == "finish":
+                    if population or state.budget_exhausted or not state.pending_units:
+                        break
+                    def continuation():
+                        summary = state.evidence.summary(state.selected_ids, state.pool.units,
+                            tuple(need.need_id for need in state.query.task.needs), state.completed_needs)
+                        return self.stop.choose(summary, self._value_state(state, totals, arrived, session_id),
+                                                self.prices, can_continue=True)
+                    if await asyncio.to_thread(continuation) == "finish":
                         break
                     state = await provider.expand(state)
                     auxiliary = {**auxiliary,
@@ -389,12 +391,15 @@ class CooperativeController:
         native = (state.costs.snapshot if state.costs is not None else
             await self.engine.evidence_state(tuple(source_address(block) for block in (*state.source_headers, *blocks)),
                 cache_scope=state.cache_scope, cache_namespace=state.cache_namespace))
-        state.costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
-            native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
-            policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers)
-        state.selected_ids = (() if closed else state.evidence.select(units, body_tokens=budget,
-            cost_model=state.costs, seconds_price=self.prices.seconds,
-            need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed))
+        def select():
+            costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
+                native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
+                policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers)
+            ids = (() if closed else state.evidence.select(units, body_tokens=budget,
+                cost_model=costs, seconds_price=self.prices.seconds,
+                need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed))
+            return costs, ids
+        state.costs, state.selected_ids = await asyncio.to_thread(select)
 
     async def _population_sources(self, state, snapshot, computations, complete):
         from adapters.document_compute import semantic_evidence_projection
