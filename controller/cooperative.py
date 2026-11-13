@@ -298,7 +298,7 @@ class CooperativeController:
         from .schema import Message, history_messages
         import json
         numeric = {item["need_id"] for item in computations}
-        if all(need.need_id in numeric for need in state.query.task.needs):
+        if computations and all(need.need_id in numeric for need in state.query.task.needs):
             return ()
         question = state.query.task.raw_question
         if computations:
