@@ -142,10 +142,11 @@ class SharedEvidenceProvider:
                 for family, version in versions.versions if (not families or family in families)
                 and version in wanted_versions)
             wanted_versions = tuple(dict.fromkeys((*wanted_versions, *filter(None, related)))) if intent.mode == "compare" else tuple(filter(None, related))
-        as_of = query.text(intent.time_refs).strip() if intent.mode == "as_of" else None
+        # The catalogue head resolves as_of text to version IDs during the shared
+        # query pass; natural-language date spans are not sortable timestamps.
         version_keys = versions.legal_keys(families=families, versions=wanted_versions,
-            as_of=as_of, current=intent.mode == "current")
-        if intent.mode == "explicit" and not wanted_versions:
+            current=intent.mode == "current")
+        if intent.mode in {"explicit", "as_of"} and not wanted_versions:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         query.task = replace(query.task, effective_source_scope=legal)
