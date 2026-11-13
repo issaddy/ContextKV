@@ -43,6 +43,8 @@ class Cell:
     header: SourceSpan | None = None
     unit: str = ""
     qualifiers: tuple[SourceSpan, ...] = ()
+    label: str = ""
+    qualifier_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,10 +203,25 @@ def _matches(record, predicate):
 class DocumentIndex:
     def __init__(self, tables, blocks=()):
         self.tables = {table.table_id: table for table in tables}
-        self.blocks = {block.key: block for block in blocks}
+        self.blocks = tuple(blocks)
 
     @classmethod
     def from_blocks(cls, blocks):
+        grouped = {}
+        for block in blocks:
+            grouped.setdefault(block.key, []).append(block)
+        blocks = []
+        for windows in grouped.values():
+            merged = []
+            for block in sorted(windows, key=lambda item: (item.span or (0, len(item.text)))[0]):
+                start, end = block.span or (0, len(block.text))
+                if merged and start <= merged[-1].span[1]:
+                    previous = merged[-1]
+                    merged[-1] = replace(previous, text=previous.text+block.text[max(0, previous.span[1]-start):],
+                                         span=(previous.span[0], max(previous.span[1], end)), token_ids=())
+                else:
+                    merged.append(replace(block, span=(start, end)))
+            blocks.extend(merged)
         blocks = tuple(blocks)
         tables = []
         for block in blocks:
@@ -225,15 +242,17 @@ class DocumentIndex:
                     if table.caption:
                         notes = (table.caption, *notes)
                     qualifiers = tuple(_span(block, s.start, s.end) for s in notes)
+                    qualifier_texts = tuple(s.text for s in notes)
                     row = rows.setdefault(row_key, [None] * len(headers))
                     row[0] = Cell(relation.object.text,
                         _span(block, relation.object.start, relation.object.end),
-                        None if flat else header_spans[0], qualifiers=qualifiers)
+                        None if flat else header_spans[0], qualifiers=qualifiers,
+                        label=headers[0], qualifier_texts=qualifier_texts)
                     column = columns[relation.column.start, relation.column.end] + int(flat)
                     row[column] = Cell(relation.value.text,
                         _span(block, relation.value.start, relation.value.end),
                         _span(block, relation.column.start, relation.column.end),
-                        _literal_unit(relation), qualifiers)
+                        _literal_unit(relation), qualifiers, relation.column.text, qualifier_texts)
                 tables.append(DocumentTable(table_id, headers, header_spans,
                     tuple(tuple(row) for row in rows.values()), source,
                     table.caption.text if table.caption else block.title))
@@ -285,7 +304,9 @@ class DocumentIndex:
         """Encode headers and a small literal row sample; compute over all rows later."""
         units = []
         for table in self.tables.values():
-            block = self.blocks[table.source.source_key]
+            block = next(block for block in self.blocks if block.key == table.source.source_key
+                         and (block.span or (0, len(block.text)))[0] <= table.source.start
+                         and table.source.end <= (block.span or (0, len(block.text)))[1])
             base = block.span[0] if block.span else 0
             spans = [span for span in table.header_spans if span is not None]
             spans.extend(cell.source for row in table.rows[:sample_rows] for cell in row)
@@ -356,7 +377,11 @@ class DocumentIndex:
                 "extract", text="; ".join(f"{name}={c.text}" for name, c in record.fields.items()),
                 value=value, unit=unit, conditions=program.condition_ids,
                 source_spans=sources, operation="project", entity=entity, relation=program.value_field,
-                version=" / ".join(dict.fromkeys(s.source_key.version for s in sources))))
+                version=" / ".join(dict.fromkeys(s.source_key.version for s in sources)),
+                attributes=tuple((name, cell.label, cell.text, cell.unit) for name, cell in record.fields.items()
+                                 if name not in program.entity_fields),
+                qualifiers=tuple(dict.fromkeys(text for cell in record.fields.values()
+                                               for text in cell.qualifier_texts))))
         if program.operation == "lookup" or not complete:
             return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete)
         groups = {}
@@ -390,10 +415,14 @@ class DocumentIndex:
                 raise ValueError(f"unknown document operation: {program.operation}")
             parents = tuple(claims[i].claim_id for i in indices)
             spans = _unique_spans(span for i in indices for span in claims[i].source_spans) or scope
+            labels = tuple(dict.fromkeys(record.fields[program.value_field].label for record in selected
+                                          if program.value_field and record.fields[program.value_field].label))
             conclusions.append(EvidenceClaim(f"document:{program.need_id}:result:{group_index}",
                 program.need_id, "derived", text=str(value), value=value, unit=unit,
                 conditions=program.condition_ids, source_spans=spans, operation=program.operation,
-                parent_claim_ids=parents, entity=" / ".join(group), relation=program.value_field))
+                parent_claim_ids=parents, entity=" / ".join(group), relation=" / ".join(labels) or program.value_field,
+                qualifiers=tuple(dict.fromkeys(text for record in selected for cell in record.fields.values()
+                                               for text in cell.qualifier_texts))))
         return DocumentResult(tuple(claims), tuple(conclusions), covered, scope, complete)
 
 
@@ -592,7 +621,7 @@ def _word_blocks(units):
         "", unit.heading, numbered_text(unit.text)[0]) for unit in units)
 
 
-def semantic_binding_schema(index, need_ids):
+def semantic_binding_schema(index, need_ids, operations=None):
     def array(item):
         return {"type": "array", "items": item}
     def obj(properties):
@@ -605,14 +634,16 @@ def semantic_binding_schema(index, need_ids):
         "name": string, "column": {"type": "integer", "minimum": 0},
         "unit_span": {"anyOf": [{"type": "null"}, _word_address_schema(index.binding_units())]}})),
         "predicates": array(predicate)})
-    return obj({"programs": array(obj({"need_id": {"enum": list(need_ids)},
-        "operation": {"enum": ["lookup", "group", "count", "sum", "mean", "min", "max"]},
+    programs = {identity: obj({
+        "operation": ({"const": operations[identity]} if operations and identity in operations else
+                      {"enum": ["lookup", "group", "count", "sum", "mean", "min", "max"]}),
         "projections": array(projection), "value_field": string, "entity_fields": array(string),
         "predicates": array(predicate), "joins": array(obj({
             "right_index": {"type": "integer", "minimum": 1},
             "left_fields": array(string), "right_fields": array(string)})),
         "group_by": array(string), "distinct": array(string), "unresolved_conditions": array(string),
-        "excluded_table_ids": array({"enum": list(index.tables)})}))})
+        "excluded_table_ids": array({"enum": list(index.tables)})}) for identity in need_ids}
+    return obj({"programs": obj(programs)})
 
 
 def decode_programs(text, query, index):
@@ -626,15 +657,13 @@ def decode_programs(text, query, index):
             return Field(field["name"], field["column"])
         text, span = _word_source(fragments[address[0]], address)
         return Field(field["name"], field["column"], text, span)
-    for item in json.loads(text)["programs"]:
-        need = needs[item["need_id"]]
+    for identity, item in json.loads(text)["programs"].items():
+        need = needs[identity]
         projections = tuple(Projection(projection["table_id"],
             tuple(field_binding(field) for field in projection["fields"]),
             tuple(Predicate(**predicate) for predicate in projection["predicates"]))
             for projection in item["projections"])
-        population = tuple(index.tables) if "all_supplied_documents" in (
-            query.task.coverage_scope, need.scope) else tuple(
-            projection.table_id for projection in projections)
+        population = tuple(index.tables)
         result.append(DocumentProgram(need.need_id, projections, population, item["operation"],
             item["value_field"], tuple(item["entity_fields"]),
             tuple(Predicate(**predicate) for predicate in item["predicates"]),
@@ -644,7 +673,7 @@ def decode_programs(text, query, index):
     return tuple(result)
 
 
-def semantic_binding(query, index, need_ids):
+def semantic_binding(query, index, need_ids, *, operations=None):
     """Bind a document program from schema and examples, without reading all rows."""
     import json
     units = index.binding_units()
@@ -669,7 +698,7 @@ def semantic_binding(query, index, need_ids):
         + json.dumps({"task": _query_description(query, need_ids), "tables": catalogue,
                          "sources": [{"unit_id": f"S{i+1}", "table_id": unit.table_id} for i, unit in enumerate(units)]},
                      ensure_ascii=False, separators=(",", ":")))
-    return SemanticBinding(blocks, instruction, semantic_binding_schema(index, need_ids),
+    return SemanticBinding(blocks, instruction, semantic_binding_schema(index, need_ids, operations),
                            lambda text: decode_programs(text, query, index))
 
 
@@ -725,14 +754,18 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
                 entity_text, entity_source = unit.source_spans[0].source_key.document_id, unit.source_spans[0]
             else:
                 entity_text, entity_source = source(record["entity"])
-            qualifiers = tuple(source(address)[1] for address in record["qualifiers"])
+            qualified = tuple(source(address) for address in record["qualifiers"])
+            qualifier_texts = tuple(text for text, _ in qualified)
+            qualifiers = tuple(span for _, span in qualified)
             unit_text, unit_source = source(record["unit"]) if record["unit"] else ("", None)
             if unit_source is not None:
                 qualifiers = (*qualifiers, unit_source)
-            entity = Cell(entity_text, entity_source, qualifiers=qualifiers)
+            entity = Cell(entity_text, entity_source, qualifiers=qualifiers, qualifier_texts=qualifier_texts)
             measure_text, measure_source = source(record["measure"]) if record["measure"] else ("", entity_source)
-            measure = Cell(measure_text, measure_source, unit=unit_text, qualifiers=qualifiers)
-            groups = tuple(Cell(*source(address), qualifiers=qualifiers) for address in record["group"])
+            measure = Cell(measure_text, measure_source, unit=unit_text, qualifiers=qualifiers,
+                           qualifier_texts=qualifier_texts)
+            groups = tuple(Cell(*source(address), qualifiers=qualifiers, qualifier_texts=qualifier_texts)
+                           for address in record["group"])
             grouped[record["entity"][0]].append((entity, measure, *groups))
         projections = []
         for identity, rows in grouped.items():
@@ -769,7 +802,8 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         "When the requested entity is the document itself, use [source_id]; its identifier is shown "
         "below and the CPU binds that document identity. Otherwise use original word indices for the entity. "
         "A record can serve several Need IDs: extract it once and list all applicable IDs. "
-        "Apply the original question's entity, period and conditions in this same pass. Retain units and qualifiers "
+        "Apply the original question's entity, period and conditions in this same pass. Include the measure's "
+        "field label, period and conditions in qualifiers. Retain units and qualifiers "
         "from source headings or notes. Do not produce totals, summaries or a second selection list. "
         "Examine each source completely. No matching field in a window is an empty projection; other windows "
         "can supply it. Follow the question's missing-data policy. Report unresolved Need IDs for ambiguous "
@@ -836,7 +870,7 @@ def merge_projections(projections):
     tables, blocks, programs = {}, {}, {}
     for projection in projections:
         tables.update(projection.index.tables)
-        blocks.update(projection.index.blocks)
+        blocks.update(((block.key, block.span), block) for block in projection.index.blocks)
         for program in projection.programs:
             previous = programs.get(program.need_id)
             if previous is not None:
@@ -855,13 +889,18 @@ def combine_populations(parts):
     for part_index, (index, program) in enumerate(parts):
         if program.operation == "lookup":
             program = replace(program, group_by=())
-        blocks.update(index.blocks)
+        blocks.update(((block.key, block.span), block) for block in index.blocks)
         rows = []
         names = ("entity", "measure", *(f"group:{i}" for i in range(len(program.group_by))))
         for position, record in enumerate(index.records(program)):
             sources = record.sources
             entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(position)
-            row = [Cell(entity, sources[0], qualifiers=sources[1:])]
+            represented = {*program.entity_fields, program.value_field, *program.group_by}
+            context = tuple(dict.fromkeys((
+                *(text for cell in record.fields.values() for text in cell.qualifier_texts),
+                *(f"{cell.label or name}: {cell.text}" for name, cell in record.fields.items()
+                  if name not in represented))))
+            row = [Cell(entity, sources[0], qualifiers=sources[1:], qualifier_texts=context)]
             if program.value_field:
                 cell = record.fields[program.value_field]
                 row.append(cell)

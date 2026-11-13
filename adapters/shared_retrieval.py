@@ -1,7 +1,7 @@
 """Scope-first retrieval and shared evidence encoding for the cooperative executor."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import time
 
 from adapters.corpus import CorpusIndex
@@ -31,8 +31,8 @@ def need_scope_signature(query, need_id, index):
             "values": [query.text((ref,)) for ref in item.value_spans],
             "operator": query.filter_operators[item.condition_id]} for item in conditions],
         "join": need_id in query.join_needs, "distinct": need_id in query.distinct_needs,
-        "sources": [[key.corpus_id, key.document_id, key.passage_id, key.version]
-                    for key in index.blocks]}
+        "sources": [[block.key.corpus_id, block.key.document_id, block.key.passage_id, block.key.version,
+                     *(block.span or (0, len(block.text)))] for block in index.blocks]}
 
 
 @dataclass
@@ -44,11 +44,34 @@ class SharedEvidenceState:
     document_index: DocumentIndex
     programs: tuple = ()
     reused_claims: tuple = ()
-    semantic_work: tuple = ()
     pending_units: tuple = ()
     body_tokens: int = 0
     population_units: tuple = ()
     costs: object = None
+    computations: tuple = ()
+    table_parts: tuple = ()
+    table_read: bool = False
+    projections: tuple = ()
+    read_units: set = field(default_factory=set)
+    processed_tables: set = field(default_factory=set)
+    resolved_operations: dict = field(default_factory=dict)
+    prepared_programs: tuple = ()
+    cache_scope: str = "shared"
+    cache_namespace: str | None = None
+
+    @property
+    def completed_needs(self):
+        return {record["need_id"] for record in self.computations if record["complete"]}
+
+    @property
+    def open_needs(self):
+        selected = [unit for unit in self.pool.units if unit.unit_id in self.selected_ids]
+        supported = {binding.need_id for binding in self.evidence.bindings if binding.role == "source" and any(
+            span.source_key == binding.source_span.source_key and span.start <= binding.source_span.start
+            and binding.source_span.end <= span.end for unit in selected for span in unit.source_spans)}
+        return tuple(need for need in self.query.task.needs if need.need_id not in self.completed_needs
+                     and (need.operation in {"count", "sum", "mean", "min", "max", "group"}
+                          or need.need_id not in supported))
 
 
 class SharedEvidenceProvider:
@@ -274,6 +297,7 @@ class SharedEvidenceProvider:
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units)
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
+        state.computations = state.reused_claims
         context = QueryContext(question, "shared", task_state=query.task,
             history_turns=tuple(dict.fromkeys(ref.turn_id for ref in query.task.working_history)))
         usage["compute_ms"] = (time.perf_counter()-started)*1000
@@ -338,12 +362,10 @@ class SharedEvidenceProvider:
                 return True
         return not query.task.needs
 
-    def _finish_state(self, state):
+    @staticmethod
+    def _finish_state(state):
         from adapters.document_compute import build_programs
         state.programs = build_programs(state.query, state.evidence, state.document_index)
-        programmed = {program.need_id for program in state.programs}
-        state.semantic_work = tuple(need for need in state.query.task.needs
-            if need.need_id not in programmed and need.operation in {"count", "sum", "mean", "min", "max", "group", "infer", "compare"})
 
     async def expand(self, state):
         return await run_retrieval_worker(self._expand_state, state)

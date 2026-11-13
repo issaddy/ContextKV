@@ -143,6 +143,8 @@ class EvidenceClaim:
     relation: str = ""
     version: str = ""
     shared_need_ids: tuple[str, ...] = ()
+    attributes: tuple[tuple[str, str, str, str], ...] = ()
+    qualifiers: tuple[str, ...] = ()
 
     def serves(self, need_id):
         return need_id == self.need_id or need_id in self.shared_need_ids

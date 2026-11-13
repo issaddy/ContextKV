@@ -51,7 +51,7 @@ def task_loss(encoder, row, prepared=None):
                              if ref is not None and ref.turn_id == row["turn"] and ref.speaker == "user")
         states, logits = encoder.forward_input(inputs, query_position)
     else:
-        refs, catalog_positions, states, query_position = prepared
+        refs, catalog_positions, states, query_position, alignment_targets = prepared
         logits = encoder.heads(states, states[query_position])
     device = states.device
     if row.get("coverage_only"):
@@ -142,6 +142,11 @@ def task_loss(encoder, row, prepared=None):
             losses.append(F.binary_cross_entropy_with_logits(value, states.new_tensor(row_metadata[field] in expected)))
 
     if prepared is not None:
+        if len(need_vectors):
+            aligned = F.normalize(torch.cat((states[query_position:query_position+1],
+                encoder.heads.need_projection(need_vectors))), dim=-1)
+            losses.append(torch.linalg.vector_norm(aligned-alignment_targets, dim=-1).mean())
+            losses.append((F.pdist(aligned)-F.pdist(alignment_targets)).abs().mean())
         return torch.stack(losses).mean()
     # Conversational/rewrite and ordinary-query identity pairs share the frozen base space.
     # Documents are always encoded with adapters disabled, so their space stays fixed directly.
@@ -188,7 +193,15 @@ def train_query(args):
                 query_position = max(i for i, ref in enumerate(refs)
                     if ref is not None and ref.turn_id == row["turn"] and ref.speaker == "user")
                 states, _ = encoder.forward_input(inputs, query_position)
-            prepared[row["task_id"]] = refs, positions, states, query_position
+                targets = states[:0]
+                if not row.get("coverage_only"):
+                    texts = [row["rewritten_query"], *row["need_queries"]]
+                    batch = encoder.tokenizer(["Instruct: Retrieve evidence for the question.\nQuery: "+text
+                        for text in texts], padding=True, return_tensors="pt").to(encoder.model.device)
+                    with encoder.model.disable_adapter():
+                        base = encoder.model(**batch, use_cache=False).last_hidden_state[:, -1].float()
+                    targets = torch.nn.functional.normalize(base, dim=-1)
+            prepared[row["task_id"]] = refs, positions, states, query_position, targets
     random.seed(args.seed)
     steps, total = 0, 0.
     for _ in range(args.epochs):
@@ -208,6 +221,39 @@ def train_query(args):
         "steps": steps, "loss": total/steps,
         "method": "shared_task_heads" if args.heads_only else "rcem_shared_task_structure_alignment",
         "history_tokens": args.history_tokens}, indent=2)+"\n")
+
+
+def align_annotations(predicted, annotated):
+    """Match predicted and labelled objects by their original message coordinates."""
+    edges = []
+    for gold, target in enumerate(annotated):
+        for guess, spans in enumerate(predicted):
+            overlap = sum(max(0, min(a.end, b.end)-max(a.start, b.start))
+                          for a in target for b in spans if (a.turn_id, a.speaker) == (b.turn_id, b.speaker))
+            if overlap:
+                size = sum(ref.end-ref.start for ref in (*target, *spans))
+                edges.append((overlap/(size-overlap), gold, guess))
+    matched, used = {}, set()
+    for _, gold, guess in sorted(edges, reverse=True):
+        if gold not in matched and guess not in used:
+            matched[gold] = guess
+            used.add(guess)
+    return matched
+
+
+def inferred_field_labels(query, row):
+    task = task_label(row)
+    needs = align_annotations([need.anchor_spans for need in query.task.needs],
+                              [need.anchor_spans for need in task.needs])
+    conditions = align_annotations([(condition.predicate_span or condition.key_span,)
+                                    for condition in query.task.conditions],
+                                   [(condition.predicate_span or condition.key_span,) for condition in task.conditions])
+    need_ids = {task.needs[gold].need_id: query.task.needs[guess].need_id for gold, guess in needs.items()}
+    condition_ids = {task.conditions[gold].condition_id: query.task.conditions[guess].condition_id
+                     for gold, guess in conditions.items()}
+    return {**row, "bindings": [{**binding, "need_id": need_ids[binding["need_id"]],
+        "condition_id": condition_ids.get(binding.get("condition_id"), "")}
+        for binding in row["bindings"] if binding["need_id"] in need_ids]}
 
 
 def field_loss(encoder, query, units, row):
@@ -287,24 +333,12 @@ def train_evidence(args):
             for row in training:
                 query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
                     catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
-                # Field supervision uses annotated Need ownership on the same visible input.
-                task = task_label(row)
-                with torch.no_grad():
-                    features = query_encoder.heads.contextualize(query.token_states, query.pooled)
-                def pool(refs):
-                    indices = [i for i, token in enumerate(query.token_refs) if token is not None and any(
-                        token.turn_id == ref.turn_id and token.speaker == ref.speaker
-                        and token.start < ref.end and ref.start < token.end for ref in refs)]
-                    return features[indices].mean(0)
-                query.task = task
-                query.need_vectors = (torch.nn.functional.normalize(query_encoder.heads.need_projection(
-                    torch.stack([pool(need.anchor_spans) for need in task.needs])), dim=-1).detach()
-                    if task.needs else query.token_states[:0])
-                query.condition_vectors = torch.stack([pool((condition.predicate_span or condition.key_span,))
-                    for condition in task.conditions]).detach() if task.conditions else query.token_states[:0]
+                if not query.task.needs:
+                    continue
+                labelled = inferred_field_labels(query, row)
                 units = tuple(decode(EvidenceUnit, item) for item in row["units"])
                 optimizer.zero_grad(set_to_none=True)
-                loss = field_loss(encoder, query, units, row)
+                loss = field_loss(encoder, query, units, labelled)
                 loss.backward()
                 optimizer.step()
                 total += loss.item()

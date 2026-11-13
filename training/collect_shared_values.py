@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -11,10 +12,11 @@ from urllib.parse import urlparse
 
 import yaml
 
-from controller.config import create_model_template, load_config, load_kv_policy
-from controller.cooperative_request import EvidenceCosts, compile_request, source_address, working_history
+from controller.config import create_model_template, load_config, apply_study_config
+from controller.cooperative import CooperativeController, execution_totals
+from controller.cooperative_request import compile_request, working_history
 from controller.engine_client import SGLangEngineClient
-from controller.schema import EvidenceBlock, EvidenceUnit, TurnRecord
+from controller.schema import EvidenceBlock, EvidencePool, EvidenceUnit, SessionSnapshot, TurnRecord
 from controller.serialization import decode
 from training.shared_collection import candidate_sets
 from training.shared_training import conversation
@@ -67,12 +69,11 @@ async def score_answers(rows, endpoint, *, model, concurrency):
 
 async def collect(args):
     config = yaml.safe_load(Path(args.config).read_text())
-    run = load_config(config["generation"]["run_config"])
+    run = apply_study_config(load_config(config["generation"]["run_config"]), config)
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
-    source = [row for row in source if row["task_state"]["coverage_scope"] == "selected_sources" and not any(
-        need["operation"] in {"count", "sum", "group", "mean", "min", "max"} for need in row["task_state"]["needs"])]
+    source = [row for row in source if row["task_state"]["coverage_scope"] == "selected_sources"]
     selected = []
     for split, count in (("train", args.train_states), ("dev", args.dev_states)):
         groups = {}
@@ -84,108 +85,105 @@ async def collect(args):
         selected.extend(ordered if count is None else ordered[:count])
     source = selected
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
+    from adapters.shared_retrieval import SharedEvidenceState, SharedEvidenceProvider
+    from adapters.document_compute import DocumentIndex
     query_encoder = SharedQueryEncoder(**config["shared"]["query"])
-    kv_policy = (load_kv_policy(config["shared"]["runtime"]) if args.stage == "stop"
-                 else {"recompute_ratio": config["shared"]["runtime"]["recompute_ratio"]})
-    evidence_encoder = None
+    evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
+    controller = CooperativeController(None, engine, template, settings=run.cooperative, policy=run.context)
+    kv_policy = controller.kv_policy
     if args.stage == "stop":
         from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
         await engine.profile_prepare("cold")
-        evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
         roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
         sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
         await sampler.start()
-    outputs, answers, windows, queries = [], [], {}, {}
+    outputs, answers, windows = [], [], {}
     limit = asyncio.Semaphore(args.concurrency)
 
-    async def answer(row, units, identity, *, future=(), mode="exact", output_tokens=None, cache_scope=None,
-                     cache_namespace=None):
-        if args.stage == "stop":
-            started = time.monotonic()
-        request = compile_request(template, row["question"], working_history(queries[row["task_id"]], history(row)), source_blocks(units),
-                                  future_sources=source_blocks(future))
-        # A branch's residency quote and generation use the same source and prefix namespaces.
-        scope = f"training:{row['task_id']}:"
-        result = await engine.compute(request, session_id=scope, request_id=identity,
-            max_new_tokens=config["execution"]["output_tokens"] if output_tokens is None else output_tokens, mode=mode,
-            cache_namespace=cache_namespace or identity, cache_scope=cache_scope or scope,
-            **kv_policy)
+    def state_for(query, encoded, observed, all_units, identity):
+        blocks = source_blocks(observed)
+        state = SharedEvidenceState(replace(query), encoded, EvidencePool(tuple(observed), blocks), (),
+            DocumentIndex.from_blocks(source_blocks(all_units)), body_tokens=config["selection"]["body_tokens"],
+            population_units=tuple(observed) if query.task.coverage_scope == "all_supplied_documents" else (),
+            cache_scope=identity, cache_namespace=identity)
+        SharedEvidenceProvider._finish_state(state)
+        return state
+
+    async def answer(row, state, snapshot, identity, previous_totals):
+        started = time.monotonic()
+        totals = dict(previous_totals)
+        complete = controller.executor(identity, identity, totals,
+            cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
+        request = await controller.answer_request(state, snapshot, complete)
+        result = await complete(request, "answer")
         item = {"source": row, "answer": result["text"]}
         if args.stage == "stop":
             windows[identity] = started, time.monotonic()
-            item.update(call_id=identity, costs={"seconds": windows[identity][1]-started},
-                        native=result["meta"]["contextkv_compute"])
+            item.update(call_id=identity, costs={"seconds": windows[identity][1]-started})
         answers.append(item)
         return item
 
     async def collect_state(row, index):
         async with limit:
             units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
-            if args.stage == "stop":
-                query_started = time.monotonic()
+            started = time.monotonic()
             query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
                 row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
-            queries[row["task_id"]] = query
+            if query.task.coverage_scope == "all_supplied_documents":
+                return
+            snapshot = SessionSnapshot(row["task_id"], raw_history=working_history(query, history(row)))
+            totals = execution_totals()
             if args.stage == "sets":
-                by_id = {unit.unit_id: unit for unit in units}
+                encoded = await asyncio.to_thread(evidence_encoder.encode, query, units)
+                state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare")
+                complete = controller.executor(state.cache_scope, state.cache_scope, totals,
+                    cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
+                await controller.read_required(state, snapshot, complete)
                 observations = []
-                for number, chosen in enumerate(candidate_sets(by_id)):
-                    item = await answer(row, tuple(by_id[identity] for identity in chosen),
-                                        f"sets:{row['task_id']}:{number}")
+                for number, chosen in enumerate(candidate_sets(encoded.unit_ids)):
+                    identity = f"sets:{row['task_id']}:{number}"
+                    branch = replace(state, selected_ids=chosen, cache_scope=identity, cache_namespace=identity)
+                    item = await answer(row, branch, snapshot, identity, totals)
                     observations.append((chosen, item))
                 outputs.append((row, observations))
                 return
             from controller.value_policy import StopValueHead
-            paid_seconds = time.monotonic()-query_started
+            paid_seconds = time.monotonic()-started
             warm = index % 2 == 1
-            encoded, states = None, []
+            state, encoded, states = None, None, []
             batch_size = min(args.batch_size, max(1, len(units) // 2))
             for start in range(0, len(units), batch_size):
                 branch_id = f"stop:{row['task_id']}:{start}"
-                native = dict(kv_policy["costs"])
                 if warm:
-                    warmup = await answer(row, units, f"warm:{row['task_id']}:{start}", future=units,
-                        mode=config["shared"]["runtime"]["kv_mode"], output_tokens=1,
-                        cache_scope=branch_id, cache_namespace=branch_id)
-                    native.update(warmup["native"])
-                    answers.remove(warmup)
+                    request = compile_request(template, row["question"], snapshot.raw_history,
+                        source_blocks(units), future_sources=source_blocks(units))
+                    warmed = await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
+                        max_new_tokens=1, mode=config["shared"]["runtime"]["kv_mode"],
+                        cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
+                    controller.native_state[branch_id] = warmed["meta"]["contextkv_compute"]
                 first = time.monotonic()
-                fresh = units[start:start + batch_size]
-                new = await asyncio.to_thread(evidence_encoder.encode, query, fresh)
-                if encoded is None:
-                    encoded = new
+                fresh = units[start:start+batch_size]
+                new = await asyncio.to_thread(evidence_encoder.encode, query if state is None else state.query, fresh)
+                encoded = new if encoded is None else encoded.merge(new)
+                observed = units[:start+len(fresh)]
+                if state is None:
+                    state = state_for(query, encoded, observed, units, branch_id)
                 else:
-                    encoded = encoded.merge(new)
-                observed = units[:start + len(fresh)]
-                blocks = source_blocks(observed)
-                native_view = await engine.evidence_state(tuple(source_address(block) for block in blocks),
+                    state = replace(state, evidence=encoded, pool=EvidencePool(observed, source_blocks(observed)),
+                        costs=None, cache_scope=branch_id, cache_namespace=branch_id)
+                    SharedEvidenceProvider._finish_state(state)
+                state.pending_units = units[len(observed):]
+                complete = controller.executor(branch_id, branch_id+":work", totals,
                     cache_scope=branch_id, cache_namespace=branch_id)
-                fixed = compile_request(template, row["question"], working_history(query, history(row)), ())
-                costs = EvidenceCosts(observed, blocks, template.tokenizer, native_view,
-                    prompt_tokens=len(fixed.input_ids), output_tokens=config["execution"]["output_tokens"],
-                    policy=kv_policy, mode=config["shared"]["runtime"]["kv_mode"])
-                chosen = encoded.select(observed, body_tokens=config["selection"]["body_tokens"], cost_model=costs,
-                    seconds_price=config["shared"]["runtime"]["prices"]["seconds"])
+                await controller.prepare_state(state, snapshot, complete)
                 transition_id = f"expand:{row['task_id']}:{start}"
                 windows[transition_id] = first, time.monotonic()
                 paid_seconds += windows[transition_id][1]-first
                 if states:
                     states[-1]["transition_id"] = transition_id
-                count = sum(unit.body_tokens for unit in observed if unit.unit_id in chosen)
-                features = StopValueHead.features(encoded.summary(chosen), {
-                    "remaining_sources": len(units)-len(observed),
-                    "open_needs": sum(need.operation in {"infer", "compare"} for need in query.task.needs),
-                    "required_rows": 0, "processed_rows": 0, "input_tokens": count,
-                    "remaining_tokens": config["execution"]["max_total_tokens"],
-                    "elapsed_seconds": paid_seconds,
-                    "answer_cost_ms": costs.estimate(chosen),
-                    **{name: native.get(name, 0) for name in ("queue_depth", "gpu_ready_tokens", "host_ready_tokens",
-                        "prefill_token_ms", "transfer_token_ms")}}).cpu().tolist()
-                by_id = {unit.unit_id: unit for unit in observed}
-                selected = tuple(by_id[identity] for identity in chosen)
-                item = await answer(row, selected, branch_id,
-                    future=units if start+len(fresh) < len(units) else (), mode=config["shared"]["runtime"]["kv_mode"],
-                    cache_scope=branch_id, cache_namespace=branch_id)
+                features = StopValueHead.features(encoded.summary(state.selected_ids),
+                    controller._value_state(state, totals, time.monotonic()-paid_seconds, branch_id)).cpu().tolist()
+                item = await answer(row, state, snapshot, branch_id, totals)
                 states.append({"features": features, "answer": item})
             outputs.append((row, states))
 

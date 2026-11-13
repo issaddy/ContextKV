@@ -139,7 +139,7 @@ class EvidenceCosts:
 
 
 def compact_computations(results):
-    sources, records = {}, []
+    sources, qualifiers, fields, records = {}, {}, {}, []
     for result in results:
         references = []
         for span in result["sources"]:
@@ -148,10 +148,20 @@ def compact_computations(results):
                        key["passage_id"], span["start"], span["end"])
             reference = sources.setdefault(address, f"C{len(sources) + 1}")
             references.append(reference)
+        facts = []
+        for fact in result["results"]:
+            row = {**fact, "qualifiers": [qualifiers.setdefault(text, f"Q{len(qualifiers)+1}")
+                                          for text in fact["qualifiers"]]}
+            if "fields" in fact:
+                row["fields"] = [[fields.setdefault((identity, label, unit), f"F{len(fields)+1}"), value]
+                                 for identity, label, value, unit in fact["fields"]]
+            facts.append(row)
         records.append({name: result[name] for name in (
-            "need_id", "operation", "fields", "conditions", "results", "complete")}
-            | {"sources": references})
-    return {"sources": [{"id": reference, "corpus": address[0], "document": address[1],
+            "need_id", "operation", "conditions", "complete")} | {"results": facts, "sources": references})
+    return {"fields": [{"id": reference, "name": key[0], "label": key[1], "unit": key[2]}
+                       for key, reference in fields.items()],
+            "qualifiers": {reference: text for text, reference in qualifiers.items()},
+            "sources": [{"id": reference, "corpus": address[0], "document": address[1],
                          "version": address[2], "passage": address[3], "span": address[4:]}
                         for address, reference in sources.items()], "results": records}
 

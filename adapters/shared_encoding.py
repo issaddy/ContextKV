@@ -153,12 +153,12 @@ class EvidenceEncoding:
         tokens = np.asarray([by_id[identity].body_tokens for identity in self.unit_ids])
         active = np.ones(count, dtype=bool)
         with torch.no_grad():
-            while active.sum() > 1:
+            while active.any():
                 alternatives = []
                 for members in closures:
                     trial = active.copy()
                     trial[list(members)] = False
-                    if trial.any() and not np.array_equal(trial, active):
+                    if not np.array_equal(trial, active):
                         alternatives.append(trial)
                 if not alternatives:
                     break
