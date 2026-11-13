@@ -174,7 +174,8 @@ class CooperativeController:
                             "compute_ms": auxiliary["compute_ms"] + state.evidence.usage["compute_ms"]}
                         continue
                     if not complete_scope:
-                        computations.extend(await self._compute_documents(state, required-computed_needs,
+                        unfinished = {need.need_id for need in state.query.task.needs} - computed_needs
+                        computations.extend(await self._compute_documents(state, unfinished,
                                                                            snapshot, complete,
                             selected if any(need.need_id not in required for need in state.query.task.needs) else ()))
                     break
@@ -237,6 +238,7 @@ class CooperativeController:
             self.policy.max_total_model_tokens-output_tokens-len(fixed.input_ids))
         parts = [(index, program) for program in state.programs if program.need_id in need_ids
                  and self._population_complete(index, program)]
+        resolved_operations = {}
         bound = {program.need_id for _, program in parts}
         unbound = need_ids - bound
         if index.tables and unbound:
@@ -262,26 +264,32 @@ class CooperativeController:
                 generated = await complete(request, f"binding:{number}", schema=binding.schema,
                                            output_tokens=output_tokens)
                 programs = binding.decode(generated["text"])
+                resolved_operations.update((program.need_id, program.operation) for program in programs)
                 ready = {program.need_id for program in programs if self._population_complete(subset, program)}
                 if ready != unbound:
                     raise ValueError("document fields or table applicability remain unresolved")
                 parts.extend((subset, program) for program in programs)
         outside = index.outside_tables(state.pool.units)
         if outside:
-            projections = []
+            projections, operations = [], resolved_operations or None
             population = tuple(unit.unit_id for unit in outside)
             for number, units in enumerate(self._source_packs(outside, input_tokens, lambda unit: numbered_text(unit.text)[0])):
-                projection = semantic_projection(state.query, units, sorted(need_ids), population_unit_ids=population)
+                projection = semantic_projection(state.query, units, sorted(need_ids),
+                    population_unit_ids=population, operations=operations)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, instruction=projection.instruction, future_sources=selected,
                     system_prompt=self.policy.system_prompt or SYSTEM)
                 generated = await complete(request, f"projection:{number}", schema=projection.schema,
                                            output_tokens=output_tokens)
                 projections.append(projection.decode(generated["text"]))
+                operations = projections[-1].operations
+                resolved_operations.update(operations)
             merged = merge_projections(projections)
-            if merged.unresolved_need_ids or set(merged.covered_units) != set(population):
+            if merged.unresolved_need_ids:
                 raise ValueError("document projection did not resolve the complete requested population")
             parts.extend((merged.index, program) for program in merged.programs)
+        parts = [(part, replace(program, operation=resolved_operations.get(program.need_id, program.operation)))
+                 for part, program in parts]
         calculated_index, programs = combine_populations(parts)
         computations = []
         for program in programs:
@@ -293,7 +301,7 @@ class CooperativeController:
             record["conditions"] = record["scope"]["conditions"]
             computations.append(record)
         if {item["need_id"] for item in computations} != need_ids:
-            raise ValueError("requested numeric computation has no complete source population")
+            raise ValueError("requested document computation has no complete source population")
         return computations
 
     def _answer_budget(self, state, snapshot, computations):
