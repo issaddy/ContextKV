@@ -27,9 +27,6 @@ execution:
   history_tokens: 8192
   output_tokens: 1024
   max_total_tokens: 131072
-  lambda_time: 1.0e-06
-  lambda_gpu: 0.0
-  lambda_host: 0.0
 training:
   data_dir: data/training/shared
   teacher_url: http://127.0.0.1:30000

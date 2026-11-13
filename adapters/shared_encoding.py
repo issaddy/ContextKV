@@ -9,6 +9,7 @@ from threading import Lock
 import time
 
 from controller.context_schema import Condition, Need, SourceSpan, TaskState, TextRef, VersionIntent
+from adapters.jina_encoding import pack_passages, project_markers, merge_rankings
 
 QUERY_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EVIDENCE_MODEL = "jinaai/jina-reranker-v3.5"
@@ -500,11 +501,8 @@ class SharedEvidenceEncoder:
         ids, addresses, doc_positions, query_position = self.prepare(query, units)
         input_ids = torch.tensor([ids], device=self.model.device)
         states = self.model.model(input_ids=input_ids, use_cache=False).last_hidden_state[0]
-        # The author projector and cosine objective consume the same final layer.
-        documents = self.model.projector(states[doc_positions]).float()
-        q = self.model.projector(states[query_position]).float()
-        scores = torch.nn.functional.cosine_similarity(documents, q.unsqueeze(0), dim=-1)
-        return states.float(), torch.nn.functional.normalize(documents, dim=-1), scores, addresses, len(ids), q
+        documents, scores, q = project_markers(self.model, states, doc_positions, query_position)
+        return states.float(), documents, scores, addresses, len(ids), q
 
     def forward_evidence(self, query, units):
         """Train on the same evidence batches and global cosine scores used online."""
@@ -514,26 +512,15 @@ class SharedEvidenceEncoder:
             return (torch.empty((0, self.model.config.hidden_size), device=self.model.device),
                     torch.empty((0, 512), device=self.model.device),
                     torch.empty(0, device=self.model.device), (), 0)
-        documents = torch.cat([item[1] for item in outputs])
-        query_sum = torch.stack([item[5]*((1+item[2])/2).max() for item in outputs]).sum(0)
-        scores = torch.nn.functional.cosine_similarity(documents, query_sum[None, :], dim=-1)
+        documents, scores, _ = merge_rankings([(item[1], item[2], item[5]) for item in outputs])
         return (torch.cat([item[0] for item in outputs]), documents, scores,
                 tuple(address for item in outputs for address in item[3]), sum(item[4] for item in outputs))
 
     def _batches(self, query, units):
         units = tuple(units)
-        batches, current, size = [], [], 0
-        overhead = len(self.prepare(query.evidence_query, ())[0])
-        for unit in units:
-            length = len(self.tokenizer.encode(unit.text, add_special_tokens=False)) + 20
-            if current and size+length+overhead > self.batch_tokens:
-                batches.append(tuple(current))
-                current, size = [], 0
-            current.append(unit)
-            size += length
-        if current:
-            batches.append(tuple(current))
-        return batches
+        return pack_passages(units,
+            [len(self.tokenizer.encode(unit.text, add_special_tokens=False))+20 for unit in units],
+            overhead=len(self.prepare(query.evidence_query, ())[0]), budget=self.batch_tokens)
 
     def encode(self, query, units):
         return self.ready.submit((query, tuple(units)))
@@ -561,11 +548,9 @@ class SharedEvidenceEncoder:
                 hidden = self.model.model(**batch, use_cache=False).last_hidden_state
                 for offset, (owner, units, (ids, addresses, positions, query_position)) in enumerate(group):
                     states = hidden[offset, -len(ids):]
-                    documents = self.model.projector(states[positions]).float()
-                    query = self.model.projector(states[query_position]).float()
-                    scores = torch.nn.functional.cosine_similarity(documents, query.unsqueeze(0), dim=-1)
-                    outputs[owner][tuple(unit.unit_id for unit in units)] = (states.float(),
-                        torch.nn.functional.normalize(documents, dim=-1), scores, addresses, len(ids), query)
+                    documents, scores, query = project_markers(self.model, states, positions, query_position)
+                    outputs[owner][tuple(unit.unit_id for unit in units)] = (
+                        states.float(), documents, scores, addresses, len(ids), query)
             results = [self._encode(query, units, outputs[index]) for index, (query, units) in enumerate(requests)]
         elapsed = (time.perf_counter()-started)*1000
         total = sum(item.usage["input_tokens"] for item in results)
@@ -578,14 +563,13 @@ class SharedEvidenceEncoder:
         from training.shared_heads import FIELD_ROLES
         started = time.perf_counter()
         batches = self._batches(query, units)
-        embeddings, queries, bindings, binding_vectors, token_states, token_sources = [], [], [], [], [], []
+        rankings, bindings, binding_vectors, token_states, token_sources = [], [], [], [], []
         token_count = 0
         with torch.no_grad():
             for batch in batches:
                 states, documents, scores, addresses, count, query_vector = outputs[tuple(unit.unit_id for unit in batch)]
                 token_count += count
-                embeddings.append(documents)
-                queries.append(query_vector*((1+scores)/2).max())
+                rankings.append((documents, scores, query_vector))
                 source_indices = [i for i, address in enumerate(addresses) if address is not None]
                 source_states = states[source_indices]
                 sources = tuple(addresses[i] for i in source_indices)
@@ -625,9 +609,12 @@ class SharedEvidenceEncoder:
                 for index in indices:
                     if sum(root(other) == root(index) for other in indices) > 1:
                         bindings[index] = replace(bindings[index], relation_group=f"{need_id}:j{root(index)}")
-        documents = torch.cat(embeddings) if embeddings else torch.empty((0, 512), device=self.model.device)
-        query_sum = torch.stack(queries).sum(0) if queries else torch.zeros(512, device=self.model.device)
-        relevance = torch.nn.functional.cosine_similarity(documents, query_sum[None, :], dim=-1)
+        if rankings:
+            documents, relevance, query_sum = merge_rankings(rankings)
+        else:
+            documents = torch.empty((0, 512), device=self.model.device)
+            relevance = torch.empty(0, device=self.model.device)
+            query_sum = torch.zeros(512, device=self.model.device)
         return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents, relevance,
             tuple(bindings), self.heads, tuple(token_states), tuple(token_sources),
             {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(batches)},

@@ -19,7 +19,6 @@ SYSTEM = (
 @dataclass
 class EvidenceSelection:
     evidence: tuple
-    retrieval_priority: tuple
     query_context: QueryContext | None = None
     auxiliary_usage: dict | None = None
     shared_state: object | None = None

@@ -12,7 +12,7 @@ def _tuples(instance, *names: str) -> None:
 
 @dataclass(frozen=True)
 class EvidenceSpan:
-    """Complete body location and provenance; aliases also locate their declaration."""
+    """Body location, original source coordinates and citation ID."""
     key: EvidenceKey
     message_index: int
     start: int
@@ -20,18 +20,11 @@ class EvidenceSpan:
     source_uri: str
     provenance: tuple[str, ...]
     reference_id: str
-    body_reference_id: str | None = None
-    alias_declaration: tuple[int, int, int] | None = None
     source_start: int | None = None
     source_end: int | None = None
-    source_declaration: tuple[int, int, int] | None = None
 
     def __post_init__(self) -> None:
         _tuples(self, "provenance")
-        if self.alias_declaration is not None:
-            _tuples(self, "alias_declaration")
-        if self.source_declaration is not None:
-            _tuples(self, "source_declaration")
 
 
 @dataclass(frozen=True)
@@ -88,8 +81,6 @@ class SessionSnapshot:
     session_id: str
     version: int = 0
     raw_history: tuple[TurnRecord, ...] = ()
-    raw_history_version: int = 0
-    archive: tuple[EvidenceBlock, ...] = ()
     corpus_snapshot_id: str = "default"
 
 

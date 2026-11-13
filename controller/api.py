@@ -49,7 +49,6 @@ def create_app(controller=None, config=None, *, retrieval=None,
         from adapters.study_retrieval import create_study_retriever
         provider = retrieval or await asyncio.to_thread(create_study_retriever, study, service.template)
         app.state.qa = DocumentQA(service, provider)
-        service.bind_resident_models(provider.manifest)
         await app.state.qa.start()
         try:
             yield

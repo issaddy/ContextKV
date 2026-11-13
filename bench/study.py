@@ -130,7 +130,6 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     service = create_controller(run)
     provider = await asyncio.to_thread(create_study_retriever, config, service.template)
     qa = DocumentQA(service, provider)
-    service.bind_resident_models(provider.manifest)
     await qa.start()
     if config["execution"].get("cache_start", "cold") == "cold":
         await service.engine.profile_prepare("cold")

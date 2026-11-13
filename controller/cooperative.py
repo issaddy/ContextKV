@@ -74,7 +74,6 @@ class CooperativeController:
         self._locks = WeakValueDictionary()
         self.native_state = {}
         self.engine_info = None
-        self.resident_models = {}
         self.kv_policy = {}
         if dialogue_mode == "contextkv":
             from .value_policy import StopValueHead, ValuePrices
@@ -82,9 +81,6 @@ class CooperativeController:
             self.prices = ValuePrices(**settings.get("prices", {}))
             from .config import load_kv_policy
             self.kv_policy = load_kv_policy(settings)
-
-    def bind_resident_models(self, manifest):
-        self.resident_models = manifest
 
     async def start(self):
         if self.engine_info is None:
@@ -103,18 +99,25 @@ class CooperativeController:
             lock = self._locks[session_id] = asyncio.Lock()
         return lock
 
-    async def serve_turn(self, session_id, query, evidence=(), *, request_id,
-                         corpus_snapshot_id="default", evidence_provider=None,
-                         reference_history=None, request_arrived=None, **options):
+    async def serve_turn(self, session_id, query, *, request_id, task_id, provider,
+                         corpus_snapshot_id="default", supplied_blocks=None, source_metadata=None,
+                         coverage_scope="selected_sources", request_arrived=None):
         arrived = request_arrived if request_arrived is not None else time.monotonic()
         async with self._lock(session_id):
             snapshot = self.store.read_snapshot(session_id, corpus_snapshot_id)
-            if reference_history is not None:
-                snapshot = self.store.sync_history(session_id, reference_history)
             totals = {"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0.0,
                       "device_hit_tokens": 0, "host_loaded_tokens": 0, "prefill_tokens": 0,
                       "calls": 0}
             auxiliary = {"compute_ms": 0.0}
+
+            facts = ({"facts": self.store.committed_facts(snapshot)}
+                     if self.dialogue_mode == "contextkv" else {})
+
+            async def retrieve(question):
+                if supplied_blocks is None:
+                    return await provider.retrieve(snapshot, question, task_id, **facts)
+                return await provider.retrieve_supplied(snapshot, question, task_id, supplied_blocks,
+                    source_metadata=source_metadata, coverage_scope=coverage_scope, **facts)
 
             async def complete(request, name, *, schema=None, output_tokens=None):
                 output_tokens = self.policy.max_new_tokens if output_tokens is None else output_tokens
@@ -141,9 +144,9 @@ class CooperativeController:
 
             try:
                 if self.dialogue_mode != "contextkv":
-                    return await self._ordinary(snapshot, query, request_id, evidence_provider,
+                    return await self._ordinary(snapshot, query, request_id, retrieve,
                                                 complete, totals, arrived)
-                selection = await evidence_provider(snapshot)
+                selection = await retrieve(query)
                 state = selection.shared_state
                 snapshot = replace(snapshot, raw_history=working_history(state.query, snapshot.raw_history))
                 auxiliary = selection.auxiliary_usage
@@ -152,7 +155,7 @@ class CooperativeController:
                 required = {need.need_id for need in state.query.task.needs
                             if need.operation in {"count", "sum", "group", "mean", "min", "max"}}
                 while True:
-                    outside = state.provider._outside_tables(state.pool.units, state.document_index)
+                    outside = state.document_index.outside_tables(state.pool.units)
                     if not outside:
                         from adapters.shared_retrieval import need_scope_signature
                         for program in state.programs:
@@ -170,7 +173,7 @@ class CooperativeController:
                     action = self.stop.choose(state.evidence.summary(state.selected_ids), feature_state,
                         self.prices, can_continue=bool(state.pending_units), complete_scope=complete_scope)
                     if action == "continue":
-                        state = await state.expand()
+                        state = await provider.expand(state)
                         auxiliary = {**auxiliary,
                             "compute_ms": auxiliary["compute_ms"] + state.evidence.usage["compute_ms"]}
                         continue
@@ -258,7 +261,7 @@ class CooperativeController:
                 if ready != unbound:
                     raise ValueError("document fields or table applicability remain unresolved")
                 parts.extend((subset, program) for program in programs)
-        outside = state.provider._outside_tables(state.pool.units, index)
+        outside = index.outside_tables(state.pool.units)
         if outside:
             projections = []
             population = tuple(unit.unit_id for unit in outside)
@@ -318,14 +321,14 @@ class CooperativeController:
                 **{name: native.get(name, 0) for name in (
                     "queue_depth", "gpu_ready_tokens", "host_ready_tokens", "prefill_token_ms", "transfer_token_ms")}}
 
-    async def _ordinary(self, snapshot, query, request_id, evidence_provider, complete, totals, arrived):
+    async def _ordinary(self, snapshot, query, request_id, retrieve_evidence, complete, totals, arrived):
         from .cooperative_request import CompiledRequest
         from adapters import rag_dialogue, llamaindex_dialogue
         auxiliary = {"compute_ms": 0.0}
         last_request = last_result = None
 
         async def retrieve(question):
-            selection = await evidence_provider(snapshot, question)
+            selection = await retrieve_evidence(question)
             auxiliary["compute_ms"] += selection.auxiliary_usage["compute_ms"]
             return selection.evidence
 

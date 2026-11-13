@@ -30,8 +30,6 @@ class ConversationStore:
                 session_id TEXT PRIMARY KEY, corpus_id TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS qa_sources (
                 address TEXT PRIMARY KEY, block TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS qa_session_sources (
-                session_id TEXT, address TEXT, PRIMARY KEY(session_id,address));
             CREATE TABLE IF NOT EXISTS qa_documents (
                 document_set_id TEXT PRIMARY KEY, sources TEXT NOT NULL, metadata TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS qa_turns (
@@ -56,13 +54,10 @@ class ConversationStore:
         corpus = self.db.execute("SELECT corpus_id FROM qa_sessions WHERE session_id=?", (session_id,)).fetchone()[0]
         turns = tuple(decode(TurnRecord, json.loads(row[0])) for row in self.db.execute(
             "SELECT turn FROM qa_turns WHERE session_id=? ORDER BY turn_id", (session_id,)))
-        archive = tuple(decode(EvidenceBlock, json.loads(payload)) for (payload,) in self.db.execute(
-            "SELECT block FROM qa_sources JOIN qa_session_sources USING(address) WHERE session_id=?",
-            (session_id,)))
         return SessionSnapshot(session_id, version=len(turns), raw_history=turns,
-                               raw_history_version=len(turns), archive=archive, corpus_snapshot_id=corpus)
+                               corpus_snapshot_id=corpus)
 
-    def sync_history(self, session_id, history, expected_version=None):
+    def sync_history(self, session_id, history):
         with self.db:
             self.db.execute("DELETE FROM qa_turns WHERE session_id=?", (session_id,))
             self.db.executemany("INSERT INTO qa_turns VALUES(?,?,?,?,?)", (
@@ -108,9 +103,6 @@ class ConversationStore:
         turn = TurnRecord(snapshot.version + 1, query, answer, evidence_keys=tuple(b.key for b in evidence),
                           query_context=QueryContext(query, "shared", task_state=task))
         with self.db:
-            self.register_sources(evidence)
-            self.db.executemany("INSERT OR IGNORE INTO qa_session_sources VALUES(?,?)", (
-                (session_id, source_address(block)) for block in evidence))
             self.db.execute("INSERT INTO qa_turns VALUES(?,?,?,?,?)", (
                 session_id, turn.turn_id, request_id, dumps(turn), dumps(facts)))
             self.db.execute("INSERT OR REPLACE INTO qa_results VALUES(?,?,?)", (

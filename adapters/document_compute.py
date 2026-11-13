@@ -229,6 +229,32 @@ class DocumentIndex:
                 records.append(record)
         return tuple(records)
 
+    def outside_tables(self, units):
+        output, replacements = [], {}
+        table_ranges = {}
+        for table in self.tables.values():
+            table_ranges.setdefault(table.source.source_key, set()).add((table.source.start, table.source.end))
+            for row in table.rows:
+                for cell in row:
+                    for source in cell.qualifiers:
+                        table_ranges.setdefault(source.source_key, set()).add((source.start, source.end))
+        for unit in units:
+            source = unit.source_spans[0]
+            parts = [(source.start, source.end)]
+            for left, right in sorted(table_ranges.get(source.source_key, ())):
+                parts = [(start, end) for first, last in parts
+                         for start, end in ((first, min(last, left)), (max(first, right), last)) if start < end]
+            replacements[unit.unit_id] = []
+            for start, end in parts:
+                text = unit.text[start-source.start:end-source.start]
+                if text.strip():
+                    identity = f"{unit.unit_id}:text:{start}:{end}"
+                    replacements[unit.unit_id].append(identity)
+                    span = SourceSpan(identity, source.source_key, start, end)
+                    output.append(replace(unit, unit_id=identity, source_spans=(span,), text=text))
+        return tuple(replace(unit, dependencies=tuple(identity for dependency in unit.dependencies
+            for identity in replacements.get(dependency, ()))) for unit in output)
+
     def binding_units(self, sample_rows=2):
         """Encode headers and a small literal row sample; compute over all rows later."""
         units = []

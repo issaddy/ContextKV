@@ -20,13 +20,8 @@ def metric_record(row):
     return result
 
 
-def execution_metric_rows(directory, rows, *, failures=None, dispatch=None):
-    records = {str(row["task_id"]): metric_record(row) for row in (*rows, *(failures or ())) }
-    return list(records.values())
-
-
-def write_task_metrics(directory, rows, *, failures=None, dispatch=None):
-    records = execution_metric_rows(directory, rows, failures=failures)
+def write_task_metrics(directory, rows):
+    records = [metric_record(row) for row in rows]
     path = Path(directory)/"results.jsonl"
     path.write_text("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":"))+"\n" for row in records))
     return records

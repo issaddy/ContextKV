@@ -1,7 +1,7 @@
 """Runtime settings for shared document QA and the native generation engine."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import json
 
@@ -58,23 +58,6 @@ class ModelConfig:
     def scope(self):
         return self._model_scope
 
-
-
-@dataclass(frozen=True)
-class GenerationProtocol:
-    system_prompt: str = SYSTEM
-    sampling: SamplingRecipe | None = None
-
-    @classmethod
-    def from_config(cls, config):
-        value = asdict(config) if isinstance(config, RunConfig) else config
-        sampling = value.get("sampling")
-        return cls(value.get("context", {}).get("system_prompt") or SYSTEM,
-                   SamplingRecipe(**sampling) if sampling else None)
-
-    def record(self):
-        return {"system_prompt": self.system_prompt,
-                "sampling_recipe": (self.sampling or SamplingRecipe()).record()}
 
 
 @dataclass(frozen=True)

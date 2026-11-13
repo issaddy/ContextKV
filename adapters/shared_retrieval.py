@@ -1,7 +1,7 @@
 """Scope-first retrieval and shared evidence encoding for the cooperative executor."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 import time
 
 from adapters.corpus import CorpusIndex
@@ -46,13 +46,7 @@ class SharedEvidenceState:
     reused_claims: tuple = ()
     semantic_work: tuple = ()
     pending_units: tuple = ()
-    provider: object = field(default=None, repr=False)
     body_tokens: int = 0
-
-    async def expand(self):
-        if not self.pending_units:
-            return None
-        return await run_retrieval_worker(self.provider.expand_state, self)
 
 
 class SharedEvidenceProvider:
@@ -73,7 +67,6 @@ class SharedEvidenceProvider:
             self.corpus = CorpusIndex((), corpus_id=retrieval["corpus_id"], snapshot_id=self.corpus_snapshot_id)
         self.directory = SourceDirectory(self.corpus, template.tokenizer)
         self.versions = VersionIndex.from_blocks(self.corpus.blocks, self.corpus.source_metadata)
-        self.fact_history = None
         self.candidate_k = retrieval.get("candidate_k", 50)
         self.evidence_batch = retrieval.get("evidence_batch", 24)
         self._supplied = {}
@@ -84,13 +77,11 @@ class SharedEvidenceProvider:
                 "retrieval": "scope_first_bm25_dense_rrf", "selection": "generator_set_utility",
                 "corpus_snapshot_id": self.corpus_snapshot_id}
 
-    async def retrieve(self, snapshot, query, request_id):
-        facts = self.fact_history(snapshot) if self.fact_history else ()
+    async def retrieve(self, snapshot, query, request_id, *, facts=()):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, facts=facts)
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
-                                coverage_scope="selected_sources"):
-        facts = self.fact_history(snapshot) if self.fact_history else ()
+                                coverage_scope="selected_sources", facts=()):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
             supplied_blocks=tuple(blocks), source_metadata=source_metadata, coverage_scope=coverage_scope, facts=facts)
 
@@ -160,7 +151,7 @@ class SharedEvidenceProvider:
             pool = directory.full_scope(legal)
             # Column bindings consume schema addresses; CPU operations read the full rows.
             units = document_index.binding_units()
-            units += self._outside_tables(pool.units, document_index)
+            units += document_index.outside_tables(pool.units)
         else:
             if supplied_blocks is not None:
                 if "dense" not in cached:
@@ -240,7 +231,7 @@ class SharedEvidenceProvider:
                          if all(span.source_key in population_keys for span in unit.source_spans)]
             retained = tuple(initial[index] for index in positions)
             binding_units = document_index.binding_units()
-            outside = self._outside_tables(pool.units, document_index)
+            outside = document_index.outside_tables(pool.units)
             aliases = {}
             for unit in (*binding_units, *outside):
                 original = next((prior for prior in retained if all(any(
@@ -265,14 +256,13 @@ class SharedEvidenceProvider:
             query.task = replace(query.task,
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
-            document_index, pending_units=tuple(pending), provider=self, body_tokens=available)
+            document_index, pending_units=tuple(pending), body_tokens=available)
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
         context = QueryContext(question, "shared", task_state=query.task,
             history_turns=tuple(dict.fromkeys(ref.turn_id for ref in query.task.working_history)))
         usage["compute_ms"] = (time.perf_counter()-started)*1000
-        return EvidenceSelection(pool.source_blocks, tuple(block.key for block in pool.source_blocks),
-            context, auxiliary_usage=usage, shared_state=state)
+        return EvidenceSelection(pool.source_blocks, context, auxiliary_usage=usage, shared_state=state)
 
     def _body_budget(self, snapshot, query):
         from controller.schema import Message
@@ -294,32 +284,6 @@ class SharedEvidenceProvider:
                 found[unit.unit_id] = unit
                 pending.extend(by_id[identity] for identity in unit.dependencies)
         return tuple(found.values())
-
-    def _outside_tables(self, units, index):
-        output, replacements = [], {}
-        table_ranges = {}
-        for table in index.tables.values():
-            table_ranges.setdefault(table.source.source_key, set()).add((table.source.start, table.source.end))
-            for row in table.rows:
-                for cell in row:
-                    for source in cell.qualifiers:
-                        table_ranges.setdefault(source.source_key, set()).add((source.start, source.end))
-        for unit in units:
-            source = unit.source_spans[0]
-            parts = [(source.start, source.end)]
-            for left, right in sorted(table_ranges.get(source.source_key, ())):
-                parts = [(start, end) for first, last in parts
-                         for start, end in ((first, min(last, left)), (max(first, right), last)) if start < end]
-            replacements[unit.unit_id] = []
-            for start, end in parts:
-                text = unit.text[start-source.start:end-source.start]
-                if text.strip():
-                    identity = f"{unit.unit_id}:text:{start}:{end}"
-                    replacements[unit.unit_id].append(identity)
-                    span = SourceSpan(identity, source.source_key, start, end)
-                    output.append(replace(unit, unit_id=identity, source_spans=(span,), text=text))
-        return tuple(replace(unit, dependencies=tuple(identity for dependency in unit.dependencies
-            for identity in replacements.get(dependency, ()))) for unit in output)
 
     @staticmethod
     def _reuse_computations(state, history):
@@ -366,7 +330,10 @@ class SharedEvidenceProvider:
         state.semantic_work = tuple(need for need in state.query.task.needs
             if need.need_id not in programmed and need.operation in {"count", "sum", "mean", "min", "max", "group", "infer", "compare"})
 
-    def expand_state(self, state):
+    async def expand(self, state):
+        return await run_retrieval_worker(self._expand_state, state)
+
+    def _expand_state(self, state):
         existing = set(state.evidence.unit_ids)
         all_units = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
         fresh = tuple(unit for unit in self._closure(state.pending_units[:self.evidence_batch], all_units)

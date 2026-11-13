@@ -6,6 +6,7 @@ import time
 from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
+from adapters.jina_encoding import pack_passages, project_markers, merge_rankings
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
 from controller.schema import EvidenceBlock, OnlineContext
 from controller.cooperative_request import EvidenceSelection
@@ -98,41 +99,30 @@ class ConventionalEvidenceProvider:
                         parent_section=original.parent_section, provenance=original.provenance))
             evidence = tuple(evidence)
         usage = {"compute_ms": (time.perf_counter()-started)*1000, "input_tokens": input_tokens, "output_tokens": 0}
-        return EvidenceSelection(evidence, tuple(block.key for block in evidence), auxiliary_usage=usage)
+        return EvidenceSelection(evidence, auxiliary_usage=usage)
 
     def _rerank(self, query, contexts):
         import inspect
         import torch
         format_prompt = inspect.getmodule(self.reranker).format_docs_prompts_func
         texts = [context.title+"\n"+context.text for context in contexts]
-        groups, group, size = [], [], 2*len(self.rerank_tokenizer.encode(query))+200
-        for text in texts:
-            cost = len(self.rerank_tokenizer.encode(text))+20
-            if group and size+cost > self.rerank_tokens:
-                groups.append(group)
-                group, size = [], 2*len(self.rerank_tokenizer.encode(query))+200
-            group.append(text)
-            size += cost
-        if group:
-            groups.append(group)
-        documents, queries, weights, tokens = [], [], [], 0
+        groups = pack_passages(texts,
+            [len(self.rerank_tokenizer.encode(text))+20 for text in texts],
+            overhead=2*len(self.rerank_tokenizer.encode(query))+200, budget=self.rerank_tokens)
+        rankings, tokens = [], 0
         with torch.no_grad():
             for texts in groups:
-                prompt = format_prompt(query, texts, special_tokens=self.reranker.special_tokens)
+                prompt = format_prompt(query, list(texts), special_tokens=self.reranker.special_tokens)
                 batch = self.rerank_tokenizer(prompt, return_tensors="pt").to(self.reranker.device)
                 tokens += batch["input_ids"].numel()
-                states = self.reranker.model(**batch, use_cache=False).last_hidden_state
-                docs = self.reranker.projector(states[batch["input_ids"] == self.reranker.doc_embed_token_id]).float()
-                query_vector = self.reranker.projector(states[batch["input_ids"] == self.reranker.query_embed_token_id]).float()[0]
-                local = torch.nn.functional.cosine_similarity(docs, query_vector.unsqueeze(0), dim=-1)
-                documents.append(docs)
-                queries.append(query_vector)
-                weights.append(((1+local)/2).max())
-            if not documents:
+                states = self.reranker.model(**batch, use_cache=False).last_hidden_state[0]
+                ids = batch["input_ids"][0]
+                rankings.append(project_markers(self.reranker, states,
+                    ids == self.reranker.doc_embed_token_id,
+                    (ids == self.reranker.query_embed_token_id).nonzero()[0, 0]))
+            if not rankings:
                 return (), 0
-            weight = torch.stack(weights)
-            query_vector = (torch.stack(queries)*weight[:, None]).sum(0)/weight.sum()
-            scores = torch.nn.functional.cosine_similarity(torch.cat(documents), query_vector.unsqueeze(0), dim=-1)
+            _, scores, _ = merge_rankings(rankings)
             order = scores.argsort(descending=True)[:self.top_k].tolist()
         return tuple(contexts[index] for index in order), tokens
 
