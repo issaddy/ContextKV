@@ -2,6 +2,8 @@
 
 当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，查询 LoRA 和 Jina 骨干继续复用；任务、字段、集合和停止头随当前协议更新。快速对照使用每个 benchmark、每种方法相同的 20 题。当前结果见[本轮报告](shared_smoke.md)。
 
+当前 12 组对照已完成运行和评分：普通问答、LlamaIndex 各交付 80/80，ContextKV 交付 79/80。MultiDoc2Dial、MT-RAG 同时改善质量和 P95；VersionQA、Loong 仍低于基线。结果目录为 `runs/current/core-20`，轻量指标已汇总至 `results/core-mechanism-20-20261113.json`。
+
 ## 路径与环境
 
 - 项目：`/home/relay/songjiayun/ContextKV`
@@ -29,6 +31,8 @@
 ## 辅助训练
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
+
+现有可用资产：`models/shared-query`（任务头 222/47 状态，总体覆盖头 286/63 状态）、`models/shared-evidence`（字段 54/23、集合 24/6 状态）、`models/shared-stop.pt`（12/4 状态）。斜线两侧为训练/开发数；覆盖监督与任务监督有重叠。本轮集合和停止分别采集 180、32 次真实答案。查询 LoRA、Jina 骨干与 Qwen3-32B 权重保持固定。以下命令是训练入口，已有资产可直接用于评测。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
