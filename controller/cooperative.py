@@ -305,7 +305,9 @@ class CooperativeController:
                 compact_computations(computations), ensure_ascii=False, separators=(",", ":"))
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", ""),
                                      *history_messages(snapshot.raw_history), Message("user", question)))
-        body_tokens = min(state.body_tokens, self.policy.max_total_model_tokens-self.policy.max_new_tokens-len(fixed.input_ids))
+        body_tokens = self.policy.max_total_model_tokens-self.policy.max_new_tokens-len(fixed.input_ids)
+        if state.query.task.coverage_scope != "all_supplied_documents":
+            body_tokens = min(state.body_tokens, body_tokens)
         return body_tokens, len(fixed.input_ids)
 
     async def _select_evidence(self, state, snapshot, computations):
