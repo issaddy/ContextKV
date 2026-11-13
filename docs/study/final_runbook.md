@@ -83,23 +83,25 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
   --seconds-price 0.001 --tail-price 0.001
 ```
 
+停止轨迹采集前，用 `python3 -m training.calibrate_kv --config configs/study.yaml --data data/training/shared/labels.jsonl --output models/infoflow-quality.json` 完成默认 4 状态的质量配对。重算比例与质量差一起由控制器读取，训练采集使用相同政策。
+
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
 标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样，覆盖更多会话；字段监督复用独立的来源标注。集合样本保存候选集合、实际质量和完整成本；停止样本保存紧凑表示及多步回报需要的费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
 ## 少量端到端评测
 
-默认每个 benchmark、每种方法 10 题；可用 `--limit-turns 50` 改为各自 50 题。三个方法使用相同题目与生成条件，每个 benchmark 单独评分和报告。
+当前工程收尾只做默认每个 benchmark、每种方法 2 题的跑通，暂不运行完整实验队列。`--limit-turns` 可指定规模；已有完成结果直接复用。正式比较使用相同题目与生成条件，每个 benchmark 单独评分和报告。
 
 ```bash
 python3 -m bench.study evaluate \
   --config configs/study.yaml --matrix configs/study_matrix.yaml \
-  --split test --limit-turns 10 --concurrency 4 \
+  --split test --limit-turns 2 --concurrency 4 \
   --output runs/current/public
 
 python3 -m bench.study evaluate \
   --config configs/study.yaml --matrix configs/study_system_matrix.yaml \
-  --split test --limit-turns 10 --concurrency 4 \
+  --split test --limit-turns 2 --concurrency 4 \
   --output runs/current/actual-history
 ```
 
