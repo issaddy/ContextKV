@@ -93,6 +93,7 @@ class CooperativeController:
     async def close_session(self, session_id):
         self._locks.pop(session_id, None)
         self.native_state.pop(session_id, None)
+        await self.engine.close_session(session_id)
 
     def _lock(self, session_id):
         lock = self._locks.get(session_id)

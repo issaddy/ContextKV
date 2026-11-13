@@ -45,6 +45,10 @@ class ComputeRuntime:
         self.observed_at, self.pool_used = now, self._pool_used()
 
     def control(self, action, data):
+        if action == 'close_session':
+            self.demands.pop(data['session_id'], None)
+            self._refresh_priorities()
+            return {'closed': True}
         if action == 'info':
             host = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
             return dict(protocol_version='contextkv-compute-v2', engine_kind='sglang',

@@ -50,6 +50,9 @@ class SGLangEngineClient:
     async def profile_prepare(self, mode):
         return await self._post("/context/profile/prepare", {"mode": mode})
 
+    async def close_session(self, session_id):
+        return await self._post("/context/session/close", {"session_id": session_id})
+
     async def compute(self, request, *, session_id, request_id, max_new_tokens,
                       mode="auto", recompute_ratio=0.15, quality_loss=0.0,
                       quality_price_ms=0.0, response_schema=None, cache_namespace=None,
