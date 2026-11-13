@@ -631,10 +631,16 @@ def semantic_binding_schema(index, need_ids, operations=None):
     predicate = obj({"field": string, "operation": {"enum": [*list(_COMPARISONS), "in", "contains"]},
         "value": {"anyOf": [string, {"type": "number"}, array(string)]}, "unit": string})
     table_ids = [f"T{i+1}" for i in range(len(index.tables))]
-    projection = obj({"table_id": {"enum": table_ids}, "fields": array(obj({
-        "name": string, "column": {"type": "integer", "minimum": 0},
-        "unit_span": {"anyOf": [{"type": "null"}, _word_address_schema(index.binding_units())]}})),
-        "predicates": array(predicate)})
+    projections = []
+    for identity, table in zip(table_ids, index.tables.values()):
+        column = {"type": "integer", "minimum": 0, "maximum": len(table.headers)-1}
+        local_predicate = obj({"column": column, **{name: value for name, value in predicate["properties"].items()
+                                                  if name != "field"}})
+        projections.append(obj({"table_id": {"const": identity}, "fields": array(obj({
+            "name": string, "column": column,
+            "unit_span": {"anyOf": [{"type": "null"}, _word_address_schema(index.binding_units())]}})),
+            "predicates": array(local_predicate)}))
+    projection = {"oneOf": projections}
     programs = {identity: obj({
         "operation": ({"const": operations[identity]} if operations and identity in operations else
                       {"enum": ["lookup", "group", "count", "sum", "mean", "min", "max"]}),
@@ -659,12 +665,17 @@ def decode_programs(text, query, index):
             return Field(field["name"], field["column"])
         text, span = _word_source(fragments[address[0]], address)
         return Field(field["name"], field["column"], text, span)
+    def projection_binding(projection):
+        columns = tuple(dict.fromkeys(predicate["column"] for predicate in projection["predicates"]))
+        fields = (*[field_binding(field) for field in projection["fields"]],
+                  *(Field(f"column:{column}", column) for column in columns))
+        predicates = tuple(Predicate(field=f"column:{predicate['column']}",
+            **{name: value for name, value in predicate.items() if name != "column"})
+            for predicate in projection["predicates"])
+        return Projection(tables[projection["table_id"]], fields, predicates)
     for identity, item in json.loads(text)["programs"].items():
         need = needs[identity]
-        projections = tuple(Projection(tables[projection["table_id"]],
-            tuple(field_binding(field) for field in projection["fields"]),
-            tuple(Predicate(**predicate) for predicate in projection["predicates"]))
-            for projection in item["projections"])
+        projections = tuple(projection_binding(projection) for projection in item["projections"])
         population = tuple(index.tables)
         result.append(DocumentProgram(need.need_id, projections, population, item["operation"],
             item["value_field"], tuple(item["entity_fields"]),
@@ -692,7 +703,9 @@ def semantic_binding(query, index, need_ids, *, operations=None):
         "Use lookup to return fields for semantic classification rather than forcing an arithmetic aggregate. "
         "Samples illustrate columns; the CPU will execute over every row of each selected table. "
         "Return projections and typed filters, explicit equality joins, and requested entity deduplication. "
-        "Use zero-based column indices. Optional unit_span is [source_id,first_word,last_word], with inclusive "
+        "Projection filters address zero-based source column indices, including columns not in the output. "
+        "Global filters, joins, value_field, entity_fields, group_by and distinct refer to field names declared "
+        "in the projections. Optional unit_span is [source_id,first_word,last_word], with inclusive "
         "displayed word indices; "
         "select only the literal unit in the supplied source. Same-shaped tables use the same field aliases for union; "
         "join fields identify the actual key correspondence. Include all tables in the requested population. "
