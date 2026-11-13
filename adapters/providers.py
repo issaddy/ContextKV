@@ -10,6 +10,7 @@ from adapters.jina_encoding import pack_passages, project_markers, merge_ranking
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
 from controller.schema import EvidenceBlock, OnlineContext
 from controller.cooperative_request import EvidenceSelection
+from controller.templates import ThreadTokenizer
 
 
 class ConventionalEvidenceProvider:
@@ -26,7 +27,7 @@ class ConventionalEvidenceProvider:
         evidence = models["evidence"]
         self.reranker = AutoModel.from_pretrained(evidence["model_path"], trust_remote_code=True,
             dtype=getattr(torch, evidence.get("dtype", "bfloat16"))).to(evidence["device"]).eval()
-        self.rerank_tokenizer = AutoTokenizer.from_pretrained(evidence["model_path"], trust_remote_code=True)
+        self.rerank_tokenizer = ThreadTokenizer(AutoTokenizer.from_pretrained(evidence["model_path"], trust_remote_code=True))
         self.rerank_tokens = evidence.get("batch_tokens", 32768)
         if retrieval.get("corpus_path"):
             self.sparse = BM25SRetriever.load(retrieval["sparse_index"])

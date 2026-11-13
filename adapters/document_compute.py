@@ -194,7 +194,7 @@ def _matches(record, predicate):
         unit, actual = quantity(cell)
         expected_unit, expected = canonical_quantity(predicate.value, predicate.unit or cell.unit)
         if unit != expected_unit:
-            raise ValueError("predicate quantities have different units")
+            raise ValueError(f"predicate unit {predicate.unit!r} ({expected_unit}) differs from column unit {cell.unit!r} ({unit})")
     else:
         actual, expected = cell.text.strip(), str(predicate.value).strip()
     return _COMPARISONS[predicate.operation](actual, expected)

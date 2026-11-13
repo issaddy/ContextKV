@@ -2,6 +2,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
+from threading import local
+
+
+class _TokenizerWorker(local):
+    def __init__(self, prototype):
+        self.value = deepcopy(prototype)
+
+
+class ThreadTokenizer:
+    """Keep mutable tokenizer settings local to each encoding worker."""
+    def __init__(self, tokenizer):
+        self._worker = _TokenizerWorker(tokenizer)
+
+    def __getattr__(self, name):
+        return getattr(self._worker.value, name)
+
+    def __call__(self, *args, **kwargs):
+        return self._worker.value(*args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -14,7 +33,8 @@ class RenderedPrompt:
 class HuggingFaceTemplate:
     def __init__(self, model, revision=None, *, enable_thinking=False, local_files_only=True):
         from transformers import AutoTokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model, revision=revision, local_files_only=local_files_only)
+        self.tokenizer = ThreadTokenizer(AutoTokenizer.from_pretrained(
+            model, revision=revision, local_files_only=local_files_only))
         self.enable_thinking = enable_thinking
 
     def render(self, messages, *, with_offsets=False):

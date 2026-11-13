@@ -9,6 +9,7 @@ from threading import Lock
 import time
 
 from controller.schema import Condition, Need, SourceSpan, TaskState, TextRef, VersionIntent
+from controller.templates import ThreadTokenizer
 from adapters.jina_encoding import pack_passages, project_markers, merge_rankings
 
 QUERY_MODEL = "Qwen/Qwen3-Embedding-0.6B"
@@ -273,6 +274,7 @@ class QwenDocumentEncoder:
         from transformers import AutoModel, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.padding_side = "left"
+        self.tokenizer = ThreadTokenizer(self.tokenizer)
         self.model = AutoModel.from_pretrained(model_path, dtype=getattr(torch, dtype)).to(device).eval()
         self.manifest = {"model_id": "Qwen/Qwen3-Embedding-0.6B", "revision": "base", "max_length": max_length,
                          "pooling": "last_nonpadding_token_l2", "model_path": str(model_path)}
@@ -303,6 +305,7 @@ class SharedQueryEncoder:
         self.backbone_lock = Lock()
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.padding_side = "left"
+        self.tokenizer = ThreadTokenizer(self.tokenizer)
         self.model = AutoModel.from_pretrained(model_path, dtype=getattr(torch, dtype)).to(device)
         self.heads = QueryHeads(self.model.config.hidden_size).to(device)
         self.asset_path = None if train else Path(asset_path)
@@ -460,6 +463,7 @@ class SharedEvidenceEncoder:
         from adapters.shared_heads import EvidenceHeads
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer.padding_side = "left"
+        self.tokenizer = ThreadTokenizer(self.tokenizer)
         self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True,
             dtype=getattr(torch, dtype)).to(device)
         self.heads = EvidenceHeads(self.model.config.hidden_size).to(device)
