@@ -47,6 +47,10 @@ class VersionIndex:
     def __init__(self, blocks, metadata, parts, versions):
         self.blocks, self.metadata = blocks, metadata
         self.parts, self.versions = parts, versions
+        self.latest_orders = {}
+        for (family, _), info in versions.items():
+            if info["order"]:
+                self.latest_orders[family] = max(self.latest_orders.get(family, ()), info["order"])
 
     @classmethod
     def from_blocks(cls, blocks, metadata=None, documents=None):
@@ -84,6 +88,7 @@ class VersionIndex:
         return cls(by_key, metadata, parts, versions)
 
     def legal_keys(self, *, families=(), versions=(), as_of=None, current=False):
+        families, versions = set(families), set(versions)
         selected = []
         for (family, version), info in self.versions.items():
             if families and family not in families:
@@ -99,9 +104,8 @@ class VersionIndex:
                 if info["current"] is False:
                     continue
                 if info["current"] is None:
-                    family_versions = [item for (name, _), item in self.versions.items() if name == family]
-                    orders = [item["order"] for item in family_versions if item["order"]]
-                    if orders and info["order"] != max(orders):
+                    latest = self.latest_orders.get(family, ())
+                    if latest and info["order"] != latest:
                         continue
             selected.extend(info["keys"])
         return tuple(selected)
