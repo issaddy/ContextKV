@@ -242,16 +242,10 @@ class CooperativeController:
         from .source_windows import numbered_text
         index = state.document_index
         output_tokens = self.settings.get("semantic_output_tokens", 8192)
-
-        def input_budget(binding):
-            headers = "".join(f"[S{i+1}] {block.title} | version={block.key.version}\n\n\n"
-                              for i, block in enumerate(binding.blocks))
-            fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM),
-                Message("user", headers), *history_messages(snapshot.raw_history),
-                Message("user", state.query.task.raw_question+"\n"+binding.instruction)))
-            available = self.policy.max_total_model_tokens-output_tokens-len(fixed.input_ids)
-            return min(self.settings.get("semantic_input_tokens", available), available)
-
+        fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM),
+            *history_messages(snapshot.raw_history), Message("user", state.query.task.raw_question)))
+        input_tokens = min(self.settings.get("semantic_input_tokens", 8192),
+            self.policy.max_total_model_tokens-output_tokens-len(fixed.input_ids))
         semantic_needs = {program.need_id for _, program in state.table_parts}
         parts = [(index, program) for program in state.programs if program.need_id in need_ids
                  and program.need_id not in semantic_needs and self._population_complete(index, program)]
@@ -260,8 +254,6 @@ class CooperativeController:
         unbound = need_ids - bound
         if index.tables and unbound and not state.table_read:
             table_units = index.binding_units()
-            input_tokens = input_budget(semantic_binding(state.query, index, sorted(unbound),
-                operations=resolved_operations))
             pending, size = [], 0
             packets = []
             for table in index.tables.values():
@@ -292,8 +284,6 @@ class CooperativeController:
         if fresh:
             operations = resolved_operations or None
             population = tuple(unit.unit_id for unit in outside)
-            input_tokens = input_budget(semantic_projection(state.query, fresh, sorted(need_ids),
-                population_unit_ids=population, operations=operations))
             for number, units in enumerate(self._source_packs(fresh, input_tokens, lambda unit: numbered_text(unit.text)[0])):
                 projection = semantic_projection(state.query, units, sorted(need_ids),
                     population_unit_ids=population, operations=operations)
