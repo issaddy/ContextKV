@@ -53,7 +53,7 @@ class SGLangEngineClient:
     async def compute(self, request, *, session_id, request_id, max_new_tokens,
                       mode="auto", recompute_ratio=0.15, quality_loss=0.0,
                       quality_price_ms=0.0, response_schema=None, cache_namespace=None,
-                      cache_scope="shared"):
+                      cache_scope="shared", costs=None):
         """One native submission carries the chosen input and future source demand."""
         sampling = {**self._sampling_params, "max_new_tokens": max_new_tokens}
         if response_schema is not None:
@@ -68,7 +68,7 @@ class SGLangEngineClient:
                 "cache_scope": cache_scope,
                 "blocks": list(request.blocks), "demand": list(request.demand),
                 "recompute_ratio": recompute_ratio, "quality_loss": quality_loss,
-                "quality_price_ms": quality_price_ms,
+                "quality_price_ms": quality_price_ms, "costs": costs or {},
             },
         }
         try:

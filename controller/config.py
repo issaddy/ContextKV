@@ -11,6 +11,7 @@ import yaml
 def load_kv_policy(settings):
     asset = json.loads(Path(settings["kv_quality_asset"]).read_text())
     return {"recompute_ratio": asset["recompute_ratio"], "quality_loss": asset["quality_loss"],
+            "costs": asset["costs"],
             "quality_price_ms": settings["quality_price_ms"] if "quality_price_ms" in settings
             else 1000 / settings["prices"]["seconds"]}
 

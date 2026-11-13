@@ -1,6 +1,6 @@
 # 实测指标
 
-[本轮完整报告](../docs/study/final_results.md)按四个 benchmark 分别汇报各自 50 题的普通问答、ContextKV、LlamaIndex 比较，以及实际多轮历史、辅助训练、物理资源和缓存配对。
+[重构前报告](../docs/study/final_results.md)按四个 benchmark 分别汇报普通问答、ContextKV、LlamaIndex 比较，以及实际多轮历史、辅助训练、物理资源和缓存配对。共享编码与 InfoFlow 重构后的运行状态见[运行手册](../docs/study/final_runbook.md)。
 
 | 文件 | 内容 |
 |---|---|

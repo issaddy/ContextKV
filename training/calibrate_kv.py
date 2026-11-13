@@ -43,13 +43,15 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
 
     try:
         await asyncio.gather(*(pair(row) for row in source))
+        costs = (await engine.metrics())["costs"]
     finally:
         await engine.aclose()
     await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
     records = [{"task_id": task_id, "exact": pair["exact"]["quality"],
                 "infoflow": pair["infoflow"]["quality"]} for task_id, pair in pairs]
     asset = {"recompute_ratio": ratio, "quality_loss":
-             sum(row["exact"]-row["infoflow"] for row in records)/len(records), "pairs": records}
+             sum(row["exact"]-row["infoflow"] for row in records)/len(records),
+             "costs": costs, "pairs": records}
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asset, ensure_ascii=False, indent=2)+"\n")
