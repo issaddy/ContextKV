@@ -114,13 +114,15 @@ async def collect(args):
         with path.open("a") as output:
             output.write(json.dumps(record, ensure_ascii=False)+"\n")
 
-    def state_for(query, encoded, observed, all_units, identity, totals):
+    def state_for(query, encoded, observed, all_units, identity, totals, catalogue):
+        from adapters.version_structure import catalogue_versions
         blocks = source_blocks(observed)
         state = SharedEvidenceState(replace(query), encoded, EvidencePool(tuple(observed), blocks), (),
             DocumentIndex.from_blocks(source_blocks(all_units)), body_tokens=config["selection"]["body_tokens"],
             population_units=tuple(observed) if query.task.coverage_scope == "all_supplied_documents" else (),
             cache_scope=identity, cache_namespace=identity, totals=totals)
         SharedEvidenceProvider._finish_state(state)
+        state.version_catalogue = catalogue_versions(catalogue, query.task.version_intent.document_families)
         return state
 
     async def answer(row, state, snapshot, identity, previous_totals):
@@ -152,7 +154,7 @@ async def collect(args):
             totals = execution_totals()
             if args.stage == "sets":
                 encoded = await asyncio.to_thread(evidence_encoder.encode, query, units)
-                state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare", totals)
+                state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare", totals, row.get("catalogue", ()))
                 observations = []
                 for number, chosen in enumerate(candidate_sets(encoded.frontier(units))):
                     identity = f"sets:{row['task_id']}:{number}"
@@ -186,7 +188,7 @@ async def collect(args):
                 encoded = new if encoded is None else encoded.merge(new)
                 observed = units[:start+len(fresh)]
                 if state is None:
-                    state = state_for(query, encoded, observed, units, branch_id, totals)
+                    state = state_for(query, encoded, observed, units, branch_id, totals, row.get("catalogue", ()))
                 else:
                     state = replace(state, evidence=encoded, pool=EvidencePool(observed, source_blocks(observed)),
                         costs=None, cache_scope=branch_id, cache_namespace=branch_id)

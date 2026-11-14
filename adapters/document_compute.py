@@ -834,57 +834,6 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
-def semantic_evidence_projection(question, units, *, retained_tokens, tokenizer, source_headers=()):
-    """Select original line indices; the model never reconstructs source text."""
-    import json
-    from dataclasses import replace
-    from controller.schema import EvidenceBlock
-    from controller.source_windows import numbered_lines
-    identities, blocks, locations, properties = {}, [], {}, {}
-    for index, unit in enumerate(units):
-        identity = f"S{index+1}"
-        identities[identity] = unit
-        body, offsets = numbered_lines(unit.text, tokenizer)
-        locations[identity] = offsets
-        origin = unit.source_spans[0]
-        key = replace(origin.source_key,
-            passage_id=f"{origin.source_key.passage_id}:indexed-lines:{origin.start}:{origin.end}")
-        blocks.append(EvidenceBlock(key, "", unit.heading, body))
-        properties[identity] = {"type": "array", "maxItems": len(offsets),
-            "items": {"type": "integer", "minimum": 0, "maximum": len(offsets)-1}}
-    schema = {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
-    instruction = ("Examine every supplied source. For each source ID return the selected original line numbers "
-        "containing the fields and statements needed to answer the question. Use an empty list for unrelated sources. "
-        "Preserve source entity/title, relevant attributes, directed relationships, conditions, exceptions, dates, "
-        "units and versions. Retain facts needed to decide eligibility even when they are negative or ambiguous; "
-        "the final answer decides which members satisfy the conditions. For global relationships keep relevant "
-        "cross-source links even when the other source is in another batch. The document catalogue identifies "
-        "the supplied population. For relationships within that population, retain links to its members, "
-        "not unrelated external entities. Return each selected line number once, "
-        "in original order. Return only source IDs and arrays of line numbers, without copied text or explanations. "
-        f"The selected original lines share a budget of {retained_tokens} tokens; their token counts are shown. "
-        "Keep necessary facts and leave unrelated lines out.\nQuestion: " + question +
-        "\nDocument catalogue (literal openings, not complete evidence):\n" +
-        "\n".join(f"{block.title}\n{block.text}" for block in source_headers))
-
-    def decode_evidence(text):
-        selected = json.loads(text)
-        result = []
-        for identity, unit in identities.items():
-            offsets, merged = locations[identity], []
-            for number in sorted(set(selected[identity])):
-                left, right = offsets[number]
-                if merged and left == merged[-1][1]:
-                    merged[-1] = merged[-1][0], right
-                else:
-                    merged.append((left, right))
-            origin = unit.source_spans[0]
-            result.extend(EvidenceBlock(origin.source_key, "", unit.heading, unit.text[left:right],
-                span=(origin.start+left, origin.start+right)) for left, right in merged)
-        return tuple(result)
-
-    return SemanticBinding(tuple(blocks), instruction, schema, decode_evidence)
-
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""
     from dataclasses import replace

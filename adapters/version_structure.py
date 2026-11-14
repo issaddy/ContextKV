@@ -8,6 +8,15 @@ import re
 from adapters.document_compute import DocumentIndex, _span, _unique_spans
 
 
+def catalogue_versions(catalogue, families=()):
+    """Compact source-declared version axis, shared by runtime and training."""
+    result = {}
+    for row in sorted(catalogue, key=lambda row: (row["family"], tuple(row.get("version_order") or ()))):
+        if not families or row["family"] in families:
+            result.setdefault(row["family"], []).append(row["version"])
+    return result
+
+
 @dataclass(frozen=True)
 class VersionPart:
     address: tuple[str, ...]

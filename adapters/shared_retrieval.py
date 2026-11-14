@@ -10,7 +10,7 @@ from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
 from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder
-from adapters.version_structure import VersionIndex
+from adapters.version_structure import VersionIndex, catalogue_versions
 from controller.schema import EvidencePool, SourceSpan
 from controller.schema import OnlineContext, QueryContext, history_messages
 from controller.cooperative_request import EvidenceSelection
@@ -304,10 +304,7 @@ class SharedEvidenceProvider:
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units)
-        for row in sorted(catalogue, key=lambda row: (row["family"],
-                versions.versions[row["family"], row["version"]]["order"])):
-            if not families or row["family"] in families:
-                state.version_catalogue.setdefault(row["family"], []).append(row["version"])
+        state.version_catalogue = catalogue_versions(catalogue, families)
         if supplied_blocks is not None:
             from controller.cooperative_request import document_headers
             state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)

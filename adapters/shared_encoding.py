@@ -40,12 +40,12 @@ class ReadyBatch:
                     self.running = False
                     return
             try:
-                results = self.execute([value for value, _ in jobs])
-                for (_, target), result in zip(jobs, results):
-                    target.set_result(result)
+                self.execute([value for value, _ in jobs],
+                    deliver=lambda index, result: jobs[index][1].set_result(result))
             except Exception as error:
                 for _, target in jobs:
-                    target.set_exception(error)
+                    if not target.done():
+                        target.set_exception(error)
 
     def close(self):
         self.worker.shutdown(wait=True)
@@ -195,7 +195,7 @@ class EvidenceEncoding:
         selected = candidates[best]
         return cost_model.order(selected) if cost_model else selected
 
-    def project_population(self, units, *, body_tokens, target_tokens, cost_model=None, seconds_price=0.0):
+    def project_population(self, units, *, body_tokens, target_tokens, source_headers=(), cost_model=None, seconds_price=0.0):
         """Cover each source, then add query-weighted representative spans within it."""
         import torch
         if not units:
@@ -221,9 +221,22 @@ class EvidenceEncoding:
             selected.update(closures[best])
         used = sum(sizes[i] for i in selected)
         target_tokens = min(body_tokens, max(used, target_tokens))
+        import re
+        normalize = lambda text: re.sub(r"\W+", "", text.casefold())
+        titles = {}
+        for block in source_headers:
+            title = normalize(block.title.split(" | ", 1)[-1])
+            titles.setdefault(title, []).append((block.key.corpus_id, block.key.document_id, block.key.version))
+        titles = {title: owners[0] for title, owners in titles.items() if title and len(owners) == 1}
+        partitions = {}
+        for key, members in groups.items():
+            for i in members:
+                text = normalize(units[i].text)
+                links = tuple(owner for title, owner in titles.items() if owner != key and title in text)
+                partitions.setdefault((key, links), []).append(i)
         similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
         same_source = torch.zeros_like(similarity)
-        for members in groups.values():
+        for members in partitions.values():
             same_source[torch.tensor(members)[:, None], torch.tensor(members)[None, :]] = 1
         relevance = self.relevance.clamp_min(0)
         affinity = similarity*same_source*relevance[None, :]
@@ -418,7 +431,7 @@ class SharedQueryEncoder:
             "current_turn_id": current_turn_id, "catalogue": catalogue, "source_scope": source_scope,
             "history_turns": history_turns})
 
-    def encode_many(self, requests):
+    def encode_many(self, requests, deliver=None):
         import torch
         started = time.perf_counter()
         prepared = [query_input(self.tokenizer, row["history"], row["question"], row["current_turn_id"],
@@ -426,12 +439,13 @@ class SharedQueryEncoder:
         batch = self.tokenizer.pad([item[0] for item in prepared], padding=True, return_tensors="pt").to(self.model.device)
         with self.backbone_lock, torch.no_grad():
             states = self.model(**batch, use_cache=False).last_hidden_state.float()
-            results = [self._encode(**row, _prepared=item, _states=states[index, -len(item[0]["input_ids"]):])
-                       for index, (row, item) in enumerate(zip(requests, prepared))]
-        elapsed = (time.perf_counter()-started)*1000
-        total = sum(item.usage["input_tokens"] for item in results)
-        for result in results:
-            result.usage["compute_ms"] = elapsed*result.usage["input_tokens"]/total
+            results = []
+            for index, (row, item) in enumerate(zip(requests, prepared)):
+                result = self._encode(**row, _prepared=item, _states=states[index, -len(item[0]["input_ids"]):])
+                result.usage["compute_ms"] = (time.perf_counter()-started)*1000
+                results.append(result)
+                if deliver is not None:
+                    deliver(index, result)
         return results
 
     def _encode(self, history, question, task_id, current_turn_id, *, catalogue=(), source_scope=(),
@@ -638,12 +652,22 @@ class SharedEvidenceEncoder:
     def encode(self, query, units):
         return self.ready.submit((query, tuple(units)))
 
-    def encode_many(self, requests):
+    def encode_many(self, requests, deliver=None):
         import torch
         started = time.perf_counter()
         prepared = [(owner, batch, self.prepare(query.evidence_query, batch))
                     for owner, (query, units) in enumerate(requests) for batch in self._batches(query, units)]
         outputs = [{} for _ in requests]
+        remaining = [sum(owner == i for owner, _, _ in prepared) for i in range(len(requests))]
+        results = [None for _ in requests]
+        def finish(owner):
+            query, units = requests[owner]
+            result = self._encode(query, units, outputs[owner])
+            result.usage["compute_ms"] = (time.perf_counter()-started)*1000
+            results[owner] = result
+            outputs[owner].clear()
+            if deliver is not None:
+                deliver(owner, result)
         groups, current, maximum = [], [], 0
         for item in prepared:
             size = len(item[2][0])
@@ -655,6 +679,9 @@ class SharedEvidenceEncoder:
         if current:
             groups.append(current)
         with torch.no_grad():
+            for owner, count in enumerate(remaining):
+                if not count:
+                    finish(owner)
             for group in groups:
                 batch = self.tokenizer.pad([{"input_ids": item[2][0], "attention_mask": [1]*len(item[2][0])}
                     for item in group], padding=True, return_tensors="pt").to(self.model.device)
@@ -664,11 +691,9 @@ class SharedEvidenceEncoder:
                     documents, scores, query = project_markers(self.model, states, positions, query_position)
                     outputs[owner][tuple(unit.unit_id for unit in units)] = (
                         states.float(), documents, scores, addresses, len(ids), query)
-            results = [self._encode(query, units, outputs[index]) for index, (query, units) in enumerate(requests)]
-        elapsed = (time.perf_counter()-started)*1000
-        total = sum(item.usage["input_tokens"] for item in results)
-        for result in results:
-            result.usage["compute_ms"] = elapsed*result.usage["input_tokens"]/total if total else 0.
+                    remaining[owner] -= 1
+                    if not remaining[owner]:
+                        finish(owner)
         return results
 
     def _encode(self, query, units, outputs):

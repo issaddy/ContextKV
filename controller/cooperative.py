@@ -406,6 +406,7 @@ class CooperativeController:
                 share = self.engine_info.gpu_capacity_tokens//max(1, len(self._locks))
                 ids = state.evidence.project_population(units, body_tokens=budget,
                     target_tokens=share-prompt_tokens-self.policy.max_new_tokens,
+                    source_headers=state.source_headers,
                     cost_model=costs, seconds_price=self.prices.seconds)
             else:
                 ids = state.evidence.select(units, body_tokens=budget,
@@ -413,75 +414,6 @@ class CooperativeController:
                     need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed)
             return costs, ids
         state.costs, state.selected_ids = await asyncio.to_thread(select)
-
-    async def _population_sources(self, state, snapshot, computations, complete):
-        from adapters.document_compute import semantic_evidence_projection
-        from .source_windows import numbered_lines
-        budget, _ = self._answer_budget(state, snapshot, computations)
-        if state.budget_exhausted:
-            return ()
-        consumed = {}
-        for record in computations:
-            for span in record["sources"]:
-                consumed.setdefault(decode(EvidenceKey, span["source_key"]), []).append((span["start"], span["end"]))
-
-        def unread(unit):
-            span = unit.source_spans[0]
-            cursor = span.start
-            for first, last in sorted(consumed.get(span.source_key, ())):
-                if first >= span.end:
-                    break
-                if last <= cursor:
-                    continue
-                if unit.text[cursor-span.start:max(cursor, first)-span.start].strip():
-                    return True
-                cursor = max(cursor, last)
-            return bool(unit.text[cursor-span.start:].strip())
-
-        units = tuple(unit for unit in state.population_units if unread(unit))
-        if not units:
-            return ()
-        blocks = blocks_for_units(units, state.pool.source_blocks)
-        encode = self.template.tokenizer.encode
-        if len(encode(source_body(blocks)[0], add_special_tokens=False)) <= budget:
-            return blocks
-        packs = tuple(self._source_packs(units, self.settings.get("semantic_input_tokens", 8192),
-            lambda unit: numbered_lines(unit.text, self.template.tokenizer)[0]))
-        retained = [blocks_for_units(pack, state.pool.source_blocks) for pack in packs]
-        def size(group):
-            return len(encode(source_body(group)[0], add_special_tokens=False))
-        weights = [size(group) for group in retained]
-        total = remaining = sum(weights)
-        projected = set()
-        # Preserve the leading raw context for Native prefix reuse. Compress only
-        # as many trailing packs as needed for the actual final window.
-        for number in reversed(range(len(packs))):
-            if remaining <= budget:
-                break
-            pack, weight = packs[number], weights[number]
-            quota = int(budget*weight/total)
-            projection = await asyncio.to_thread(semantic_evidence_projection,
-                state.query.task.raw_question, pack, retained_tokens=quota,
-                tokenizer=self.template.tokenizer, source_headers=state.source_headers)
-            request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
-                projection.blocks, instruction=projection.instruction,
-                future_sources=with_document_headers(tuple(block for group in retained[:number]
-                    for block in group), state.source_headers),
-                system_prompt=self.policy.system_prompt or SYSTEM)
-            full_selection = {identity: list(range(spec["maxItems"]))
-                              for identity, spec in projection.schema["properties"].items()}
-            output_tokens = len(encode(json.dumps(full_selection),
-                                       add_special_tokens=False))+1
-            allowance = self._reading_allowance(state, snapshot, request, output_tokens)
-            if not allowance:
-                state.budget_exhausted = True
-                break
-            result = await complete(request, f"coverage:{number}", schema=projection.schema, output_tokens=allowance)
-            retained[number] = projection.decode(result["text"])
-            remaining += size(retained[number])-weight
-            projected.add(number)
-        return tuple(block for number, group in enumerate(retained)
-                     if not state.budget_exhausted or number in projected for block in group)
 
     def _value_state(self, state, totals, arrived, session_id):
         native = {**self.kv_policy["costs"], **self.native_state.get(session_id, {})}
