@@ -199,6 +199,8 @@ async def prepare_labels(args):
     from itertools import cycle
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.query_model)
+    label_tokenizer = (None if args.task_only or args.values_only
+                       else AutoTokenizer.from_pretrained(args.teacher_model))
     states = prepare_states(args, tokenizer)
     from training.controlled_tasks import controlled_states
     states.extend(controlled_states(tokenizer, train_families=args.controlled_train_families,
@@ -237,14 +239,27 @@ async def prepare_labels(args):
                 labeled = row
             else:
                 bindings, join_keys = [], {}
-                # Source dependencies can expand a small candidate set into a whole
-                # document. Label every window without repeating that whole document.
-                for start in range(0, len(row["units"]), args.candidates):
-                    sources, source_locations = numbered_sources(row["units"][start:start+args.candidates])
-                    field = await complete(FIELD_INSTRUCTION, {"messages": messages, "task": task,
-                        "sources": sources, "reference_answer": row["reference_answer"],
+                sources, locations = numbered_sources(row["units"])
+                start = 0
+                while start < len(sources):
+                    value = {"messages": messages, "task": task, "sources": [],
+                        "reference_answer": row["reference_answer"],
                         "known_join_keys": [{"need_id": need, "field": text, "relation_group": group}
-                                            for (need, text), group in join_keys.items()]},
+                                            for (need, text), group in join_keys.items()]}
+                    end = start
+                    while end < len(sources):
+                        trial = {**value, "sources": sources[start:end+1]}
+                        tokens = label_tokenizer.apply_chat_template([
+                            {"role": "system", "content": FIELD_INSTRUCTION},
+                            {"role": "user", "content": json.dumps(trial, ensure_ascii=False)}],
+                            tokenize=True, return_dict=False, add_generation_prompt=True, enable_thinking=False)
+                        if end > start and len(tokens)+4096 > args.label_context_tokens:
+                            break
+                        value = trial
+                        end += 1
+                    source_locations = {item["source_id"]: locations[item["source_id"]]
+                                        for item in value["sources"]}
+                    field = await complete(FIELD_INSTRUCTION, value,
                         field_label_schema(row, source_locations))
                     bindings.extend(source_bindings(source_locations, field["bindings"]))
                     for item in field["bindings"]:
@@ -252,6 +267,7 @@ async def prepare_labels(args):
                             unit, offsets = source_locations[item["source"]["source_id"]]
                             left, right = word_offsets(item["source"], offsets)
                             join_keys[item["need_id"], unit["text"][left:right]] = item["relation_group"]
+                    start = end
                 labeled = {**row, "bindings": bindings}
             sink.write(json.dumps(labeled, ensure_ascii=False)+"\n")
             sink.flush()
@@ -320,6 +336,7 @@ def main():
     parser.add_argument("--query-model", required=True)
     parser.add_argument("--endpoint", nargs="+", default=["http://127.0.0.1:30000"])
     parser.add_argument("--teacher-model", default="/data/models/qwen3-32b")
+    parser.add_argument("--label-context-tokens", type=int, default=32768)
     parser.add_argument("--output", required=True)
     parser.add_argument("--task-only", action="store_true", help="Label diverse conversation pairs without evidence retrieval or field annotation")
     parser.add_argument("--values-only", action="store_true", help="Prepare task/source states for set and stop collection with the existing field head")
