@@ -741,6 +741,15 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
     return result
 
 
+def checkpoint_extent(req, end):
+    """Admit only the Native prefix demanded by a cooperative request."""
+    state = getattr(req, 'contextkv_compute_state', None)
+    if state is None or state.metadata.get('mode') != 'auto' or not state.metadata.get('blocks'):
+        return end
+    retained = max((item.get('native_prefix_end', 0) for item in state.metadata.get('demand', ())), default=0)
+    return min(end, max(req.kv.cache_protected_len, retained))
+
+
 def private_release_segments(req, start, end):
     """Exclude shared pages and temporary scoring pages already returned."""
     state = getattr(req, 'contextkv_compute_state', None)

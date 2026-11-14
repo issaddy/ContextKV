@@ -268,9 +268,20 @@ diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/sr
 diff --git a/python/sglang/srt/mem_cache/common.py b/python/sglang/srt/mem_cache/common.py
 --- a/python/sglang/srt/mem_cache/common.py
 +++ b/python/sglang/srt/mem_cache/common.py
-@@ -430,7 +430,8 @@
+@@ -276,6 +276,7 @@
+     # insert; a finished request belongs in release_kv_cache.
+     assert not req.finished(), f"checkpointing finished request {req.rid}"
+     if not req.skip_radix_cache_insert:
+-        tree_cache.checkpoint(req, up_to=req.extend_end)
++        from sglang.srt.managers.contextkv_compute import checkpoint_extent
++        tree_cache.checkpoint(req, up_to=checkpoint_extent(req, req.extend_end))
+     # The next extend resumes after this one, published or not.
+     req.prefix_len = req.extend_end
+@@ -430,7 +431,9 @@
          req.refresh_fill_ids()
-         tree_cache.checkpoint(req, up_to=owned_kv_len)
+-        tree_cache.checkpoint(req, up_to=owned_kv_len)
++        from sglang.srt.managers.contextkv_compute import checkpoint_extent
++        tree_cache.checkpoint(req, up_to=checkpoint_extent(req, owned_kv_len))
      # The protected prefix is not this req's to free.
 -    tree_cache.free_kv_row(req.kv, [(req.kv.cache_protected_len, owned_kv_len)])
 +    from sglang.srt.managers.contextkv_compute import private_release_segments
