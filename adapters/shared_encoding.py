@@ -195,7 +195,7 @@ class EvidenceEncoding:
         selected = candidates[best]
         return cost_model.order(selected) if cost_model else selected
 
-    def project_population(self, units, *, body_tokens, target_tokens, source_headers=(), cost_model=None, seconds_price=0.0):
+    def project_population(self, units, *, body_tokens, target_tokens, cost_model=None, seconds_price=0.0):
         """Cover each source, then add query-weighted representative spans within it."""
         import torch
         if not units:
@@ -221,22 +221,9 @@ class EvidenceEncoding:
             selected.update(closures[best])
         used = sum(sizes[i] for i in selected)
         target_tokens = min(body_tokens, max(used, target_tokens))
-        import re
-        normalize = lambda text: re.sub(r"\W+", "", text.casefold())
-        titles = {}
-        for block in source_headers:
-            title = normalize(block.title.split(" | ", 1)[-1])
-            titles.setdefault(title, []).append((block.key.corpus_id, block.key.document_id, block.key.version))
-        titles = {title: owners[0] for title, owners in titles.items() if title and len(owners) == 1}
-        partitions = {}
-        for key, members in groups.items():
-            for i in members:
-                text = normalize(units[i].text)
-                links = tuple(owner for title, owner in titles.items() if owner != key and title in text)
-                partitions.setdefault((key, links), []).append(i)
         similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
         same_source = torch.zeros_like(similarity)
-        for members in partitions.values():
+        for members in groups.values():
             same_source[torch.tensor(members)[:, None], torch.tensor(members)[None, :]] = 1
         relevance = self.relevance.clamp_min(0)
         affinity = similarity*same_source*relevance[None, :]

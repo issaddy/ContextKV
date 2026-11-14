@@ -406,7 +406,6 @@ class CooperativeController:
                 share = self.engine_info.gpu_capacity_tokens//max(1, len(self._locks))
                 ids = state.evidence.project_population(units, body_tokens=budget,
                     target_tokens=share-prompt_tokens-self.policy.max_new_tokens,
-                    source_headers=state.source_headers,
                     cost_model=costs, seconds_price=self.prices.seconds)
             else:
                 ids = state.evidence.select(units, body_tokens=budget,
