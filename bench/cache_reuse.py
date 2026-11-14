@@ -59,6 +59,8 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                         evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
                         system_prompt=original.messages[0].content)
+                    shift = len(request.input_ids)-len(original.input_ids)
+                    request = replace(request, query_span=tuple(position+shift for position in original.query_span))
                     if mode == "auto":
                         wanted = {d["source_id"]:d for d in original.demand}
                         request = replace(request,demand=tuple({**wanted[b["source_id"]],"native_prefix_end":b["end"]}
