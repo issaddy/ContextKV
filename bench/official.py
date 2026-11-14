@@ -261,16 +261,6 @@ def _conversation_fields(messages):
     return previous, messages[-1]["text"]
 
 
-def _radbench_prompt(official, record):
-    previous, question = _conversation_fields(record["input"])
-    row = {"document": official.extract_document_texts(record["contexts"]),
-           "response": official.extract_texts(record["predictions"]),
-           "reference_answer": official.extract_reference(record["targets"]),
-           "previous_conversation": previous, "current_question": question}
-    # The author's formatter only consumes DataFrame.iterrows().
-    return official.format_conversation_radbench(SimpleNamespace(iterrows=lambda: iter(((0, row),))))[0]
-
-
 def _structured_radbench(official, operation, provider, model, input_path, output_path, *, workers, task_ids):
     extract, split = official.extract_conversation, official.split_conversation
     official.extract_conversation = lambda messages: messages
@@ -299,31 +289,6 @@ def _structured_radbench(official, operation, provider, model, input_path, outpu
         return {"workers": len(shards), "shard_tasks": [len(shard) for shard in shards]}
     finally:
         official.extract_conversation, official.split_conversation = extract, split
-
-
-def load_radbench_contract(checkout):
-    """Reuse the frozen author's RB_llm prompt and parser without model dependencies."""
-    root = Path(checkout).resolve()
-    source = json.loads((root / "contextkv-source.json").read_text())
-    if source["commit"] != DATASET_COMMIT:
-        raise ValueError("official source checkout is not the frozen MTRAG revision")
-    path = root / "scripts/evaluation/judge_utils.py"
-    names = {"extract_document_texts", "extract_texts", "extract_reference",
-             "format_conversation_radbench", "extract_rating"}
-    parsed = ast.parse(path.read_text(), filename=str(path))
-    functions = ast.Module(body=[node for node in parsed.body
-        if isinstance(node, ast.FunctionDef) and node.name in names], type_ignores=[])
-    namespace = {"ast": ast, "re": re}
-    exec(compile(functions, str(path), "exec"), namespace)
-    official = SimpleNamespace(**namespace)
-
-    def prompt(record):
-        return _radbench_prompt(official, record)
-
-    identity = {"metric": "RB_llm", "source_commit": source["commit"],
-                "conversation_format": "structured_message_boundaries_v1",
-                "normalization": "official_extract_rating_divide_by_10"}
-    return SimpleNamespace(prompt=prompt, parse=namespace["extract_rating"], identity=identity)
 
 
 def load_conditioning_rules(checkout):

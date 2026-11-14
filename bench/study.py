@@ -87,16 +87,6 @@ def dataset_rows(spec, split, task_ids=None):
     return rows
 
 
-def declare_cohorts(matrix, *, splits=("dev", "test"), datasets=None):
-    matrix = merge_config(matrix, {})
-    cohorts = dict(matrix.get("cohorts", {}))
-    for split in splits:
-        cohorts[split] = {**cohorts.get(split, {}), **{name: [row["task_id"] for row in dataset_rows(spec, split)]
-            for name, spec in _track_specs(matrix, split, datasets).items()}}
-    matrix["cohorts"] = cohorts
-    return matrix
-
-
 def method_config(config, method, dataset, split):
     retrieval = {key: dataset[key] for key in ("corpus_path", "corpus_id", "sparse_index", "dense_index")
                  if key in dataset}
@@ -153,11 +143,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     devices = tuple(resource_settings["gpu_devices"])
     process_ids = tuple(sorted({os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)),
                                *resource_settings.get("process_ids", ())}))
-    measurement_kind = "hardware" if run.engine.kind == "sglang" else "simulation"
     write_json(directory/"generation_manifest.json", {"method": method, "dataset": dataset_name,
         "split": split, "protocol": protocol, "task_ids": expected,
         "concurrency": concurrency, "retrieval": provider.manifest,
-        "measurement_kind": measurement_kind,
+        "measurement_kind": "hardware",
         "resource_scope": {"gpu_devices": devices, "process_roots": process_ids}})
     catalogue_path = spec.get("supplied_source_catalogue")
     catalogue = ({row["source_id"]: {**row, "document_id": row["source_id"], "source": row["source_uri"]}
@@ -193,11 +182,11 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             record = {"method": method["id"], "dataset": dataset_name, "split": split, "protocol": protocol,
                 "task_id": task_id, "conversation_id": sid, "turn": row["turn"], "request_id": request_id,
                 "question": query, "history_origin": "author_reference_import" if protocol == "P1" else "model_actual",
-                "measurement_kind": measurement_kind, "metrics": {}, "generation_dir": str(directory.resolve())}
+                "measurement_kind": "hardware", "metrics": {}, "generation_dir": str(directory.resolve())}
             try:
                 async with semaphore:
                     supplied, metadata = None, None
-                    if row.get("coverage_mode") or spec.get("supplied_documents", dataset_name == "loong"):
+                    if row.get("coverage_mode") or spec.get("supplied_documents", False):
                         contexts = [catalogue[key] for key in row["scope_source_ids"]] if catalogue else row["contexts"]
                         supplied = tuple(make_evidence(context["text"], context["document_id"],
                             corpus_id=dataset_name, passage_id=context["document_id"], version=context.get("version", "v1"),

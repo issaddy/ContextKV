@@ -1,11 +1,6 @@
 engine:
-  kind: sglang
   base_url: http://127.0.0.1:30000
-  page_size: 64
   timeout_seconds: 180
-  gpu_capacity_tokens: 32768
-  host_capacity_tokens: 61056
-  stream: false
 model:
   scope_path: configs/model_scopes/qwen3-32b.local.json
 context:

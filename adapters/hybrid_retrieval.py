@@ -31,13 +31,10 @@ class DenseIndex:
             raise ValueError("dense vector rows must align with unique passage IDs")
 
     @classmethod
-    def build(cls, contexts, encoder, directory, *, corpus_snapshot_id, batch_size=128,
-              show_progress=False):
+    def build(cls, contexts, encoder, directory, *, corpus_snapshot_id, batch_size=128):
         import numpy as np
         if batch_size < 1:
             raise ValueError("index build batch size must be positive")
-        if encoder.manifest.get("document_encoder") is not None:
-            raise ValueError("build document vectors with the base document encoder, not a query view")
         contexts = tuple(sorted(contexts, key=lambda c: c.document_id))
         if not contexts:
             raise ValueError("dense corpus must not be empty")
@@ -57,10 +54,6 @@ class DenseIndex:
                                                    shape=(len(contexts), values.shape[1]))
             vectors[start:start+len(batch)] = values
             vectors.flush()
-            completed = start+len(batch)
-            if show_progress and (start//4096 != completed//4096 or completed == len(contexts)):
-                print(json.dumps({"encoded_passages": completed, "total_passages": len(contexts),
-                                  "elapsed_seconds": time.perf_counter()-started}), flush=True)
         (directory/"passages.jsonl").write_text("".join(json.dumps(asdict(c), ensure_ascii=False)+"\n" for c in contexts))
         manifest.update(status="complete", dimensions=vectors.shape[1], build_seconds=time.perf_counter()-started)
         target.write_text(json.dumps(manifest, indent=2)+"\n")

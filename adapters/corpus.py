@@ -32,32 +32,16 @@ def configuration_anchors(text: str) -> tuple[str, ...]:
 class CorpusIndex:
     """Public evidence metadata indexed once, with version-specific dependencies."""
     def __init__(self, blocks: Iterable[EvidenceBlock], *, corpus_id: str, snapshot_id: str,
-                 source_positions=None, retrieval_texts=None, source_identities=None,
+                 source_document_ids=None, retrieval_texts=None,
                  source_metadata=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
         self.source_metadata = source_metadata or {}
         self._retrieval_texts = retrieval_texts or {}
-        self._source_identities = ({key: block.source_uri for key, block in self._blocks.items()}
-                                   if source_identities is None else source_identities)
+        self._source_document_ids = source_document_ids or {}
         self._passages: dict[str, list[EvidenceKey]] = {}
         for key in self._blocks:
             self._passages.setdefault(key.passage_id, []).append(key)
-        # Positions order original passages; they are never used to splice bodies.
-        groups = {}
-        for key, (document, start, source) in (source_positions or {}).items():
-            block = self._blocks[key]
-            group = (key.corpus_id, document, key.version, source, block.parent_section)
-            groups.setdefault(group, []).append((start, key))
-        self._neighbors = {}
-        self._source_document_ids = {key: value[0] for key, value in (source_positions or {}).items()}
-        self._document_windows = {}
-        self._window_documents = None
-        self.document_window_counts = {}
-        for members in groups.values():
-            ordered = [key for _, key in sorted(members)]
-            for index, key in enumerate(ordered):
-                self._neighbors[key] = tuple(ordered[max(0, index-1):index] + ordered[index+1:index+2])
 
     @classmethod
     def from_jsonl(cls, path: str | Path, *, corpus_id: str, snapshot_id: str) -> CorpusIndex:
@@ -71,7 +55,7 @@ class CorpusIndex:
         blocks: dict[tuple[str, str, str, str], EvidenceBlock] = {}
         identities: dict[tuple[str, str, str], list[EvidenceKey]] = {}
         pending: dict[EvidenceKey, tuple[Any, ...]] = {}
-        positions, retrieval_texts, source_identities, source_metadata = {}, {}, {}, {}
+        source_document_ids, retrieval_texts, source_metadata = {}, {}, {}
         for row in records:
             metadata = {**row.get("metadata", {}), **row}
             passage_id = str(metadata.get("passage_id", metadata.get("_id", "")))
@@ -103,16 +87,13 @@ class CorpusIndex:
             source_metadata[block.key] = {name: metadata[name] for name in (
                 "document_family", "valid_from", "valid_to", "published_at", "applicability",
                 "table_id", "heading", "current", "version_order") if name in metadata}
-            source_identity = str(metadata.get("source_uri") or metadata.get("source") or metadata.get("url") or "")
-            source_identities[block.key] = source_identity
             if span is not None:
-                positions[block.key] = (document_id, span[0], source_identity)
+                source_document_ids[block.key] = document_id
             elif snapshot_id.startswith("mtrag-"):
-                # MT-RAG passage-level IDs encode ingestion offsets. Preserve
-                # the existing evidence identity; only use the parent/order.
+                # MT-RAG ingestion IDs retain the source document for population expansion.
                 match = re.fullmatch(r"(.+)-(\d+)-(\d+)", passage_id)
                 if match:
-                    positions[block.key] = (match[1], int(match[2]), source_identity)
+                    source_document_ids[block.key] = match[1]
             identity = (corpus_id, document_id, passage_id, version)
             if identity in blocks:
                 raise EvidenceError(f"duplicate corpus passage/version: {identity}")
@@ -138,8 +119,8 @@ class CorpusIndex:
         resolved = [replace(block, dependencies=tuple(dict.fromkeys(
                     dependency_key(value, block.key) for value in pending[block.key])))
                     for block in blocks.values()]
-        return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_positions=positions,
-                   retrieval_texts=retrieval_texts, source_identities=source_identities,
+        return cls(resolved, corpus_id=corpus_id, snapshot_id=snapshot_id, source_document_ids=source_document_ids,
+                   retrieval_texts=retrieval_texts,
                    source_metadata=source_metadata)
 
     @property
@@ -153,14 +134,6 @@ class CorpusIndex:
         return tuple(key for key in legal_keys
                      if (self._source_document_ids.get(key, key.document_id), key.version) in documents)
 
-    def enrich(self, contexts: Iterable[Any]) -> tuple[EvidenceBlock, ...]:
-        """Resolve retrieved original text into its source reading body and conditions.
-
-        Retrieval document IDs identify corpus passages. Distinct source document
-        IDs and revision names come from this index. If two revisions have the
-        same body, callers must select exact EvidenceKeys through ``resolve``.
-        """
-        return self.resolve(self.retrieved_keys(contexts))
 
     def retrieved_keys(self, contexts: Iterable[Any]) -> tuple[EvidenceKey, ...]:
         """Map original retrieval order to exact keys, excluding added dependencies.
@@ -204,155 +177,6 @@ class CorpusIndex:
             result.append(context)
         return tuple(result)
 
-    def selection_group(self, context):
-        """Exact content with declared applicability for retrieval slot allocation.
-
-        This shares a reading slot, never source identities or corroboration.
-        Ranked selection retains each retrieved member for separate citations.
-        Different revisions, parent scopes or condition dependencies remain separate.
-        """
-        matches = self._context_matches(context)
-        if len(matches) != 1:
-            return (context.document_id,)
-        block = self._blocks[matches[0]]
-        return (block.title, block.text, block.key.corpus_id, block.key.version,
-                block.parent_section, frozenset(block.dependencies))
-
-    def selection_record(self, context):
-        """Expose source applicability already declared by the corpus.
-
-        The collection snapshot is an indexing revision, not a product version.
-        Only a source version distinct from that default is presented as such.
-        """
-        block = self._blocks[self._context_key(context)]
-        record = {"source": block.source_uri, "title": block.title, "text": block.text}
-        if block.key.version != self.snapshot_id:
-            record["version"] = block.key.version
-        if block.parent_section is not None:
-            record["section"] = block.parent_section
-        return record
-
-    def source_window(self, contexts):
-        """Add each hit's immediate original neighbors once, without recursive growth.
-
-        Windows stay within one source, document, version and declared section.
-        Explicit document/span metadata or MT-RAG ingestion IDs supply order.
-        Offsets need not describe identical overlapping text: each passage keeps
-        its own complete body and citation identity. Neighbors have no rank score.
-        """
-        primary = self.retrieved_keys(contexts)
-        return self._source_neighbors(primary)
-
-    def document_windows(self, contexts, documents):
-        """Add literal source windows; retain the original ranked passages.
-
-        Alignment is memoized per finite corpus passage, not per query. This is
-        called in the retriever's serialized selection stage before publication.
-        """
-        from controller.schema import OnlineContext
-        if documents is not self._window_documents:
-            self._document_windows.clear()
-            self._window_documents = documents
-        groups = {}
-        for key in self.retrieved_keys(contexts):
-            if key not in self._document_windows:
-                block = self._blocks[key]
-                window, reason = documents.window(self._source_document_ids.get(key, key.document_id),
-                    self._retrieval_texts.get(key, block.text), corpus_id=key.corpus_id,
-                    snapshot_id=self.snapshot_id, version=key.version,
-                    source=self._source_identities.get(key, ""))
-                self.document_window_counts[reason] = self.document_window_counts.get(reason, 0) + 1
-                self._document_windows[key] = window
-            window = self._document_windows[key]
-            if window is not None:
-                document, start, end = window
-                group = groups.setdefault((document.document_id, key.version), (document, []))
-                group[1].append((start, end))
-        result = []
-        for (_, version), (document, intervals) in groups.items():
-            merged = []
-            for start, end in sorted(set(intervals)):
-                if merged and start <= merged[-1][1]:
-                    merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-                else:
-                    merged.append((start, end))
-            for start, end in merged:
-                passage_id = f"source-window:v2:{document.document_id}:{start}:{end}"
-                existing = [key for key in self._passages.get(passage_id, ()) if key.version == version]
-                if existing:
-                    support = self._blocks[existing[0]]
-                else:
-                    source = document.source or f"{self.corpus_id}://{self.snapshot_id}/{document.document_id}"
-                    support = replace(make_evidence(document.text[start:end], document.document_id,
-                        corpus_id=self.corpus_id, passage_id=passage_id, version=version,
-                        source_uri=source, title=document.title,
-                        anchors=configuration_anchors(document.text[start:end]),
-                        provenance=(source, f"corpus_snapshot:{self.snapshot_id}",
-                                    f"original_document_span:{start}:{end}")), span=(start, end))
-                    self._blocks[support.key] = support
-                    self._passages.setdefault(passage_id, []).append(support.key)
-                result.append(OnlineContext(support.key.passage_id, support.text, support.source_uri, support.title))
-        return tuple(result)
-
-    def reading_contexts(self, contexts, documents):
-        """Read merged original windows instead of repeating their matched slices.
-
-        Explicit source structure keeps its existing dependency/section closure.
-        Raw ranking is returned separately by the retriever for evaluation/audit.
-        """
-        contexts = tuple(contexts)
-        keys = tuple(self._context_key(context) for context in contexts)
-        eligible = {key for key in keys if not self._blocks[key].dependencies
-                    and self._blocks[key].parent_section is None and key not in self._retrieval_texts}
-        windows = self.document_windows((context for context, key in zip(contexts, keys) if key in eligible),
-                                        documents)
-        window_blocks = [(context, self._blocks[self._context_key(context)]) for context in windows]
-        result = {}
-        for context, key in zip(contexts, keys):
-            origin = self._document_windows.get(key)
-            if origin is not None and key in eligible:
-                document, start, end = origin
-                context, key = next((view, window.key) for view, window in window_blocks
-                               if window.key.document_id == document.document_id and window.key.version == key.version
-                               and window.span[0] <= start and window.span[1] >= end)
-            result.setdefault(key, context)
-        return tuple(result.values())
-
-    def candidate_neighbors(self, contexts):
-        """Expand only candidates with known metadata; unselected hits may lack it."""
-        primary = tuple(matches[0] for context in contexts
-                        if len(matches := self._context_matches(context)) == 1)
-        return self._source_neighbors(primary)
-
-    def selection_support(self, contexts, *, neighbors=False):
-        """The exact context that selecting each reading unit will also require.
-
-        Resolve the same dependency closure used by generation. Optional adjacent
-        windows are evaluated with their hit, rather than appended after choice.
-        """
-        from controller.schema import OnlineContext
-        result = {}
-        for context in contexts:
-            key = self._context_key(context)
-            adjacent = self.retrieved_keys(self._source_neighbors((key,))) if neighbors else ()
-            result[context.document_id] = tuple(
-                OnlineContext(b.key.passage_id, b.text, b.source_uri, b.title)
-                for b in self.resolve((key, *adjacent)) if b.key != key)
-        return result
-
-    def _source_neighbors(self, primary):
-        from controller.schema import OnlineContext
-
-        seen, result = set(primary), []
-        for key in primary:
-            for neighbor in self._neighbors.get(key, ()):
-                if neighbor in seen:
-                    continue
-                seen.add(neighbor)
-                block = self._blocks[neighbor]
-                result.append(OnlineContext(block.key.passage_id, self._retrieval_texts.get(neighbor, block.text),
-                                            block.source_uri, block.title))
-        return tuple(result)
 
     def resolve(self, passages: Iterable[str | EvidenceKey | EvidenceBlock]) -> tuple[EvidenceBlock, ...]:
         """Return requested passages plus complete explicit condition/header closure.

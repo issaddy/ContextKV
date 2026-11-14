@@ -1,8 +1,7 @@
-"""Optional literal structure extension; never recover hierarchy lost in scraping.
+"""Extend literal tables with heading paths and explicitly nested numeric rows.
 
 Unnumbered tables retain their unsplit header. Parent paths come only from ATX
-Markdown headings and genuinely indented colon lists, not nearby prose. The
-diagnostics are rejected parse candidates, not table-recall ground truth.
+Markdown headings and indented colon lists.
 """
 from __future__ import annotations
 
@@ -30,8 +29,8 @@ def _header(text):
             and not re.search(r"\b(?:is|are|was|were|has|have|must|shall|see)\b|\d", text, re.I))
 
 
-def inspect_explicit_structure(text, legacy_tables=()):
-    """Return expanded tables and source-local rejection records.
+def extend_table_structure(text, parsed_tables):
+    """Return tables with explicit heading and parent-list associations.
 
     Numeric rows require one known-unit quantity at the end. A title/header pair
     must be separate lines; no cell boundaries or ordinary-prose conditions are
@@ -39,7 +38,7 @@ def inspect_explicit_structure(text, legacy_tables=()):
     already establishes that indentation as a nested list.
     """
     lines, raw_lines, excluded, paths = [], [], set(), []
-    headings, parents, nested, rejected = [], [], [], []
+    headings, parents, nested = [], [], []
     offset, fence = 0, None
     for raw in text.splitlines(keepends=True):
         line = _span(text, offset, offset + len(raw))
@@ -90,12 +89,10 @@ def inspect_explicit_structure(text, legacy_tables=()):
         if not match or _QUANTITY.search(match.group("object")):
             continue
         if not parents:
-            rejected.append({"span": line, "reason": "numeric_list_without_explicit_indented_parent"})
             continue
         # Named values require the colon present in the original list item.
         object_text = match.group("object")
         if not object_text.endswith(":"):
-            rejected.append({"span": line, "reason": "nested_numeric_item_without_name_value_colon"})
             continue
         def part(name):
             return _span(text, body_start + match.start(name), body_start + match.end(name))
@@ -106,7 +103,7 @@ def inspect_explicit_structure(text, legacy_tables=()):
         nested.append(TableRelations("nested_numeric_list", line, None, (parents[-1][1],), (relation,)))
 
     tables = []
-    for table in legacy_tables:
+    for table in parsed_tables:
         index = next(i for i, line in enumerate(lines) if line.start == table.span.start)
         tables.append(replace(table, relations=tuple(replace(row, parent_path=paths[index]) for row in table.relations)))
     tables.extend(nested)
@@ -134,18 +131,10 @@ def inspect_explicit_structure(text, legacy_tables=()):
         caption = header - 1
         while caption >= 0 and not lines[caption].text:
             caption -= 1
-        reason = None
-        if len(rows) < 2:
-            reason = "fewer_than_two_contiguous_numeric_rows"
-        elif (i < len(lines) and lines[i].text and i not in excluded):
-            reason = "mixed_or_ragged_numeric_block"
-        elif header < 0 or header in excluded or not _header(lines[header].text):
-            reason = "no_explicit_quantity_header"
-        elif (caption < 0 or caption in excluded or not _title(lines[caption].text)
-              or (caption > 0 and lines[caption - 1].text and not _HEADING.match(lines[caption].text))):
-            reason = "no_separate_short_caption"
-        if reason:
-            rejected.append({"span": _span(text, lines[first].start, lines[i - 1].end), "reason": reason})
+        if (len(rows) < 2 or (i < len(lines) and lines[i].text and i not in excluded)
+                or header < 0 or header in excluded or not _header(lines[header].text)
+                or caption < 0 or caption in excluded or not _title(lines[caption].text)
+                or (caption > 0 and lines[caption - 1].text and not _HEADING.match(lines[caption].text))):
             continue
         relations = []
         for row_index, match in rows:
@@ -156,4 +145,4 @@ def inspect_explicit_structure(text, legacy_tables=()):
         table = TableRelations("unnumbered_numeric_rows", _span(text, lines[caption].start, lines[i - 1].end),
                                lines[caption], (lines[header],), tuple(relations))
         tables.append(_with_notes(table, _neighbor_notes(text, lines, caption, i, excluded)))
-    return tuple(sorted(tables, key=lambda t: t.span.start)), tuple(rejected)
+    return tuple(sorted(tables, key=lambda t: t.span.start))

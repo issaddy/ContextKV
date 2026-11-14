@@ -11,12 +11,6 @@ import httpx
 from .sampling import request_sampling
 
 
-class EngineError(RuntimeError):
-    def __init__(self, code, message=""):
-        self.code = code
-        super().__init__(f"{code}: {message}" if message else code)
-
-
 @dataclass(frozen=True)
 class EngineInfo:
     protocol_version: str

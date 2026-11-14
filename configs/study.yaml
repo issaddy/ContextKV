@@ -1,7 +1,5 @@
 study:
-  reader: qwen3_32b_nonthinking
   output_dir: runs/current
-  seed: 42
 generation:
   run_config: configs/qwen3_32b.yaml
   teacher_url: http://127.0.0.1:30000
@@ -27,12 +25,6 @@ execution:
   history_tokens: 8192
   output_tokens: 1024
   max_total_tokens: 131072
-training:
-  data_dir: data/training/shared
-  teacher_url: http://127.0.0.1:30000
-  query_output: models/shared-query
-  evidence_output: models/shared-evidence
-  stop_output: models/shared-stop.pt
 shared:
   query:
     model_path: models/qwen3-embedding-0.6b

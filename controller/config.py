@@ -7,6 +7,12 @@ import json
 
 import yaml
 
+from .evidence import EvidencePolicy
+from .sampling import SamplingRecipe
+from .serialization import decode
+from .templates import HuggingFaceTemplate
+from .cooperative_request import SYSTEM
+
 
 def load_kv_policy(settings):
     asset = json.loads(Path(settings["kv_quality_asset"]).read_text())
@@ -15,22 +21,11 @@ def load_kv_policy(settings):
             "quality_price_ms": settings["quality_price_ms"] if "quality_price_ms" in settings
             else 1000 / settings["prices"]["seconds"]}
 
-from .evidence import EvidencePolicy
-from .sampling import SamplingRecipe
-from .serialization import decode
-from .templates import HuggingFaceTemplate
-from .cooperative_request import SYSTEM
-
 
 @dataclass(frozen=True)
 class EngineConfig:
-    kind: str = "sglang"
     base_url: str = "http://127.0.0.1:30000"
     timeout_seconds: float = 180.0
-    stream: bool = False
-    gpu_capacity_tokens: int = 32768
-    host_capacity_tokens: int = 61056
-    page_size: int = 64
 
 
 @dataclass(frozen=True)
@@ -41,7 +36,6 @@ class ModelConfig:
     scope_path: str | None = None
 
     def __post_init__(self):
-        scope = None
         if self.scope_path is not None:
             from engine_patches.contextkv_model_scope import load_model_scope
             scope = load_model_scope(self.scope_path)
@@ -52,12 +46,6 @@ class ModelConfig:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "local_files_only", local)
-        object.__setattr__(self, "_model_scope", scope)
-
-    @property
-    def scope(self):
-        return self._model_scope
-
 
 
 @dataclass(frozen=True)
@@ -86,13 +74,8 @@ def apply_study_config(config, study):
         dialogue_mode=execution.get("dialogue_mode", "contextkv"))
 
 
-def create_model_template(model: ModelConfig, *, model_path: str | None = None,
-                          local_files_only: bool | None = None):
-    path = model_path or model.name
-    local = model.local_files_only if local_files_only is None else local_files_only
-    template = HuggingFaceTemplate(path, local_files_only=local)
-    return template
-
+def create_model_template(model: ModelConfig):
+    return HuggingFaceTemplate(model.name, local_files_only=model.local_files_only)
 
 
 def create_controller(config):

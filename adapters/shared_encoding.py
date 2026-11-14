@@ -349,14 +349,14 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
 
 
 class QwenDocumentEncoder:
-    def __init__(self, model_path, *, device="cpu", dtype="float32", max_length=32768):
+    def __init__(self, model_path, *, device="cpu", dtype="float32"):
         import torch
         from transformers import AutoModel, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.padding_side = "left"
         self.tokenizer = ThreadTokenizer(self.tokenizer)
         self.model = AutoModel.from_pretrained(model_path, dtype=getattr(torch, dtype)).to(device).eval()
-        self.manifest = {"model_id": "Qwen/Qwen3-Embedding-0.6B", "revision": "base", "max_length": max_length,
+        self.manifest = {"model_id": "Qwen/Qwen3-Embedding-0.6B", "revision": "base",
                          "pooling": "last_nonpadding_token_l2", "model_path": str(model_path)}
 
     def encode(self, texts):
@@ -398,8 +398,6 @@ class SharedQueryEncoder:
         self.manifest = {"model_id": QUERY_MODEL, "asset": str(asset_path), "shared_task_encoding": True}
         self.ready = ReadyBatch(self.encode_many)
 
-    def encode_documents(self, texts):
-        return self.encode_documents_with_usage(texts)[0]
 
     def encode_documents_with_usage(self, texts):
         import torch

@@ -146,9 +146,6 @@ class EvidenceClaim:
     attributes: tuple[tuple[str, str, str, str], ...] = ()
     qualifiers: tuple[str, ...] = ()
 
-    def serves(self, need_id):
-        return need_id == self.need_id or need_id in self.shared_need_ids
-
 
 @dataclass(frozen=True)
 class Message:

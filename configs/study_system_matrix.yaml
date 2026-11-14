@@ -1,50 +1,18 @@
-schema_version: 1
 study_config: configs/study.yaml
 seed: 42
 protocol: P3
-selection:
-  baseline: ordinary_rag
-  near_equal_quality: 0.002
-final_evaluation:
-  baseline: ordinary_rag
-  main_methods:
-  - ordinary_rag
-  - contextkv
-  - llamaindex
-  acceptance:
-    candidate: contextkv
-    quality_improvement: 0.05
-    p95_ratio: 0.85
-  main_comparisons:
-    ordinary_qa:
-      reference: ordinary_rag
-      method: contextkv
-      scope: whole_system
-    external_method:
-      reference: llamaindex
-      method: contextkv
-      scope: whole_system
-  cost_scope: all_online_and_physical_costs
 resources:
-  gpu_capacity_tokens: 32768
-  host_capacity_tokens: 61056
   gpu_devices:
   - 4
   - 5
   - 6
   - 7
-  p95_complete_ms: 120000
-  max_online_tokens: 200000000
-  concurrency:
-  - 1
-  - 4
 datasets:
   multidoc2dial:
     inputs:
       dev: data/multidoc2dial/dev/tasks.jsonl
       test: data/multidoc2dial/test/tasks.jsonl
     corpus_path: data/multidoc2dial/test/passages.jsonl
-    split_kind: native
     dev_conversations: 32
     dev_seed: 42
     primary_metric: f1
@@ -57,7 +25,6 @@ datasets:
     corpus_path: data/mtrag-official/cloud.jsonl
     corpus_id: mtrag
     domain: mt-rag-ibmcloud-elser-512-100-20240502
-    split_kind: public_test
     primary_metric: mtrageval_harmonic
     normalization: 1.0
     max_passages: 10

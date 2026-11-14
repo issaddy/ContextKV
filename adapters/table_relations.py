@@ -204,5 +204,5 @@ def extract_table_relations(text: str) -> tuple[TableRelations, ...]:
                 i = end
                 continue
         i += 1
-    from adapters.table_structure import inspect_explicit_structure
-    return inspect_explicit_structure(text, tuple(tables))[0]
+    from adapters.table_structure import extend_table_structure
+    return extend_table_structure(text, tables)
