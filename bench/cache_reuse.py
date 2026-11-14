@@ -82,11 +82,11 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                     "prefill_tokens", "new_compute_kv_pages")},
                 "infoflow_requests": sum(row["mode"] == "infoflow" for row in records)})
             answers.append(texts)
-            if metric == "f1":
+            if metric in ("f1", "mtrageval_harmonic"):
                 from bench.official import reference_overlap
                 predicted = [{"task_id":item["options"]["request_id"].rsplit(":",2)[0],
                               "predictions":[{"text":text}]} for item,text in zip(trace,texts)]
-                branches[-1]["quality_f1"] = reference_overlap(references,predicted)["mean_f1"]
+                branches[-1]["reference_f1"] = reference_overlap(references,predicted)["mean_f1"]
             for session in sessions:
                 await engine.close_session(session)
     finally:
