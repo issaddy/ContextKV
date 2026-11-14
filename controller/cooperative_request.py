@@ -243,6 +243,21 @@ class CompiledRequest:
     query_span: tuple[int, int] = (0, 0)
 
 
+def with_source_demand(request, demand):
+    """Bind future Native reuse to the complete retained prefix in this layout."""
+    wanted = {item['source_id']: item for item in demand}
+    prefix, aligned = set(), []
+    for block in request.blocks:
+        identity = block['source_id']
+        prefix.add(identity)
+        if identity in wanted:
+            item = {key: value for key, value in wanted[identity].items() if key != 'native_prefix_end'}
+            if prefix <= wanted.keys():
+                item['native_prefix_end'] = block['end']
+            aligned.append(item)
+    return replace(request, demand=tuple(aligned))
+
+
 def source_body(evidence):
     """Render source fragments once, sharing document headings and reference IDs."""
     body, spans, segments, references = "", [], [], []

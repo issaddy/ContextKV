@@ -8,7 +8,7 @@ import time
 from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, EvidenceCosts, blocks_for_units, compile_request,
-                                  source_address, source_body, with_document_headers, working_history)
+                                  source_address, source_body, with_document_headers, working_history, with_source_demand)
 from .schema import EvidenceBlock, EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -270,20 +270,12 @@ class CooperativeController:
         retained = sorted(request.blocks, key=lambda block: (
             block["source_id"] not in pending, -state.retained_sources.get(block["source_id"], 0)))[
             :max(1, len(state.query.task.needs))]
-        wanted = {block["source_id"] for block in retained}
-        demand, prefix = [], set()
-        for block in request.blocks:
+        demand = []
+        for block in retained:
             address = block["source_id"]
-            prefix.add(address)
-            if address in wanted:
-                visits = state.retained_sources.get(address, 0)
-                item = {"source_id": address, "uses": 1.0 if address in pending else (visits+1)/(visits+2)}
-                # Native reuse needs the entire preceding evidence chain.
-                # A retained non-prefix source instead has independent demand.
-                if prefix <= wanted:
-                    item["native_prefix_end"] = block["end"]
-                demand.append(item)
-        return replace(request, demand=tuple(demand))
+            visits = state.retained_sources.get(address, 0)
+            demand.append({"source_id": address, "uses": 1.0 if address in pending else (visits+1)/(visits+2)})
+        return with_source_demand(request, demand)
 
     def _reading_allowance(self, state, snapshot, request, output_tokens):
         """Every read funds its own output and the reserved terminal context first."""

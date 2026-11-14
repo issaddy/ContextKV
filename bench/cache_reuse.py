@@ -62,9 +62,8 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                     shift = len(request.input_ids)-len(original.input_ids)
                     request = replace(request, query_span=tuple(position+shift for position in original.query_span))
                     if mode == "auto":
-                        wanted = {d["source_id"]:d for d in original.demand}
-                        request = replace(request,demand=tuple({**wanted[b["source_id"]],"native_prefix_end":b["end"]}
-                            for b in request.blocks if b["source_id"] in wanted))
+                        from controller.cooperative_request import with_source_demand
+                        request = with_source_demand(request, original.demand)
                     result = await engine.compute(request, **options)
                 records[index] = {"complete_ms": (time.monotonic()-start-arrival)*1000,
                                   **receipt(result),

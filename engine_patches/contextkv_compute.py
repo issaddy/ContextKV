@@ -55,11 +55,13 @@ class ComputeRuntime:
             scope = data.get('cache_scope', 'shared')
             session = data.get('session_id')
             if session is not None:
+                active = bool(self.demands.get(session))
                 retained = {(scope, address) for address in data['retained_sources']}
                 self.demands[session] = {key: item for key, item in self.demands.get(session, {}).items()
                                          if key in retained}
                 self._refresh_priorities()
-                self._demote_unused()
+                if active:
+                    self._demote_unused()
             wanted = set(data['source_ids'])
             sources, prefixes = {}, []
             for address in wanted:
@@ -165,7 +167,7 @@ class ComputeRuntime:
         marginal_value = max(0.0, prefill - ratio * replay)
         request_demand = {(scope, item['source_id']): {**item, 'recompute_ratio': ratio}
                           for item in metadata.get('demand', ())}
-        self.demands[session] = request_demand
+        self.demands[session] = request_demand if metadata.get('mode') != 'exact' else {}
         self._refresh_priorities()
         ids = tuple(req.origin_input_ids)
         page = self.cache.page_size
