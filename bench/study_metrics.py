@@ -110,7 +110,7 @@ def _cost_summary(rows):
         result[field] = sum(batch[field] for batch in batches) if batches else None
         peak = tier + "_peak_gib"
         result[peak] = max((batch[peak] for batch in batches), default=None)
-    for name in ("gpu_kv_peak_tokens", "gpu_kv_peak_gib"):
+    for name in ("gpu_kv_peak_tokens", "gpu_kv_peak_gib", "gpu_kv_active_peak_tokens"):
         values = [batch[name] for batch in batches if name in batch]
         result[name] = max(values) if len(values) == len(batches) and values else None
     token_fields = (result["total_input_tokens"], result["total_output_tokens"])

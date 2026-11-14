@@ -29,6 +29,7 @@ class ComputeRuntime:
         self.observed_at = time.monotonic()
         self.pool_used = self._pool_used()
         self.gpu_peak_used_tokens = self.pool_used[0]
+        self.gpu_active_peak_tokens = self.pool_used[0]-self.cache.evictable_size()
         keys, values = self.pool.get_kv_buffer(0)
         layers = scheduler.tp_worker.model_runner.model.config.num_hidden_layers
         self.bytes_per_token = (keys[0].numel() * keys.element_size() +
@@ -46,6 +47,7 @@ class ComputeRuntime:
         self.host_token_seconds += elapsed * self.pool_used[1]
         self.observed_at, self.pool_used = now, self._pool_used()
         self.gpu_peak_used_tokens = max(self.gpu_peak_used_tokens, self.pool_used[0])
+        self.gpu_active_peak_tokens = max(self.gpu_active_peak_tokens, self.pool_used[0]-self.cache.evictable_size())
 
     def control(self, action, data):
         if action == 'evidence_state':
@@ -92,12 +94,14 @@ class ComputeRuntime:
                 self.gpu_token_seconds = self.host_token_seconds = 0.0
                 self.observed_at, self.pool_used = time.monotonic(), self._pool_used()
                 self.gpu_peak_used_tokens = self.pool_used[0]
+                self.gpu_active_peak_tokens = self.pool_used[0]-self.cache.evictable_size()
             return {'flushed': flushed}
         self.observe_pool()
         return dict(pool=dict(gpu_used_tokens=self.pool_used[0], host_used_tokens=self.pool_used[1],
                               bytes_per_token=self.bytes_per_token),
             gpu_token_seconds=self.gpu_token_seconds, host_token_seconds=self.host_token_seconds,
             gpu_peak_used_tokens=self.gpu_peak_used_tokens,
+            gpu_active_peak_tokens=self.gpu_active_peak_tokens,
             gpu_kv_gib_seconds=self.gpu_token_seconds * self.bytes_per_token / 2**30,
             host_kv_gib_seconds=self.host_token_seconds * self.bytes_per_token / 2**30,
             costs=dict(self.costs),

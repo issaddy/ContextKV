@@ -246,6 +246,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         await physical.stop()
         write_json(directory/"batch_cost.json", {"duration_seconds": measured_end-measured_start,
             "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
+            "gpu_kv_active_peak_tokens": kv["gpu_active_peak_tokens"],
             "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
             **integrate_physical(physical.samples, measured_start, measured_end)})
         write_jsonl(directory/"references.jsonl", [references[key] for key in expected if key in references])
@@ -323,7 +324,7 @@ def report(matrix, rows, directory, *, split="test"):
                 **{key: cost[key] for key in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds",
                     "host_gib_seconds", "gpu_peak_gib", "host_peak_gib", "actual_device_hit_tokens",
                     "actual_host_loaded_tokens", "actual_prefill_tokens", "new_compute_kv_pages",
-                    "gpu_kv_peak_tokens", "gpu_kv_peak_gib")}}
+                    "gpu_kv_peak_tokens", "gpu_kv_peak_gib", "gpu_kv_active_peak_tokens")}}
             summaries.append(item)
             current[method] = item
             text.append("| " + labels.get(method, method) + f" | {item['completed']}/{item['requested']} | "

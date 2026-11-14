@@ -50,6 +50,7 @@ async def replay_requests(run, trace, output, *, concurrency):
             branches.append({"mode": mode, "requests": len(records),
                 "p95_seconds": _quantile([row["complete_ms"]/1000 for row in records], .95),
                 "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
+                "gpu_kv_active_peak_tokens": kv["gpu_active_peak_tokens"],
                 "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
                 **{name: sum(row[name] for row in records) for name in (
                     "input_tokens", "output_tokens", "device_hit_tokens", "host_loaded_tokens",
