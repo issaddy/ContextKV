@@ -1,0 +1,532 @@
+{
+  "protocol": {
+    "date": "2026-11-14",
+    "questions_per_benchmark": 20,
+    "concurrency": 4,
+    "cohort_seed": 42,
+    "history": "P1 public/reference history",
+    "model": "Qwen3-32B BF16, fixed weights",
+    "generation": {
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "max_new_tokens": 1024
+    },
+    "gpu_ids": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "python": "container default python3",
+    "context_window": 32768,
+    "final_body_budget": 16384,
+    "cumulative_token_budget": 131072,
+    "resources": "Online batch physical GPU/Host resident GiB-seconds including auxiliary models; offline judge costs stored separately.",
+    "reference": "question -> retrieval -> ordinary concatenation -> SGLang Native -> answer",
+    "scoring": "Author metric protocols with local fixed Qwen judge. MT-RAG has one missing faithfulness component after two output-limit errors; complete-denominator quality bounds are reported.",
+    "training": "No weight changes in this iteration.",
+    "reporting": "Latest retained measurement per benchmark and its existing ordinary-RAG reference; each result records the implementation commit used. All methods use the same 20-task cohort per benchmark."
+  },
+  "cohorts": {
+    "loong": [
+      "8aac94a9-c2fd-4911-b460-9a85bc029ffa",
+      "a5075845-053d-4570-a282-cc74baf7e284",
+      "0b7cb5be-ffa4-4f8b-983d-dc18e68d7e05",
+      "4d6cd4f8-57d2-4a28-9522-6e4cd8bfbbc7",
+      "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+      "b04fddff-35bf-47e1-944c-76276a8008c4",
+      "89ff6383-652f-4efd-8ff4-c23617eef20a",
+      "854f18da-ec84-40dd-87c5-5820a06e80ea",
+      "beb996a0-6642-4c03-b3fe-43256b1228ee",
+      "b7405d8e-13f0-4750-a25d-df3a67ffd39a",
+      "3be2ed94-317f-4921-bcc4-118c3917ff00",
+      "c6666dc5-f286-4359-ac6f-511737d9b3d6",
+      "0efa49bf-4fa1-4d42-9e0d-685d2d5fd7d9",
+      "4efcb525-bf7a-442e-b767-d3fc30aa1305",
+      "198e64ea-2591-42a5-82d8-fffd32951298",
+      "21964f26-f5f5-49f2-9b8c-216c606bc61e",
+      "c4a4e642-fa00-4377-a756-40f2f7ea7a74",
+      "e0007015-e0b3-4a25-a3c2-38715f07f430",
+      "4532c375-ba50-40bf-9a72-98abbb7663cd",
+      "b9f53701-4f2f-4dc9-9df5-d40aca186028"
+    ],
+    "multidoc2dial": [
+      "5e609fda4ff3d7aa6698b78d3e4d37b5_1",
+      "5e609fda4ff3d7aa6698b78d3e4d37b5_3",
+      "cf9bf10bf82edddd5c02ef4653984307_1",
+      "cf9bf10bf82edddd5c02ef4653984307_4",
+      "0ed41688c40474dff7c2a9dff96e5952_1",
+      "0ed41688c40474dff7c2a9dff96e5952_3",
+      "c850fe4203f37b8e53bfeefd3fd0e977_1",
+      "c850fe4203f37b8e53bfeefd3fd0e977_3",
+      "bb90331cd1c184934851ab37bf5b0894_1",
+      "bb90331cd1c184934851ab37bf5b0894_3",
+      "256a3996202eb7b91b64b785bb1c3534_1",
+      "256a3996202eb7b91b64b785bb1c3534_4",
+      "bcfe9bb0367af63f3098e5bfb1037b14_1",
+      "bcfe9bb0367af63f3098e5bfb1037b14_3",
+      "e1558c9a8d9a63a959eee01f7fd33a1f_1",
+      "e1558c9a8d9a63a959eee01f7fd33a1f_6",
+      "cbcadbd73eea54a3cf531e8f9de0fb0d_1",
+      "cbcadbd73eea54a3cf531e8f9de0fb0d_3",
+      "fb8e6032d62962636ef0372268e36bb6_1",
+      "fb8e6032d62962636ef0372268e36bb6_4"
+    ],
+    "mtrag": [
+      "b4614daadceeecb400f7baf0aa48dcb8<::>1",
+      "b4614daadceeecb400f7baf0aa48dcb8<::>2",
+      "747a810abfd6da4a9c37cdb74feec95e<::>1",
+      "747a810abfd6da4a9c37cdb74feec95e<::>2",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>1",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>2",
+      "fdee20f7fd677e420742b09989623d68<::>1",
+      "fdee20f7fd677e420742b09989623d68<::>2",
+      "c6c3b02ca32795af64c903dd76700517<::>1",
+      "c6c3b02ca32795af64c903dd76700517<::>2",
+      "34ac6bedd4b35167cc59e289893e206a<::>1",
+      "34ac6bedd4b35167cc59e289893e206a<::>2",
+      "2f013337236ea4635ad106813275dab7<::>1",
+      "2f013337236ea4635ad106813275dab7<::>2",
+      "5815bb4a99e2a0d8a986348da4c49083<::>1",
+      "5815bb4a99e2a0d8a986348da4c49083<::>2",
+      "adf9b1f61c73d715809bc7b37ac02724<::>1",
+      "adf9b1f61c73d715809bc7b37ac02724<::>10",
+      "e1b602e47ded79a35d8df4eefe194e39<::>1",
+      "e1b602e47ded79a35d8df4eefe194e39<::>2"
+    ],
+    "versionqa": [
+      "versionqa-043<::>1",
+      "versionqa-042<::>1",
+      "versionqa-092<::>1",
+      "versionqa-010<::>1",
+      "versionqa-066<::>1",
+      "versionqa-051<::>1",
+      "versionqa-002<::>1",
+      "versionqa-071<::>1",
+      "versionqa-016<::>1",
+      "versionqa-079<::>1",
+      "versionqa-074<::>1",
+      "versionqa-011<::>1",
+      "versionqa-056<::>1",
+      "versionqa-057<::>1",
+      "versionqa-073<::>1",
+      "versionqa-046<::>1",
+      "versionqa-049<::>1",
+      "versionqa-093<::>1",
+      "versionqa-077<::>1",
+      "versionqa-038<::>1"
+    ]
+  },
+  "benchmarks": [
+    {
+      "dataset": "multidoc2dial",
+      "method": "ordinary_rag",
+      "metric": "f1",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.17929769569033374,
+      "metrics": {
+        "exact_match": {
+          "mean": 0,
+          "scored": 20
+        },
+        "f1": {
+          "mean": 0.17929769569033374,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 17.723495392873886,
+      "total_input_tokens": 20869,
+      "total_output_tokens": 4673,
+      "gpu_gib_seconds": 2454.3888273978446,
+      "host_gib_seconds": 692.1517299368476,
+      "gpu_peak_gib": 80.123046875,
+      "host_peak_gib": 22.61434841156006,
+      "actual_device_hit_tokens": 128,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 20741,
+      "code_commit": "2b24342",
+      "records_path": "runs/current/ordinary_rag/multidoc2dial",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 20.288114435970783,
+        "online_compute_seconds": 117.14393299818039
+      },
+      "scoring": {
+        "protocol": "multidoc2dial_author_token_f1_em",
+        "judge_cost": {
+          "model_calls": 0,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "elapsed_ms": 4.228945821523666,
+          "cost_scope": "offline_cpu"
+        }
+      }
+    },
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "metric": "f1",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.3087207926831841,
+      "metrics": {
+        "exact_match": {
+          "mean": 0,
+          "scored": 20
+        },
+        "f1": {
+          "mean": 0.3087207926831841,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 13.395041647925973,
+      "total_input_tokens": 8723,
+      "total_output_tokens": 2756,
+      "gpu_gib_seconds": 1782.504792836633,
+      "host_gib_seconds": 519.11368981235,
+      "gpu_peak_gib": 79.048828125,
+      "host_peak_gib": 23.15306568145752,
+      "actual_device_hit_tokens": 960,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 7763,
+      "code_commit": "25d2760",
+      "records_path": "runs/current/contextkv/multidoc2dial",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 27.295385878533125,
+        "quality_bounds": [
+          0.3087207926831841,
+          0.3087207926831841
+        ],
+        "scored": 20,
+        "unscored": []
+      },
+      "scoring": {
+        "protocol": "multidoc2dial_author_token_f1_em",
+        "judge_cost": {
+          "model_calls": 0,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "elapsed_ms": 3.1405091285705566,
+          "cost_scope": "offline_cpu"
+        }
+      }
+    },
+    {
+      "dataset": "mtrag",
+      "method": "ordinary_rag",
+      "metric": "mtrageval_harmonic",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.5697067594121034,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.38075778954811723,
+          "scored": 20
+        },
+        "RB_alg_idk": {
+          "mean": 0.372112074419625,
+          "scored": 20
+        },
+        "RB_llm": {
+          "mean": 0.755,
+          "scored": 20
+        },
+        "RB_llm_idk": {
+          "mean": 0.74,
+          "scored": 20
+        },
+        "RL_F": {
+          "mean": 0.8398941798899999,
+          "scored": 20
+        },
+        "RL_F_idk": {
+          "mean": 0.8148941798899999,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 30.53212859965862,
+      "total_input_tokens": 86846,
+      "total_output_tokens": 6360,
+      "gpu_gib_seconds": 4262.846543789463,
+      "host_gib_seconds": 1200.1733214135097,
+      "gpu_peak_gib": 84.57421875,
+      "host_peak_gib": 23.86673641204834,
+      "actual_device_hit_tokens": 384,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 86462,
+      "code_commit": "2b24342",
+      "records_path": "runs/current/ordinary_rag/mtrag",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 31.230569064617157,
+        "online_compute_seconds": 194.0270771123469
+      },
+      "scoring": {
+        "protocol": "pinned_mtrag_official_http",
+        "judge_cost": {
+          "http_calls": 80,
+          "input_tokens": 258830,
+          "output_tokens": 38573,
+          "elapsed_ms": 786745.9772266448,
+          "stage_wall_ms": 428354.62383925915
+        }
+      }
+    },
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "metric": "mtrageval_harmonic",
+      "completed": 20,
+      "requested": 20,
+      "quality": null,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.41655205133208284,
+          "scored": 20
+        },
+        "RB_alg_idk": {
+          "mean": 0.40950361023197857,
+          "scored": 20
+        },
+        "RB_llm": {
+          "mean": 0.745,
+          "scored": 20
+        },
+        "RB_llm_idk": {
+          "mean": 0.73,
+          "scored": 20
+        },
+        "RL_F": {
+          "mean": 0.7927749151473684,
+          "scored": 19
+        },
+        "RL_F_idk": {
+          "mean": 0.7598801783052632,
+          "scored": 19
+        }
+      },
+      "p95_seconds": 25.98129270728678,
+      "total_input_tokens": 34778,
+      "total_output_tokens": 4633,
+      "gpu_gib_seconds": 3303.7194954480874,
+      "host_gib_seconds": 989.6727608161237,
+      "gpu_peak_gib": 79.91796875,
+      "host_peak_gib": 24.202978134155273,
+      "actual_device_hit_tokens": 1664,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 33114,
+      "code_commit": "d5fa597",
+      "records_path": "runs/current/contextkv/mtrag",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 51.67545221745968,
+        "quality_bounds": [
+          0.5772445712640695,
+          0.5873862631468354
+        ],
+        "scored": 19,
+        "unscored": [
+          "adf9b1f61c73d715809bc7b37ac02724<::>10"
+        ]
+      },
+      "scoring": {
+        "protocol": "pinned_mtrag_official_http",
+        "judge_cost": {
+          "http_calls": 82,
+          "input_tokens": 151521,
+          "output_tokens": 38713,
+          "elapsed_ms": 754079.8804238439,
+          "stage_wall_ms": 474346.8940369785
+        }
+      }
+    },
+    {
+      "dataset": "versionqa",
+      "method": "ordinary_rag",
+      "metric": "versionqa_accuracy",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.8,
+      "metrics": {
+        "versionqa_accuracy": {
+          "mean": 0.8,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 21.60002060923726,
+      "total_input_tokens": 51567,
+      "total_output_tokens": 1795,
+      "gpu_gib_seconds": 2404.6937101128715,
+      "host_gib_seconds": 661.0934607751273,
+      "gpu_peak_gib": 85.08203125,
+      "host_peak_gib": 23.33824062347412,
+      "actual_device_hit_tokens": 1024,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 50543,
+      "code_commit": "2b24342",
+      "records_path": "runs/current/ordinary_rag/versionqa",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 38.14167606458068,
+        "online_compute_seconds": 89.57722082361579
+      },
+      "scoring": {
+        "protocol": "versionqa_author_binary_accuracy",
+        "judge_cost": {
+          "observed_input_tokens": 6966,
+          "observed_output_tokens": 40,
+          "observed_elapsed_ms": 1321.5453401207924,
+          "unknown_input_token_records": 0,
+          "unknown_output_token_records": 0,
+          "unknown_elapsed_records": 0
+        }
+      }
+    },
+    {
+      "dataset": "versionqa",
+      "method": "contextkv",
+      "metric": "versionqa_accuracy",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.85,
+      "metrics": {
+        "versionqa_accuracy": {
+          "mean": 0.85,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 22.99172218702734,
+      "total_input_tokens": 37843,
+      "total_output_tokens": 1744,
+      "gpu_gib_seconds": 2343.0772557712553,
+      "host_gib_seconds": 667.4350164748885,
+      "gpu_peak_gib": 80.9765625,
+      "host_peak_gib": 23.069222450256348,
+      "actual_device_hit_tokens": 2048,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 35795,
+      "code_commit": "d775d07",
+      "records_path": "runs/current/contextkv/versionqa",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 40.174060352146626,
+        "quality_bounds": [
+          0.85,
+          0.85
+        ],
+        "scored": 20,
+        "unscored": []
+      },
+      "scoring": {
+        "protocol": "versionqa_author_binary_accuracy",
+        "judge_cost": {
+          "observed_input_tokens": 6915,
+          "observed_output_tokens": 40,
+          "observed_elapsed_ms": 1286.8862971663475,
+          "unknown_input_token_records": 0,
+          "unknown_output_token_records": 0,
+          "unknown_elapsed_records": 0
+        }
+      }
+    },
+    {
+      "dataset": "loong",
+      "method": "ordinary_rag",
+      "metric": "loong_reference_score",
+      "completed": 20,
+      "requested": 20,
+      "quality": 30,
+      "metrics": {
+        "loong_perfect_rate": {
+          "mean": 0.15,
+          "scored": 20
+        },
+        "loong_reference_score": {
+          "mean": 30,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 41.36926667504012,
+      "total_input_tokens": 101394,
+      "total_output_tokens": 2614,
+      "gpu_gib_seconds": 3624.8478282947326,
+      "host_gib_seconds": 972.0557402758207,
+      "gpu_peak_gib": 88.6796875,
+      "host_peak_gib": 23.25428295135498,
+      "actual_device_hit_tokens": 1216,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 100178,
+      "code_commit": "3277d9f",
+      "records_path": "runs/current/ordinary_rag/loong",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 78.17554780468345,
+        "online_compute_seconds": 162.68594922870398
+      },
+      "scoring": {
+        "protocol": "loong_reference_rubric_local_judge",
+        "judge_cost": {
+          "observed_input_tokens": 13898,
+          "observed_output_tokens": 1782,
+          "observed_elapsed_ms": 34225.488279014826,
+          "unknown_input_token_records": 0,
+          "unknown_output_token_records": 0,
+          "unknown_elapsed_records": 0
+        }
+      }
+    },
+    {
+      "dataset": "loong",
+      "method": "contextkv",
+      "metric": "loong_reference_score",
+      "completed": 20,
+      "requested": 20,
+      "quality": 45.25,
+      "metrics": {
+        "loong_perfect_rate": {
+          "mean": 0.2,
+          "scored": 20
+        },
+        "loong_reference_score": {
+          "mean": 45.25,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 40.485560342110695,
+      "total_input_tokens": 115226,
+      "total_output_tokens": 2463,
+      "gpu_gib_seconds": 3516.329077749411,
+      "host_gib_seconds": 994.338016511336,
+      "gpu_peak_gib": 84.146484375,
+      "host_peak_gib": 23.612889289855957,
+      "actual_device_hit_tokens": 448,
+      "actual_host_loaded_tokens": 64,
+      "actual_prefill_tokens": 114714,
+      "code_commit": "17a351f",
+      "records_path": "runs/current/contextkv/loong",
+      "execution": {
+        "read_calls": 0,
+        "auxiliary_seconds": 67.97976438701153,
+        "quality_bounds": [
+          45.25,
+          45.25
+        ],
+        "scored": 20,
+        "unscored": []
+      },
+      "scoring": {
+        "protocol": "loong_reference_rubric_local_judge",
+        "judge_cost": {
+          "observed_input_tokens": 13748,
+          "observed_output_tokens": 1641,
+          "observed_elapsed_ms": 31636.478777974844,
+          "unknown_input_token_records": 0,
+          "unknown_output_token_records": 0,
+          "unknown_elapsed_records": 0
+        }
+      }
+    }
+  ]
+}

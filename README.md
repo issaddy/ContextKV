@@ -15,7 +15,7 @@
 
 训练顺序、模型目录与运行命令见[运行手册](docs/study/final_runbook.md)。机制和复用边界见[架构](docs/architecture.md)、[方法依据](docs/references.md)，GPU 部署见[部署](docs/deployment.md)。
 
-共享编码与 InfoFlow 已完成辅助训练和少量真实 GPU 端到端运行，[当前结果](docs/study/shared_smoke.md)包含各 benchmark 的同题质量、响应时间和资源占用。
+共享编码与 InfoFlow 已完成辅助训练和少量真实 GPU 端到端运行，[当前结果](docs/study/results.md)包含各 benchmark 的同题质量、响应时间和资源占用。
 
 ```bash
 python3 -m bench.study evaluate --split test --limit-turns 20 --concurrency 4
