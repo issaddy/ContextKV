@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import time
@@ -15,6 +16,55 @@ from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceUnit
 from controller.serialization import decode
 from training.collect_shared_values import history, score_answers, source_blocks
+
+
+async def replay_requests(run, trace, output, *, concurrency):
+    """Replay the same actual multi-turn inputs and arrivals through both cache policies."""
+    from controller.sampling import SamplingRecipe
+    from bench.study_metrics import _quantile
+    engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
+    first = min(item["arrived"] for item in trace)
+    branches, answers = [], []
+    try:
+        for mode in ("exact", "auto"):
+            await engine.profile_prepare("cold")
+            start = time.monotonic()
+            slots, sessions = asyncio.Semaphore(concurrency), {}
+            records, texts = [None]*len(trace), [None]*len(trace)
+            async def execute(index, item):
+                arrival = item["arrived"]-first
+                await asyncio.sleep(max(0., start+arrival-time.monotonic()))
+                options = {**item["options"], "mode": mode, "cache_scope": "pair:"+mode,
+                           "cache_namespace": "pair:"+mode}
+                session = options["session_id"]
+                lock = sessions.setdefault(session, asyncio.Lock())
+                request = replace(item["request"], demand=()) if mode == "exact" else item["request"]
+                async with lock, slots:
+                    result = await engine.compute(request, **options)
+                records[index] = {"complete_ms": (time.monotonic()-start-arrival)*1000,
+                                  **receipt(result),
+                                  "new_compute_kv_pages": result["meta"]["contextkv_compute"]["new_compute_kv_pages"]}
+                texts[index] = result["text"]
+            await asyncio.gather(*(execute(i, item) for i, item in enumerate(trace)))
+            kv = await engine.metrics()
+            branches.append({"mode": mode, "requests": len(records),
+                "p95_seconds": _quantile([row["complete_ms"]/1000 for row in records], .95),
+                "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
+                "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
+                **{name: sum(row[name] for row in records) for name in (
+                    "input_tokens", "output_tokens", "device_hit_tokens", "host_loaded_tokens",
+                    "prefill_tokens", "new_compute_kv_pages")},
+                "infoflow_requests": sum(row["mode"] == "infoflow" for row in records)})
+            answers.append(texts)
+            for session in sessions:
+                await engine.close_session(session)
+    finally:
+        await engine.aclose()
+    value = {"conditions": "Identical actual inputs and arrival offsets, cold start per branch, greedy generation; all construction costs included.",
+             "branches": branches, "identical_answers": sum(a == b for a,b in zip(*answers)),
+             "questions": len(trace)}
+    Path(output).write_text(json.dumps(value, ensure_ascii=False, indent=2)+"\n")
+    return value
 
 
 def receipt(result):

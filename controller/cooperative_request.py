@@ -144,25 +144,51 @@ class EvidenceCosts:
         return best
 
     def estimate(self, ids, *, preserve_order=False):
+        return self.quote(ids, preserve_order=preserve_order)["milliseconds"]
+
+    def quote(self, ids, *, preserve_order=False):
         addresses = self.addresses(ids if preserve_order else self.order(ids))
         native = self._native(addresses)
+        page = self.snapshot["page_size"]
+        rounded = lambda tokens: ((int(tokens)+page-1)//page)*page
+        total = self.prompt_tokens+sum(self.lengths[address]+20 for address in addresses)+self.output_tokens
+        prefix = max((item for item in self.snapshot["prefixes"]
+                      if addresses[:len(item["source_ids"])] == tuple(item["source_ids"])),
+                     key=lambda item: item["gpu_tokens"], default=None)
+        native_new = rounded(max(0, total-(prefix["gpu_tokens"] if prefix else 0)))
+        native_pins = sum(prefix["unpinned_nodes"].values()) if prefix else 0
+        exact = {"mode": "exact", "milliseconds": native,
+                 "new_tokens": native_new, "pin_tokens": native_pins}
         if self.mode == "exact":
-            return native
+            return exact
         costs, cold, host = self.costs, 0, 0
+        pins, host_nodes, cold_pages = {}, {}, 0
         for address in addresses:
             resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
             length = self.lengths[address]
             if resident["gpu_tokens"] + resident["host_tokens"] >= length:
                 host += min(length, resident["host_tokens"])
+                pins.update(resident["unpinned_nodes"])
+                host_nodes.update(resident["host_nodes"])
             else:
                 cold += length
+                cold_pages += rounded(length)
         body = sum(self.lengths[address] for address in addresses)
         prompt = self.prompt_tokens+20*len(addresses)
         transfer = costs.get("transfer_token_ms", costs["prefill_token_ms"] * .05)
         infoflow = (cold*costs["build_token_ms"] + host*transfer +
             prompt*costs["score_token_ms"] + (prompt+self.ratio*body)*costs["recompute_token_ms"] +
             self.output_tokens*costs["infoflow_decode_token_ms"] + self.quality_cost)
-        return infoflow if self.mode == "infoflow" else min(native, infoflow)
+        approximate = {"mode": "infoflow", "milliseconds": infoflow,
+            "new_tokens": cold_pages+sum(host_nodes.values())+rounded(prompt)+rounded(prompt+self.ratio*body+self.output_tokens),
+            "pin_tokens": sum(pins.values())}
+        if self.mode == "infoflow":
+            return approximate
+        return min((exact, approximate), key=lambda item: item["milliseconds"])
+
+    def fits(self, ids, *, preserve_order=False):
+        quote = self.quote(ids, preserve_order=preserve_order)
+        return quote["new_tokens"]+quote["pin_tokens"] <= self.snapshot["available_tokens"]
 
 
 def compact_computations(results):
@@ -216,13 +242,16 @@ class CompiledRequest:
     demand: tuple[dict, ...]
 
 
-def source_body(evidence):
+def source_body(evidence, reference_ids=None):
     """Render source fragments once, sharing document headings and reference IDs."""
     body, spans, segments, references = "", [], [], []
-    identities, previous, previous_end = {}, None, 0
+    identities = {} if reference_ids is None else reference_ids
+    seen, previous, previous_end = set(), None, 0
     for block in evidence:
         if block.key not in identities:
             identities[block.key] = f"S{len(identities)+1}"
+        if block.key not in seen:
+            seen.add(block.key)
             references.append((identities[block.key], block.key))
         reference = identities[block.key]
         source_start = block.span[0] if block.span else 0
@@ -243,8 +272,8 @@ def source_body(evidence):
 
 
 def compile_request(template, question, history, evidence, *, results=(),
-                    future_sources=(), instruction=None, system_prompt=SYSTEM):
-    body, spans, segments, references = source_body(evidence)
+                    future_sources=(), instruction=None, system_prompt=SYSTEM, reference_ids=None):
+    body, spans, segments, references = source_body(evidence, reference_ids)
     task = answer_task(question, results)
     if instruction:
         task += "\n" + instruction

@@ -36,18 +36,13 @@ def relocate_keys(keys, local_positions, global_positions, rotary):
     return torch.cat((value, tail), dim=-1).to(keys.dtype)
 
 
-def causal_attention(query, key, value, positions, *, query_chunk=256):
-    """Sparse query rows attend to every causal context token."""
-    all_positions = torch.arange(len(key), device=query.device)
+def causal_attention(query, key, value):
+    """Contiguous block prefill uses the optimized right-aligned causal backend."""
+    from torch.nn.attention.bias import causal_lower_right
     k, v = key.transpose(0, 1)[None], value.transpose(0, 1)[None]
-    result = []
-    for start in range(0, len(query), query_chunk):
-        q = query[start:start + query_chunk].transpose(0, 1)[None]
-        mask = all_positions[None, :] <= positions[start:start + query_chunk, None]
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
-                                             enable_gqa=q.shape[1] != k.shape[1])
-        result.append(out[0].transpose(0, 1))
-    return torch.cat(result)
+    q = query.transpose(0, 1)[None]
+    return F.scaled_dot_product_attention(q, k, v,
+        attn_mask=causal_lower_right(len(query), len(key)), enable_gqa=q.shape[1] != k.shape[1])[0].transpose(0, 1)
 
 
 def attention_norm_squared(query, key, positions, *, query_chunk=32):
@@ -98,6 +93,13 @@ class RequestState:
     pool: object
     row: torch.Tensor | None = None
     local_positions: torch.Tensor | None = None
+    position_cosine: torch.Tensor | None = None
+    position_sine: torch.Tensor | None = None
+    attention_workspace: dict = field(default_factory=dict)
+    decode_graph: object = None
+    decode_input: torch.Tensor | None = None
+    decode_position: torch.Tensor | None = None
+    decode_output: torch.Tensor | None = None
     selected: torch.Tensor | None = None
     replayed: torch.Tensor | None = None
     prompt: torch.Tensor | None = None
@@ -105,7 +107,7 @@ class RequestState:
     complete: bool = False
     counters: dict = field(default_factory=lambda: dict(
         cold_tokens=0, reused_tokens=0, recomputed_tokens=0, replay_tokens=0, score_tokens=0,
-        host_load_tokens=0, device_hit_tokens=0, private_tokens=0))
+        host_load_tokens=0, device_hit_tokens=0, private_tokens=0, new_compute_kv_pages=0))
 
     def layer_kv(self, layer_id, rotary, length, *, overlay=True):
         """Materialize one layer, keeping base pages immutable across requests."""
@@ -160,8 +162,15 @@ class QwenInfoFlow:
 
     def _attend(self, state, layer, query, positions, length):
         keys, values = state.pool.get_kv_buffer(layer.self_attn.attn.layer_id)
-        return paged_attention(query, keys, values, state.row, state.local_positions,
-                               positions, layer.self_attn.rotary_emb, length)
+        if state.position_cosine is None:
+            cache = layer.self_attn.rotary_emb.cos_sin_cache
+            local_cos, local_sin = cache[state.local_positions].float().chunk(2, -1)
+            global_cos, global_sin = cache[:len(state.row)].float().chunk(2, -1)
+            norm = local_cos.square()+local_sin.square()
+            state.position_cosine = (global_cos*local_cos+global_sin*local_sin)/norm
+            state.position_sine = (global_sin*local_cos-global_cos*local_sin)/norm
+        return paged_attention(query, keys, values, state.row, state.position_cosine, state.position_sine,
+                               positions, layer.self_attn.rotary_emb, length, state.attention_workspace)
 
     @torch.inference_mode()
     def build(self, state, block, end):
@@ -182,7 +191,7 @@ class QwenInfoFlow:
             keys[block.slots[first:last]] = k
             values[block.slots[first:last]] = v
             attention = causal_attention(q, keys[block.slots[:last]],
-                                          values[block.slots[:last]], positions)
+                                          values[block.slots[:last]])
             hidden = self._finish_layer(layer, hidden, attention)
         block.ready = last
         state.counters['cold_tokens'] += last - first
@@ -219,6 +228,8 @@ class QwenInfoFlow:
         amount = min(len(context_positions), math.ceil(len(context_positions) * ratio))
         selected = context_positions[scores[context_positions].topk(amount).indices]
         state.selected = torch.cat((state.prompt, selected)).sort().values
+        state.position_cosine[state.selected] = 1
+        state.position_sine[state.selected] = 0
         state.replayed = state.selected[:0]
         state.counters['private_tokens'] = len(state.selected)
 
@@ -241,9 +252,24 @@ class QwenInfoFlow:
 
     @torch.inference_mode()
     def decode(self, state, input_id, position):
+        """Capture the fixed Qwen decode path once per request; KV rows remain shared."""
+        if state.decode_graph is None:
+            state.decode_input = input_id.reshape(1).clone()
+            state.decode_position = position.reshape(1).clone()
+            self._decode(state, state.decode_input, state.decode_position)
+            state.decode_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(state.decode_graph):
+                state.decode_output = self._decode(state, state.decode_input, state.decode_position)
+        else:
+            state.decode_input.copy_(input_id.reshape(1))
+            state.decode_position.copy_(position.reshape(1))
+        state.decode_graph.replay()
+        return state.decode_output
+
+    def _decode(self, state, input_id, position):
         positions = position.reshape(1)
         hidden = self.model.embed_tokens(input_id.reshape(1))
-        length = int(position) + 1
+        length = len(state.row)
         for layer in self.layers:
             layer_id = layer.self_attn.attn.layer_id
             q, k, v = self._qkv(layer, hidden, positions)

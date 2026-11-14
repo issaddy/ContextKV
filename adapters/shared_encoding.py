@@ -193,7 +193,7 @@ class EvidenceEncoding:
         selected = candidates[best]
         return cost_model.order(selected) if cost_model else selected
 
-    def project_population(self, units, *, body_tokens, target_tokens, cost_model=None, seconds_price=0.0):
+    def project_population(self, units, *, body_tokens, cost_model=None, seconds_price=0.0):
         """Cover each source, then add query-weighted representative spans within it."""
         import torch
         if not units:
@@ -218,7 +218,6 @@ class EvidenceEncoding:
             best = max(members, key=lambda i: float(self.relevance[i]))
             selected.update(closures[best])
         used = sum(sizes[i] for i in selected)
-        target_tokens = min(body_tokens, max(used, target_tokens))
         similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
         same_source = torch.zeros_like(similarity)
         for members in groups.values():
@@ -235,7 +234,9 @@ class EvidenceEncoding:
             for i, closure in enumerate(closures):
                 extra = closure-selected
                 tokens = sum(sizes[j] for j in extra)
-                if not extra or used+tokens > target_tokens:
+                if not extra or used+tokens > body_tokens:
+                    continue
+                if cost_model and not cost_model.fits(identities(selected | extra), preserve_order=True):
                     continue
                 coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
                 gain = float(((coverage-represented)*weights).sum())

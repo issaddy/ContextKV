@@ -102,7 +102,7 @@ def method_config(config, method, dataset, split):
 
 
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
-                      limit_conversations=None, limit_turns=20):
+                      limit_conversations=None, limit_turns=20, cache_pair=False):
     from adapters.providers import create_evidence_provider
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.evidence import make_evidence
@@ -134,6 +134,14 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     if "answer_system_prompt" in spec:
         run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     service = create_controller(run)
+    trace = []
+    if cache_pair and method["id"] == "contextkv":
+        compute = service.engine.compute
+        async def capture(request, **options):
+            if options["request_id"].endswith(":answer"):
+                trace.append({"arrived": time.monotonic(), "request": request, "options": options})
+            return await compute(request, **options)
+        service.engine.compute = capture
     provider = await asyncio.to_thread(create_evidence_provider, config, service.template)
     qa = DocumentQA(service, provider)
     await qa.start()
@@ -209,6 +217,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     "actual_prefill_tokens": response.total_prefill_tokens,
                     "actual_device_hit_tokens": response.total_device_hit_tokens,
                     "actual_host_loaded_tokens": response.total_host_loaded_tokens}
+                cost["new_compute_kv_pages"] = response.new_compute_kv_pages
                 record.update(status="completed", answer=response.assistant_text, cost=cost,
                     sources=to_jsonable(response.visible_evidence_manifest),
                     computation_sources=[item["sources"] for item in response.computations],
@@ -233,19 +242,25 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         await asyncio.gather(*(conversation(sid, turns) for sid, turns in grouped.items()))
     finally:
         measured_end = time.monotonic()
+        kv = await service.engine.metrics()
         await physical.stop()
         write_json(directory/"batch_cost.json", {"duration_seconds": measured_end-measured_start,
+            "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
+            "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
             **integrate_physical(physical.samples, measured_start, measured_end)})
         write_jsonl(directory/"references.jsonl", [references[key] for key in expected if key in references])
         provider.close()
         await service.aclose()
         service.store.close()
     ordered = [results[key] for key in expected]
+    if trace:
+        from bench.cache_reuse import replay_requests
+        await replay_requests(run, trace, directory/"cache_pair.json", concurrency=concurrency)
     return ordered
 
 
 async def evaluate(config, matrix, output, *, split, methods=None, datasets=None,
-                   concurrency=1, limit_conversations=None, limit_turns=20, score=True):
+                   concurrency=1, limit_conversations=None, limit_turns=20, score=True, cache_pair=False):
     from bench.study_scoring import score_dataset
 
     output = Path(output)
@@ -258,7 +273,7 @@ async def evaluate(config, matrix, output, *, split, methods=None, datasets=None
         for name, dataset in _track_specs(matrix, split, datasets).items():
             directory = output/method["id"]/name
             rows = await run_dataset(config, matrix, method, name, split, directory,
-                concurrency=concurrency, limit_conversations=limit_conversations, limit_turns=limit_turns)
+                concurrency=concurrency, limit_conversations=limit_conversations, limit_turns=limit_turns, cache_pair=cache_pair)
             generated.append((name, dataset, directory, rows))
 
     results = []
@@ -307,7 +322,8 @@ def report(matrix, rows, directory, *, split="test"):
                 "p95_seconds": p95 / 1000 if p95 is not None else None,
                 **{key: cost[key] for key in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds",
                     "host_gib_seconds", "gpu_peak_gib", "host_peak_gib", "actual_device_hit_tokens",
-                    "actual_host_loaded_tokens", "actual_prefill_tokens")}}
+                    "actual_host_loaded_tokens", "actual_prefill_tokens", "new_compute_kv_pages",
+                    "gpu_kv_peak_tokens", "gpu_kv_peak_gib")}}
             summaries.append(item)
             current[method] = item
             text.append("| " + labels.get(method, method) + f" | {item['completed']}/{item['requested']} | "
@@ -346,6 +362,7 @@ def main(argv=None):
     parser.add_argument("--limit-conversations", type=int)
     parser.add_argument("--limit-turns", type=int, default=20, help="Questions per benchmark and method")
     parser.add_argument("--unscored", action="store_true")
+    parser.add_argument("--cache-pair", action="store_true", help="Pair Native and cooperative cache on identical generated request inputs")
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
     matrix = yaml.safe_load(Path(args.matrix).read_text())
@@ -355,7 +372,7 @@ def main(argv=None):
         write_json(output/"matrix.json", matrix)
         rows = asyncio.run(evaluate(config, matrix, output, split=args.split,
             methods=args.methods, datasets=args.datasets, concurrency=args.concurrency,
-            limit_conversations=args.limit_conversations, limit_turns=args.limit_turns, score=not args.unscored))
+            limit_conversations=args.limit_conversations, limit_turns=args.limit_turns, score=not args.unscored, cache_pair=args.cache_pair))
         result = report(matrix, rows, output, split=args.split)
     else:
         source = Path(args.results or root/args.split)

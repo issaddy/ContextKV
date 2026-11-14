@@ -28,6 +28,7 @@ class ComputeRuntime:
         self.gpu_token_seconds = self.host_token_seconds = 0.0
         self.observed_at = time.monotonic()
         self.pool_used = self._pool_used()
+        self.gpu_peak_used_tokens = self.pool_used[0]
         keys, values = self.pool.get_kv_buffer(0)
         layers = scheduler.tp_worker.model_runner.model.config.num_hidden_layers
         self.bytes_per_token = (keys[0].numel() * keys.element_size() +
@@ -44,22 +45,34 @@ class ComputeRuntime:
         self.gpu_token_seconds += elapsed * self.pool_used[0]
         self.host_token_seconds += elapsed * self.pool_used[1]
         self.observed_at, self.pool_used = now, self._pool_used()
+        self.gpu_peak_used_tokens = max(self.gpu_peak_used_tokens, self.pool_used[0])
 
     def control(self, action, data):
         if action == 'evidence_state':
             scope = data.get('cache_scope', 'shared')
+            session = data.get('session_id')
+            if session is not None:
+                retained = {(scope, address) for address in data['retained_sources']}
+                self.demands[session] = {key: item for key, item in self.demands.get(session, {}).items()
+                                         if key in retained}
+                self._refresh_priorities()
             wanted = set(data['source_ids'])
             sources, prefixes = {}, []
             for address in wanted:
                 source_id = scope, address
                 sources[address] = dict(zip(('gpu_tokens', 'host_tokens'), self._resident(source_id, 'infoflow')))
+                sources[address]['unpinned_nodes'] = self._page_nodes(source_id, 'infoflow')
+                sources[address]['host_nodes'] = self._page_nodes(source_id, 'infoflow', host=True)
                 prefix = self.source_prefixes.get(source_id)
                 if prefix is not None and prefix['namespace'] == data.get('cache_namespace') and set(prefix['sources']) <= wanted:
                     gpu, host = self._resident(source_id, 'exact')
                     gpu, host = min(gpu, prefix['tokens']), min(host, max(0, prefix['tokens']-gpu))
                     if gpu or host:
-                        prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host))
-            return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs), output_tokens=self.output_tokens_mean)
+                        prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host,
+                                             unpinned_nodes=self._page_nodes(source_id, 'exact')))
+            return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs), output_tokens=self.output_tokens_mean,
+                        page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
+                        available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':
             self.demands.pop(data['session_id'], None)
             self._refresh_priorities()
@@ -78,11 +91,13 @@ class ComputeRuntime:
                 self.prioritized_nodes.clear()
                 self.gpu_token_seconds = self.host_token_seconds = 0.0
                 self.observed_at, self.pool_used = time.monotonic(), self._pool_used()
+                self.gpu_peak_used_tokens = self.pool_used[0]
             return {'flushed': flushed}
         self.observe_pool()
         return dict(pool=dict(gpu_used_tokens=self.pool_used[0], host_used_tokens=self.pool_used[1],
                               bytes_per_token=self.bytes_per_token),
             gpu_token_seconds=self.gpu_token_seconds, host_token_seconds=self.host_token_seconds,
+            gpu_peak_used_tokens=self.gpu_peak_used_tokens,
             gpu_kv_gib_seconds=self.gpu_token_seconds * self.bytes_per_token / 2**30,
             host_kv_gib_seconds=self.host_token_seconds * self.bytes_per_token / 2**30,
             costs=dict(self.costs),
@@ -108,6 +123,18 @@ class ComputeRuntime:
 
     def _match(self, source_id, ids):
         return self.cache.match_prefix(MatchPrefixParams(key=self._key(source_id, ids)))
+
+    def _page_nodes(self, source_id, mode, *, host=False):
+        node = self.cache.tree_core._node_arena.get(self.source_nodes.get((source_id, mode)))
+        nodes = {}
+        while node is not None and node.parent is not None:
+            component = node.component_data[0]
+            if host and component.value is None and component.host_value is not None and node.write_through_pending_id is None:
+                nodes[node.id] = len(component.host_value)
+            elif not host and component.value is not None and component.lock_ref == 0:
+                nodes[node.id] = len(component.value)
+            node = node.parent
+        return nodes
 
     def _indices(self, match):
         return self.cache.path_device_indices(match.last_device_node)[:match.device_prefix_len]
@@ -183,9 +210,11 @@ class ComputeRuntime:
         for source_id, start, end, match, block_ids in blocks:
             item = request_demand.get(source_id)
             if item is not None and 'native_prefix_end' not in item and match.device_prefix_len+match.host_hit_length < len(block_ids):
-                consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, set()))[1]
-                consumers.update(item.get('consumer_ids', ()) or range(int(item.get('uses', 0))))
-        build_value = sum(length * len(consumers) * marginal_value for length, consumers in cold_consumers.values())
+                consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, {}))[1]
+                identities = item.get('consumer_ids', ()) or ('next',)
+                for consumer in identities:
+                    consumers[consumer] = max(consumers.get(consumer, 0), float(item.get('uses', 0))/len(identities))
+        build_value = sum(length * sum(consumers.values()) * marginal_value for length, consumers in cold_consumers.values())
         quality_loss = float(metadata.get('quality_loss', 0.0))
         quality_price_ms = float(metadata.get('quality_price_ms', 0.0))
         mode = metadata.get('mode', 'auto')
@@ -330,9 +359,11 @@ class ComputeRuntime:
         for session, scope in self.demands.items():
             item = scope.get(source_id)
             if item is not None and (mode != 'exact' or 'native_prefix_end' in item):
-                for consumer in item.get('consumer_ids', ()) or range(int(item.get('uses', 0))):
+                identities = item.get('consumer_ids', ()) or ('next',)
+                for consumer in identities:
                     replay = item['recompute_ratio'] * self.costs.get('recompute_token_ms', 0.0) if mode == 'infoflow' else 0.0
-                    values[session, consumer] = max(0.0, self.costs.get('prefill_token_ms', 0.0) - replay)
+                    values[session, consumer] = (max(0.0, self.costs.get('prefill_token_ms', 0.0) - replay)
+                                                * float(item.get('uses', 0))/len(identities))
         return values
 
     def _refresh_priorities(self):
@@ -521,6 +552,17 @@ def attach_compute_batch(forward_batch, batch, model_runner):
     forward_batch.contextkv_translator = model_runner.kv_index_translator
     forward_batch.contextkv_states = tuple(getattr(req, 'contextkv_compute_state', None) for req in batch.reqs)
     forward_batch.contextkv_rows = batch.req_to_token_pool.req_to_token[batch.req_pool_indices]
+    runtime = None
+    lengths = forward_batch.extend_seq_lens_cpu if forward_batch.forward_mode.is_extend() else [1]*forward_batch.batch_size
+    for index, (state, length) in enumerate(zip(forward_batch.contextkv_states, lengths)):
+        if state is not None:
+            runtime = state.runtime
+            first = (forward_batch.extend_prefix_lens_cpu[index] if forward_batch.forward_mode.is_extend()
+                     else int(forward_batch.seq_lens_cpu[index])-1)
+            page = runtime.cache.page_size
+            state.counters['new_compute_kv_pages'] += math.ceil((first+length)/page)-math.ceil(first/page)
+    if runtime is not None:
+        runtime.observe_pool()
 
 
 def _measure(state, phase, tokens, operation):
@@ -566,9 +608,9 @@ def _single_batch(batch, index, offset, length):
 def forward_qwen(model, native_forward, input_ids, positions, batch, input_embeds=None,
                  pp_proxy_tensors=None):
     states = getattr(batch, 'contextkv_states', ())
+    lengths = batch.extend_seq_lens_cpu if batch.forward_mode.is_extend() else [1] * batch.batch_size
     if not any(state is not None and state.mode == 'infoflow' for state in states):
         return native_forward(input_ids, positions, batch, input_embeds, pp_proxy_tensors)
-    lengths = batch.extend_seq_lens_cpu if batch.forward_mode.is_extend() else [1] * batch.batch_size
     result = torch.zeros((len(input_ids), model.config.hidden_size),
                          dtype=model.embed_tokens.weight.dtype, device=input_ids.device)
     offset = 0
@@ -598,6 +640,8 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                 if first == 0:
                     state.row = work_row.new_zeros(len(state.input_ids) + state.request.sampling_params.max_new_tokens + 1)
                     state.local_positions = torch.arange(len(state.row), device=input_ids.device)
+                    state.position_cosine = state.position_sine = None
+                    state.decode_graph = None
                     state.prompt = torch.tensor(state.prompt_positions, device=input_ids.device)
                     state.scores = torch.zeros((2, len(state.input_ids)), device=input_ids.device)
                     state.selected = state.replayed = None

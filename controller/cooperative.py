@@ -39,6 +39,7 @@ class AnswerResult:
     computations: tuple = ()
     native: dict = field(default_factory=dict)
     evaluation_evidence: tuple = ()
+    new_compute_kv_pages: int = 0
 
 
 def selected_blocks(state):
@@ -49,7 +50,8 @@ def selected_blocks(state):
 
 def execution_totals():
     return {"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0.0,
-            "device_hit_tokens": 0, "host_loaded_tokens": 0, "prefill_tokens": 0, "calls": 0}
+            "device_hit_tokens": 0, "host_loaded_tokens": 0, "prefill_tokens": 0, "calls": 0,
+            "new_compute_kv_pages": 0}
 
 
 def computation_record(program, result):
@@ -72,6 +74,7 @@ class CooperativeController:
         self.settings, self.policy, self.dialogue_mode = settings, policy, dialogue_mode
         self._locks = WeakValueDictionary()
         self.native_state = {}
+        self.reuse = {}
         self.engine_info = None
         self.kv_policy = {}
         if dialogue_mode == "contextkv":
@@ -92,6 +95,7 @@ class CooperativeController:
     async def close_session(self, session_id):
         self._locks.pop(session_id, None)
         self.native_state.pop(session_id, None)
+        self.reuse.pop(session_id, None)
         await self.engine.close_session(session_id)
 
     def _lock(self, session_id):
@@ -122,6 +126,7 @@ class CooperativeController:
             totals["device_hit_tokens"] += native["device_hit_tokens"]
             totals["host_loaded_tokens"] += native["host_loaded_tokens"]
             totals["prefill_tokens"] += native["prefill_tokens"]
+            totals["new_compute_kv_pages"] += native["new_compute_kv_pages"]
             totals["calls"] += 1
             return result
         return complete
@@ -152,6 +157,19 @@ class CooperativeController:
                                                 complete, totals, arrived)
                 selection = await retrieve(query)
                 state = selection.shared_state
+                reuse = self.reuse.setdefault(session_id, {"scope": None, "sources": {}})
+                scope = (tuple(sorted((condition.relation_type,
+                                      state.query.text(tuple(ref for ref in (condition.key_span, condition.predicate_span)
+                                                             if ref is not None)).casefold(),
+                                      state.query.text(condition.value_spans).casefold())
+                                      for condition in state.query.task.conditions)),
+                         state.query.task.version_intent.document_families,
+                         state.query.task.version_intent.version_ids)
+                if scope != reuse["scope"]:
+                    reuse["sources"].clear()
+                    reuse["scope"] = scope
+                state.session_id = session_id
+                state.retained_sources = reuse["sources"]
                 state.totals = totals
                 snapshot = replace(snapshot, raw_history=working_history(state.query, snapshot.raw_history))
                 auxiliary = selection.auxiliary_usage
@@ -174,6 +192,8 @@ class CooperativeController:
                 request = await self.answer_request(state, snapshot, complete)
                 computations = state.computations
                 final = await complete(request, "answer")
+                reuse["sources"] = {item["source_id"]: state.retained_sources.get(item["source_id"], 0)+1
+                                    for item in request.demand}
                 source_keys = {decode(EvidenceKey, span["source_key"]) for item in computations for span in item["sources"]}
                 calculation_sources = tuple(block for block in state.document_index.blocks
                                             if block.key in source_keys)
@@ -213,7 +233,7 @@ class CooperativeController:
         if population:
             return
         budget, _ = self._answer_budget(state, snapshot, state.computations)
-        raw_size = len(self.template.tokenizer.encode(source_body(blocks)[0], add_special_tokens=False))
+        raw_size = len(self.template.tokenizer.encode(source_body(blocks, state.reference_ids)[0], add_special_tokens=False))
         if raw_size <= budget:
             return
         required = {need.need_id for need in state.query.task.needs
@@ -245,9 +265,22 @@ class CooperativeController:
         if state.version_catalogue:
             instruction += "\nAvailable document versions from the source index:\n" + json.dumps(
                 state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
-        return compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
+        request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
-            instruction=instruction or None)
+            instruction=instruction or None, reference_ids=state.reference_ids)
+        # Keep a small next-turn working set; repeated sources take precedence.
+        open_ids = {need.need_id for need in state.open_needs}
+        open_keys = {binding.source_span.source_key for binding in state.evidence.bindings if binding.need_id in open_ids}
+        pending = {source_address(block) for block in selected if block.key in open_keys}
+        retained = sorted(request.blocks, key=lambda block: (
+            block["source_id"] not in pending, -state.retained_sources.get(block["source_id"], 0)))[
+            :max(1, len(state.query.task.needs))]
+        demand = tuple({"source_id": block["source_id"],
+                        "uses": 1.0 if block["source_id"] in pending else
+                                (state.retained_sources.get(block["source_id"], 0)+1) /
+                                (state.retained_sources.get(block["source_id"], 0)+2),
+                        "native_prefix_end": block["end"]} for block in retained)
+        return replace(request, demand=demand)
 
     def _reading_allowance(self, state, snapshot, request, output_tokens):
         """Every read funds its own output and the reserved terminal context first."""
@@ -393,9 +426,13 @@ class CooperativeController:
         budget, prompt_tokens = self._answer_budget(state, snapshot, computations)
         units = () if closed else state.pool.units
         blocks = blocks_for_units(units, state.pool.source_blocks)
+        available_sources = {source_address(block) for block in (*state.source_headers, *blocks)}
+        state.retained_sources = {address: count for address, count in state.retained_sources.items()
+                                  if address in available_sources}
         native = (state.costs.snapshot if state.costs is not None else
-            await self.engine.evidence_state(tuple(source_address(block) for block in (*state.source_headers, *blocks)),
-                cache_scope=state.cache_scope, cache_namespace=state.cache_namespace))
+            await self.engine.evidence_state(tuple(available_sources),
+                cache_scope=state.cache_scope, cache_namespace=state.cache_namespace,
+                session_id=state.session_id, retained_sources=state.retained_sources))
         def select():
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
@@ -403,9 +440,7 @@ class CooperativeController:
             if closed:
                 ids = ()
             elif state.query.task.coverage_scope == "all_supplied_documents":
-                share = self.engine_info.gpu_capacity_tokens//max(1, len(self._locks))
                 ids = state.evidence.project_population(units, body_tokens=budget,
-                    target_tokens=share-prompt_tokens-self.policy.max_new_tokens,
                     cost_model=costs, seconds_price=self.prices.seconds)
             else:
                 ids = state.evidence.select(units, body_tokens=budget,
@@ -470,6 +505,7 @@ class CooperativeController:
             totals["host_loaded_tokens"], totals["prefill_tokens"], totals["elapsed_ms"],
             read_count=totals["calls"]-1, reduce_count=len(computations),
             truncated=meta["finish_reason"]["type"] == "length", computations=computations, native=native,
+            new_compute_kv_pages=totals["new_compute_kv_pages"],
             evaluation_evidence=tuple({(block.key, block.span): block
                 for block in (*request.evidence, *calculation_sources)}.values()))
         self.store.commit(snapshot.session_id, request_id, query, final["text"], evidence=response.evaluation_evidence,

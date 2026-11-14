@@ -36,6 +36,7 @@ class CorpusIndex:
                  source_metadata=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
+        self.reference_ids = {key: f"S{index+1}" for index, key in enumerate(self._blocks)}
         self.source_metadata = source_metadata or {}
         self._retrieval_texts = retrieval_texts or {}
         self._source_document_ids = source_document_ids or {}

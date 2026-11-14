@@ -101,6 +101,7 @@ def _cost_summary(rows):
                  "actual_prefill_tokens", "actual_device_hit_tokens",
                  "actual_host_loaded_tokens"):
         result[name] = _cost_total(rows, name)
+    result["new_compute_kv_pages"] = _cost_total(rows, "new_compute_kv_pages")
     batches = [json.loads(path.read_text()) for directory in {
         row["generation_dir"] for row in rows if "generation_dir" in row}
         if (path := Path(directory)/"batch_cost.json").exists()]
@@ -109,6 +110,9 @@ def _cost_summary(rows):
         result[field] = sum(batch[field] for batch in batches) if batches else None
         peak = tier + "_peak_gib"
         result[peak] = max((batch[peak] for batch in batches), default=None)
+    for name in ("gpu_kv_peak_tokens", "gpu_kv_peak_gib"):
+        values = [batch[name] for batch in batches if name in batch]
+        result[name] = max(values) if len(values) == len(batches) and values else None
     token_fields = (result["total_input_tokens"], result["total_output_tokens"])
     result["online_tokens"] = sum(token_fields) if all(v is not None for v in token_fields) else None
     result["token_accounting"] = "fixed_generation_model"
