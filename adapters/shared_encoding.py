@@ -326,8 +326,10 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
     texts[current_turn_id, "user"] = question
     add(f"Current query (turn {current_turn_id}): ")
     add(question, (current_turn_id, "user"))
+    if catalogue:
+        add("\n")
     if catalogue and not literal_versions(question, catalogue):
-        add("\nAvailable source versions:\n")
+        add("Available source versions:\n")
         for row in catalogue:
             start, end = add(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
             catalog_spans.append((start, end, row))
