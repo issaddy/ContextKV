@@ -143,8 +143,8 @@ class EvidenceCosts:
                     best, price = ordered, cost
         return best
 
-    def estimate(self, ids):
-        addresses = self.addresses(self.order(ids))
+    def estimate(self, ids, *, preserve_order=False):
+        addresses = self.addresses(ids if preserve_order else self.order(ids))
         native = self._native(addresses)
         if self.mode == "exact":
             return native

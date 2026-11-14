@@ -104,7 +104,7 @@ class SharedEvidenceProvider:
     @property
     def manifest(self):
         return {"query": self.query_encoder.manifest, "evidence": self.evidence_encoder.manifest,
-                "retrieval": "scope_first_bm25_dense_rrf", "selection": "generator_set_utility",
+                "retrieval": "scope_first_bm25_dense_rrf", "selection": "learned_utility_and_source_coverage",
                 "corpus_snapshot_id": self.corpus_snapshot_id}
 
     async def retrieve(self, snapshot, query, request_id, *, facts=()):

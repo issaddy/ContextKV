@@ -245,7 +245,7 @@ class EvidenceEncoding:
         def identities(indices):
             return tuple(units[i].unit_id for i in sorted(indices))
         while True:
-            price = cost_model.estimate(identities(selected)) if cost_model else 0.
+            price = cost_model.estimate(identities(selected), preserve_order=True) if cost_model else 0.
             best, best_score = None, 0.
             for i, closure in enumerate(closures):
                 extra = closure-selected
@@ -254,7 +254,7 @@ class EvidenceEncoding:
                     continue
                 coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
                 gain = float(((coverage-represented)*weights).sum())
-                extra_price = (cost_model.estimate(identities(selected | extra))-price) if cost_model else 0.
+                extra_price = (cost_model.estimate(identities(selected | extra), preserve_order=True)-price) if cost_model else 0.
                 score = (gain-seconds_price*extra_price/1000)/tokens
                 if score > best_score:
                     best, best_score = extra, score
