@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 
 from .cooperative_request import source_address
-from .schema import EvidenceBlock, QueryContext, SessionSnapshot, TurnRecord
+from .schema import EvidenceBlock, QueryContext, SessionSnapshot, SourceSpan, TurnRecord
 from .serialization import decode, dumps
 
 
@@ -101,6 +101,7 @@ class ConversationStore:
     def commit(self, session_id, request_id, query, answer, *, evidence, task, facts, metrics):
         snapshot = self.get_snapshot(session_id)
         turn = TurnRecord(snapshot.version + 1, query, answer, evidence_keys=tuple(b.key for b in evidence),
+            source_spans=tuple(SourceSpan(source_address(b), b.key, *(b.span or (0, len(b.text)))) for b in evidence),
                           query_context=QueryContext(query, "shared", task_state=task))
         with self.db:
             self.db.execute("INSERT INTO qa_turns VALUES(?,?,?,?,?)", (

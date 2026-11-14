@@ -652,17 +652,20 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                     state.complete = False
                     state.transferred_ranges = []
                 state.native_work = end
+                pending = []
                 for block in state.blocks:
                     if block.owned:
                         block.slots = work_row[block.work_start:block.work_end]
                         amount = min(end - block.work_start, block.end - block.start)
                         if amount > block.ready:
-                            _measure(state, 'build', amount - block.ready,
-                                lambda b=block, n=amount: driver.build(state, b, b.start + n))
+                            pending.append((block, amount))
                     if state.selected is None:
                         state.row[block.start:block.end] = block.slots[:block.end-block.start]
                         state.local_positions[block.start:block.end] = torch.arange(
                             block.end-block.start, device=input_ids.device)
+                if pending:
+                    _measure(state, 'build', sum(last-block.ready for block, last in pending),
+                             lambda: driver.build(state, pending))
                 state.runtime.publish_blocks(state)
                 score_first = max(0, first - state.score_start)
                 score_end = min(len(state.prompt), end - state.score_start)

@@ -136,10 +136,28 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     service = create_controller(run)
     trace = []
     if cache_pair and method["id"] == "contextkv":
+        from controller.cooperative import blocks_for_units
+        from controller.cooperative_request import source_address
+        planned = {}
+        answer_request = service.answer_request
+        async def capture_plan(state, snapshot, complete):
+            request = await answer_request(state, snapshot, complete)
+            chosen = set(state.selected_ids)
+            order = [identity for identity in state.evidence.frontier(state.pool.units)[-1] if identity in chosen]
+            units = {unit.unit_id: unit for unit in state.pool.units}
+            ranked = blocks_for_units((units[identity] for identity in order), state.pool.source_blocks)
+            members = {source_address(block): block for block in request.evidence}
+            ranked_ids = [source_address(block) for block in ranked if source_address(block) in members]
+            ranked_blocks = (*[block for address, block in members.items() if address not in set(ranked_ids)],
+                             *[members[address] for address in ranked_ids])
+            planned[id(request)] = {"ranked_evidence": ranked_blocks, "history": snapshot.raw_history}
+            return request
+        service.answer_request = capture_plan
         compute = service.engine.compute
         async def capture(request, **options):
             if options["request_id"].endswith(":answer"):
-                trace.append({"arrived": time.monotonic(), "request": request, "options": options})
+                trace.append({"arrived": time.monotonic(), "request": request, "options": options,
+                              **planned.pop(id(request))})
             return await compute(request, **options)
         service.engine.compute = capture
     provider = await asyncio.to_thread(create_evidence_provider, config, service.template)
@@ -155,7 +173,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         "split": split, "protocol": protocol, "task_ids": expected,
         "concurrency": concurrency, "retrieval": provider.manifest,
         "measurement_kind": "hardware",
-        "resource_scope": {"gpu_devices": devices, "process_roots": process_ids}})
+        "resource_scope": {"gpu_devices": devices, "process_roots": process_ids, "gpu_accounting": "owned_processes"}})
     catalogue_path = spec.get("supplied_source_catalogue")
     catalogue = ({row["source_id"]: {**row, "document_id": row["source_id"], "source": row["source_uri"]}
                  for row in read_jsonl(catalogue_path)} if catalogue_path else None)
@@ -256,7 +274,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     ordered = [results[key] for key in expected]
     if trace:
         from bench.cache_reuse import replay_requests
-        await replay_requests(run, trace, directory/"cache_pair.json", concurrency=concurrency)
+        await replay_requests(run, trace, directory/"cache_pair.json", concurrency=concurrency,
+                              references=list(references.values()), metric=spec["primary_metric"])
     return ordered
 
 

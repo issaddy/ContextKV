@@ -170,28 +170,30 @@ class QwenInfoFlow:
                                positions, layer.self_attn.rotary_emb, length, state.attention_workspace)
 
     @torch.inference_mode()
-    def build(self, state, block, end):
-        """Continue independent block prefill only through this scheduled chunk."""
-        first = block.ready
-        last = min(end - block.start, block.end - block.start)
-        if first >= last:
-            return
-        device = block.slots.device
-        ids = torch.tensor(state.input_ids[block.start + first:block.start + last],
+    def build(self, state, segments):
+        """Share Qwen projections/MLPs across the independent blocks ready in this chunk."""
+        device = segments[0][0].slots.device
+        spans = [(block, block.ready, last) for block, last in segments]
+        ids = torch.tensor([token for block, first, last in spans
+                            for token in state.input_ids[block.start+first:block.start+last]],
                            device=device, dtype=torch.int64)
-        positions = torch.arange(first, last, device=device)
+        positions = torch.cat([torch.arange(first, last, device=device) for _, first, last in spans])
+        slots = torch.cat([block.slots[first:last] for block, first, last in spans])
         hidden = self.model.embed_tokens(ids)
         for layer in self.layers:
             layer_id = layer.self_attn.attn.layer_id
             q, k, v = self._qkv(layer, hidden, positions)
             keys, values = state.pool.get_kv_buffer(layer_id)
-            keys[block.slots[first:last]] = k
-            values[block.slots[first:last]] = v
-            attention = causal_attention(q, keys[block.slots[:last]],
-                                          values[block.slots[:last]])
-            hidden = self._finish_layer(layer, hidden, attention)
-        block.ready = last
-        state.counters['cold_tokens'] += last - first
+            keys[slots], values[slots] = k, v
+            attention, offset = [], 0
+            for block, first, last in spans:
+                attention.append(causal_attention(q[offset:offset+last-first],
+                    keys[block.slots[:last]], values[block.slots[:last]]))
+                offset += last-first
+            hidden = self._finish_layer(layer, hidden, torch.cat(attention))
+        for block, first, last in spans:
+            block.ready = last
+            state.counters['cold_tokens'] += last-first
 
     @torch.inference_mode()
     def score(self, state, prompt):

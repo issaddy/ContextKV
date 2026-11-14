@@ -31,14 +31,15 @@ def descendants(process_ids):
     return found
 
 
-def physical_sample(gpu_devices, process_ids):
+def physical_sample(gpu_uuids, process_ids):
     before = time.monotonic()
-    output = subprocess.check_output(["nvidia-smi", "--query-gpu=index,memory.used",
+    owners = descendants((*process_ids, os.getpid()))
+    output = subprocess.check_output(["nvidia-smi", "--query-compute-apps=pid,gpu_uuid,used_memory",
         "--format=csv,noheader,nounits"], text=True, start_new_session=True)
-    gpu_gib = sum(float(row[1]) for row in csv.reader(io.StringIO(output))
-                  if int(row[0]) in gpu_devices) / 1024
+    gpu_gib = sum(float(row[2]) for row in csv.reader(io.StringIO(output))
+                  if int(row[0]) in owners and row[1].strip() in gpu_uuids) / 1024
     pss_kib = 0
-    for pid in descendants((*process_ids, os.getpid())):
+    for pid in owners:
         try:
             contents = Path(f"/proc/{pid}/smaps_rollup").read_text()
         except (FileNotFoundError, ProcessLookupError):
@@ -89,7 +90,9 @@ class StudyResourceSampler:
         self._task = None
 
     async def start(self):
-        self.samples.append(await asyncio.to_thread(self.sample, self.gpu_devices, self.process_ids))
+        devices = subprocess.check_output(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],text=True)
+        self.gpu_uuids = {row[1].strip() for row in csv.reader(io.StringIO(devices)) if int(row[0]) in self.gpu_devices}
+        self.samples.append(await asyncio.to_thread(self.sample, self.gpu_uuids, self.process_ids))
         self._task = asyncio.create_task(self._run())
 
     async def _run(self):
@@ -98,9 +101,9 @@ class StudyResourceSampler:
                 await asyncio.wait_for(self._stop.wait(), self.interval)
                 return
             except TimeoutError:
-                self.samples.append(await asyncio.to_thread(self.sample, self.gpu_devices, self.process_ids))
+                self.samples.append(await asyncio.to_thread(self.sample, self.gpu_uuids, self.process_ids))
 
     async def stop(self):
         self._stop.set()
         await self._task
-        self.samples.append(await asyncio.to_thread(self.sample, self.gpu_devices, self.process_ids))
+        self.samples.append(await asyncio.to_thread(self.sample, self.gpu_uuids, self.process_ids))

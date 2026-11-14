@@ -185,6 +185,9 @@ class SharedEvidenceProvider:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         query.task = replace(query.task, effective_source_scope=legal)
+        legal_set = set(legal)
+        previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
+                               if span.source_key in legal_set)
         complete_population = "all_supplied_documents" in (
             coverage_scope, query.task.coverage_scope, *(need.scope for need in query.task.needs))
         if complete_population:
@@ -213,7 +216,7 @@ class SharedEvidenceProvider:
                     cached["dense"] = DenseIndex(contexts, np.concatenate([vectors for vectors, _ in batches]), {})
                 sparse, dense = cached["sparse"], cached["dense"]
                 legal_ids = {unit.unit_id for unit in directory.units_by_id.values()
-                             if unit.source_spans[0].source_key in set(legal)}
+                             if unit.source_spans[0].source_key in legal_set}
             else:
                 legal_ids = {key.passage_id for key in legal}
             vectors = torch.cat((query.query_vector[None, :], query.need_vectors)).cpu().numpy()
@@ -234,6 +237,15 @@ class SharedEvidenceProvider:
                 units = self._closure(roots, directory.units_by_id)
                 keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
                 pool = EvidencePool(units, corpus.resolve(keys))
+            if previous_spans:
+                from itertools import zip_longest
+                prior = directory.full_scope(tuple(dict.fromkeys(span.source_key for span in previous_spans)))
+                observed = tuple(unit for unit in prior.units if any(
+                    origin.source_key == span.source_key and origin.start < span.end and span.start < origin.end
+                    for origin in unit.source_spans for span in previous_spans))
+                roots = tuple(unit for pair in zip_longest(units, observed) for unit in pair if unit is not None)
+                units = self._closure(roots, {unit.unit_id: unit for unit in (*units, *prior.units)})
+                pool = EvidencePool(units, tuple({b.key: b for b in (*pool.source_blocks, *prior.source_blocks)}.values()))
         if intent.mode == "compare" and len(wanted_versions) >= 2:
             selected_spans = tuple(span for unit in units for span in unit.source_spans)
             pairs = []

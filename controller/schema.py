@@ -195,10 +195,11 @@ class TurnRecord:
     assistant_output_ids: tuple[int, ...] = ()
     finish_reason: str = "stop"
     evidence_keys: tuple[EvidenceKey, ...] = ()
+    source_spans: tuple[SourceSpan, ...] = ()
     query_context: QueryContext | None = None
 
     def __post_init__(self) -> None:
-        _tuples(self, "assistant_output_ids", "evidence_keys")
+        _tuples(self, "assistant_output_ids", "evidence_keys", "source_spans")
 
 
 def history_messages(history: tuple[TurnRecord, ...]) -> tuple[Message, ...]:

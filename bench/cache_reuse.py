@@ -18,11 +18,13 @@ from controller.serialization import decode
 from training.collect_shared_values import history, score_answers, source_blocks
 
 
-async def replay_requests(run, trace, output, *, concurrency):
-    """Replay the same actual multi-turn inputs and arrivals through both cache policies."""
+async def replay_requests(run, trace, output, *, concurrency, references, metric):
+    """Pair semantic order and cache-priced order on the same actual evidence sets."""
     from controller.sampling import SamplingRecipe
     from bench.study_metrics import _quantile
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
+    template = create_model_template(run.model)
+    policy = load_kv_policy(run.cooperative)
     first = min(item["arrived"] for item in trace)
     branches, answers = [], []
     try:
@@ -38,8 +40,30 @@ async def replay_requests(run, trace, output, *, concurrency):
                            "cache_namespace": "pair:"+mode}
                 session = options["session_id"]
                 lock = sessions.setdefault(session, asyncio.Lock())
-                request = replace(item["request"], demand=()) if mode == "exact" else item["request"]
                 async with lock, slots:
+                    original = item["request"]
+                    evidence = item["ranked_evidence"]
+                    if mode == "auto":
+                        from controller.schema import SourceSpan
+                        units = tuple(EvidenceUnit(source_address(block),
+                            (SourceSpan(source_address(block), block.key, *(block.span or (0,len(block.text)))),),
+                            block.text, body_tokens=len(template.tokenizer.encode(block.text,add_special_tokens=False)))
+                            for block in evidence)
+                        snapshot = await engine.evidence_state(tuple(unit.unit_id for unit in units),
+                            cache_scope=options["cache_scope"], cache_namespace=options["cache_namespace"])
+                        empty = compile_request(template, original.messages[-1].content, item["history"], (),
+                                                system_prompt=original.messages[0].content)
+                        costs = EvidenceCosts(units, evidence, template.tokenizer, snapshot,
+                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy)
+                        by_id = {source_address(block): block for block in evidence}
+                        evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
+                    request = compile_request(template, original.messages[-1].content, item["history"], evidence,
+                        system_prompt=original.messages[0].content,
+                        reference_ids={key: label for label,key in original.reference_map})
+                    if mode == "auto":
+                        wanted = {d["source_id"]:d for d in original.demand}
+                        request = replace(request,demand=tuple({**wanted[b["source_id"]],"native_prefix_end":b["end"]}
+                            for b in request.blocks if b["source_id"] in wanted))
                     result = await engine.compute(request, **options)
                 records[index] = {"complete_ms": (time.monotonic()-start-arrival)*1000,
                                   **receipt(result),
@@ -57,11 +81,16 @@ async def replay_requests(run, trace, output, *, concurrency):
                     "prefill_tokens", "new_compute_kv_pages")},
                 "infoflow_requests": sum(row["mode"] == "infoflow" for row in records)})
             answers.append(texts)
+            if metric == "f1":
+                from bench.official import reference_overlap
+                predicted = [{"task_id":item["options"]["request_id"].rsplit(":",2)[0],
+                              "predictions":[{"text":text}]} for item,text in zip(trace,texts)]
+                branches[-1]["quality_f1"] = reference_overlap(references,predicted)["mean_f1"]
             for session in sessions:
                 await engine.close_session(session)
     finally:
         await engine.aclose()
-    value = {"conditions": "Identical actual inputs and arrival offsets, cold start per branch, greedy generation; all construction costs included.",
+    value = {"conditions": "Identical actual evidence members, questions, histories and arrival offsets; semantic Native order versus cache-priced order. Cold start per branch, greedy generation, all construction costs included.",
              "branches": branches, "identical_answers": sum(a == b for a,b in zip(*answers)),
              "questions": len(trace)}
     Path(output).write_text(json.dumps(value, ensure_ascii=False, indent=2)+"\n")
