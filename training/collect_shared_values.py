@@ -98,7 +98,7 @@ async def collect(args):
     kv_policy = controller.kv_policy
     if args.stage == "stop":
         from bench.study_resources import StudyResourceSampler, attribute_physical, listening_processes
-        await engine.profile_prepare("cold")
+        await engine.profile_prepare()
         roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
         sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
         await sampler.start()

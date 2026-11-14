@@ -106,11 +106,10 @@ class RequestState:
         cold_tokens=0, reused_tokens=0, recomputed_tokens=0, replay_tokens=0, score_tokens=0,
         host_load_tokens=0, device_hit_tokens=0, private_tokens=0, new_compute_kv_pages=0))
 
-    def layer_kv(self, layer_id, rotary, length, *, overlay=True):
-        """Materialize one layer, keeping base pages immutable across requests."""
-        keys, values = self.pool.get_kv_buffer(layer_id)
-        k = keys[self.row[:length]].clone()
-        v = values[self.row[:length]].clone()
+    def scoring_keys(self, layer_id, rotary, length):
+        """Restore global keys for importance scoring without copying values."""
+        keys, _ = self.pool.get_kv_buffer(layer_id)
+        k = keys[self.row[:length]]
         for block in self.blocks:
             end = min(block.end, length)
             if end <= block.start:
@@ -120,12 +119,7 @@ class RequestState:
             global_positions = local + block.start
             k[block.start:end] = relocate_keys(keys[block.slots[:count]], local,
                                                global_positions, rotary)
-            v[block.start:end] = values[block.slots[:count]]
-        if overlay and self.replayed is not None:
-            selected = self.replayed[self.replayed < length]
-            k[selected] = keys[self.row[selected]]
-            v[selected] = values[self.row[selected]]
-        return k, v
+        return k
 
 
 class QwenInfoFlow:
@@ -209,8 +203,7 @@ class QwenInfoFlow:
             keys, values = state.pool.get_kv_buffer(layer_id)
             keys[state.row[prompt]], values[state.row[prompt]] = k, v
             if index >= len(self.layers) - 2 and count > query_start:
-                all_k, _ = state.layer_kv(layer_id, layer.self_attn.rotary_emb,
-                                          count, overlay=False)
+                all_k = state.scoring_keys(layer_id, layer.self_attn.rotary_emb, count)
                 state.scores[index-len(self.layers)+2, :count] += attention_norm_squared(
                     q[query_rows], all_k, prompt[query_rows])
             hidden = self._finish_layer(layer, hidden,

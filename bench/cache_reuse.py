@@ -29,7 +29,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
     branches, answers = [], []
     try:
         for mode in ("exact", "auto"):
-            await engine.profile_prepare("cold")
+            await engine.profile_prepare()
             start = time.monotonic()
             slots, sessions = asyncio.Semaphore(concurrency), {}
             records, texts = [None]*len(trace), [None]*len(trace)
@@ -125,7 +125,7 @@ async def compare(args):
             ("ContextKV cache-priced order", "auto", "exact"),
             ("InfoFlow non-prefix reuse", "infoflow", "infoflow"),
         ):
-            await engine.profile_prepare("cold")
+            await engine.profile_prepare()
             namespace = "cache-pair:"+label
             seed_sources = tuple(reversed(blocks))
             seed = compile_request(template, "Read these source documents.", turns,

@@ -41,8 +41,8 @@ class SGLangEngineClient:
     async def metrics(self):
         return await self._post("/context/metrics", {})
 
-    async def profile_prepare(self, mode):
-        return await self._post("/context/profile/prepare", {"mode": mode})
+    async def profile_prepare(self):
+        return await self._post("/context/profile/prepare", {})
 
     async def close_session(self, session_id):
         return await self._post("/context/session/close", {"session_id": session_id})

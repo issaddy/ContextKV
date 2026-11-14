@@ -12,7 +12,7 @@
 | 召回与证据 | 范围优先 BM25＋dense＋RRF；Jina 共享重排、字段和集合头 |
 | 结构计算 | TableRAG 式字段投影、筛选、连接与 CPU 聚合；版本结构和变化定位 |
 | 停止决策 | Stop-RAG 式多步价值，使用实际答案质量、执行成本及尾部延迟 |
-| KV 协同 | SGLang 内 InfoFlow 独立块、全局位置、选择性重算和私有覆盖层；统一 GPU/Host 调度 |
+| KV 协同 | 需求驱动的 Native 精确前缀与 GPU/Host 分层保留；InfoFlow 独立块、全局位置、选择性重算和私有覆盖层，按完整成本选择执行路径 |
 | 工程入口 | 同一 DocumentQA/CooperativeController 服务 HTTP 和 benchmark |
 
 字段、实体、时期、单位、版本、条件与原文出处一起保留。全量统计覆盖声明总体。最终回答包含完整结论；不将原始逐行中间态作为日志长期保存。

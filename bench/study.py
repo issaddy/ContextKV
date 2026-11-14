@@ -164,7 +164,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     qa = DocumentQA(service, provider)
     await qa.start()
     if config["execution"].get("cache_start", "cold") == "cold":
-        await service.engine.profile_prepare("cold")
+        await service.engine.profile_prepare()
     resource_settings = matrix["resources"]
     devices = tuple(resource_settings["gpu_devices"])
     process_ids = tuple(sorted({os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)),

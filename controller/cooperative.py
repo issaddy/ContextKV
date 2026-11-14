@@ -9,7 +9,7 @@ from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, ANSWER_SCOPE, EvidenceCosts, blocks_for_units, compile_request,
                                   source_address, source_body, with_document_headers, working_history, with_source_demand)
-from .schema import EvidenceBlock, EvidenceKey, QueryContext
+from .schema import EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
 
@@ -245,7 +245,7 @@ class CooperativeController:
         if required and (not state.table_read or fresh or state.programs != state.prepared_programs):
             need_ids = ({need.need_id for need in state.query.task.needs} - reused
                         if not state.table_read else required)
-            results = await self._compute_documents(state, need_ids, snapshot, complete, ())
+            results = await self._compute_documents(state, need_ids, snapshot, complete)
             state.prepared_programs = state.programs
             merged = {record["need_id"]: record for record in (*state.computations, *results)}
             state.computations = tuple(merged.values())
@@ -306,7 +306,7 @@ class CooperativeController:
         if pack:
             yield tuple(pack)
 
-    async def _compute_documents(self, state, need_ids, snapshot, complete, selected):
+    async def _compute_documents(self, state, need_ids, snapshot, complete):
         from adapters.document_compute import (DocumentIndex, combine_populations,
             merge_projections, semantic_binding, semantic_projection)
         from adapters.shared_retrieval import need_scope_signature
@@ -342,7 +342,7 @@ class CooperativeController:
                 subset = DocumentIndex(tables, index.blocks)
                 binding = semantic_binding(state.query, subset, sorted(unbound), operations=resolved_operations)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
-                    binding.blocks, instruction=binding.instruction, future_sources=selected,
+                    binding.blocks, instruction=binding.instruction,
                     system_prompt=self.policy.system_prompt or SYSTEM)
                 allowance = self._reading_allowance(state, snapshot, request, output_tokens)
                 if not allowance:
@@ -367,7 +367,7 @@ class CooperativeController:
                 projection = semantic_projection(state.query, units, sorted(need_ids),
                     population_unit_ids=population, operations=operations)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
-                    projection.blocks, instruction=projection.instruction, future_sources=selected,
+                    projection.blocks, instruction=projection.instruction,
                     system_prompt=self.policy.system_prompt or SYSTEM)
                 allowance = self._reading_allowance(state, snapshot, request, output_tokens)
                 if not allowance:
