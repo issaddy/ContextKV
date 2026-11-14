@@ -187,11 +187,10 @@ class CooperativeController:
 
     async def prepare_state(self, state, snapshot, complete):
         """Select useful evidence before spending model work on its representation."""
-        if state.query.task.coverage_scope != "all_supplied_documents":
-            await self._select_evidence(state, snapshot, state.computations)
+        await self._select_evidence(state, snapshot, state.computations)
         previous = state.computations
         await self.read_required(state, snapshot, complete)
-        if state.computations != previous and state.query.task.coverage_scope != "all_supplied_documents":
+        if state.computations != previous:
             state.costs = None
             await self._select_evidence(state, snapshot, state.computations)
 
@@ -211,6 +210,8 @@ class CooperativeController:
             records[program.need_id] = computation_record(program, state.document_index.execute(program))
             state.processed_tables.update(projection.table_id for projection in program.projections)
         state.computations = tuple(records.values())
+        if population:
+            return
         budget, _ = self._answer_budget(state, snapshot, state.computations)
         raw_size = len(self.template.tokenizer.encode(source_body(blocks)[0], add_special_tokens=False))
         if raw_size <= budget:
@@ -234,19 +235,19 @@ class CooperativeController:
 
     async def answer_request(self, state, snapshot, complete):
         """Online answers and training branches use this same conclusion path."""
-        population = state.query.task.coverage_scope == "all_supplied_documents"
         if state.query.task.needs and all(need.need_id in state.completed_needs for need in state.query.task.needs):
             selected = ()
-        elif population:
-            selected = await self._population_sources(state, snapshot, state.computations, complete)
         else:
             selected = selected_blocks(state)
         selected = with_document_headers(selected, state.source_headers)
+        instruction = ("The source population is only partially examined. Use the established observations; "
+                       "do not present partial counts or sums as complete totals." if state.budget_exhausted else "")
+        if state.version_catalogue:
+            instruction += "\nAvailable document versions from the source index:\n" + json.dumps(
+                state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
         return compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
-            instruction=("The source population is only partially examined. Use the established observations; "
-                         "do not present partial counts or sums as complete totals."
-                         if state.budget_exhausted else None))
+            instruction=instruction or None)
 
     def _reading_allowance(self, state, snapshot, request, output_tokens):
         """Every read funds its own output and the reserved terminal context first."""
@@ -374,6 +375,9 @@ class CooperativeController:
         from .cooperative_request import answer_task
         from .schema import Message, history_messages
         question = answer_task(state.query.task.raw_question, computations)
+        if state.version_catalogue:
+            question += "\nAvailable document versions from the source index:\n" + json.dumps(
+                state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
         headers = "".join(f"[D{i+1}] {block.title}\n{block.text}\n\n"
                           for i, block in enumerate(state.source_headers))
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", headers),
@@ -396,9 +400,15 @@ class CooperativeController:
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
                 policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers)
-            ids = (() if closed else state.evidence.select(units, body_tokens=budget,
-                cost_model=costs, seconds_price=self.prices.seconds,
-                need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed))
+            if closed:
+                ids = ()
+            elif state.query.task.coverage_scope == "all_supplied_documents":
+                ids = state.evidence.project_population(units, body_tokens=budget,
+                    cost_model=costs, seconds_price=self.prices.seconds)
+            else:
+                ids = state.evidence.select(units, body_tokens=budget,
+                    cost_model=costs, seconds_price=self.prices.seconds,
+                    need_ids=tuple(need.need_id for need in state.query.task.needs), completed=computed)
             return costs, ids
         state.costs, state.selected_ids = await asyncio.to_thread(select)
 

@@ -124,11 +124,12 @@ class EvidenceHeads(nn.Module):
         features = self.features(embeddings, relevance, selected, support, completed)
         positive = features[:, [0, 3, 6, 7]].clamp_min(0)
         negative = features[:, [4, 5]]
-        weights = F.softplus(self.set_weights)
-        values = (self.set_bias + positive@weights[:4] - negative@weights[4:]).sigmoid()
+        weights = F.softplus(self.set_weights.to(embeddings.device))
+        bias = self.set_bias.to(embeddings.device)
+        values = (bias + positive@weights[:4] - negative@weights[4:]).sigmoid()
         prior = (completed.mean()*weights[2] + completed.min()*weights[3]
                  if len(completed) else weights.new_zeros(()))
-        return values-(self.set_bias+prior).sigmoid()
+        return values-(bias+prior).sigmoid()
 
     def loss(self, embeddings, relevance, masks, qualities, support, completed):
         predictions = self.utility(embeddings, relevance, masks, support, completed)

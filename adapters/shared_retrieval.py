@@ -48,6 +48,7 @@ class SharedEvidenceState:
     body_tokens: int = 0
     population_units: tuple = ()
     source_headers: tuple = ()
+    version_catalogue: dict = field(default_factory=dict)
     costs: object = None
     computations: tuple = ()
     table_parts: tuple = ()
@@ -95,6 +96,7 @@ class SharedEvidenceProvider:
             self.corpus = CorpusIndex((), corpus_id=retrieval["corpus_id"], snapshot_id=self.corpus_snapshot_id)
         self.directory = SourceDirectory(self.corpus, template.tokenizer)
         self.versions = VersionIndex.from_blocks(self.corpus.blocks, self.corpus.source_metadata)
+        self.catalogue = self._catalogue(self.corpus)
         self.candidate_k = retrieval.get("candidate_k", 50)
         self.evidence_batch = retrieval.get("evidence_batch", 24)
         self._supplied = {}
@@ -131,6 +133,7 @@ class SharedEvidenceProvider:
         started = time.perf_counter()
         document_tokens = 0
         corpus, directory, sparse, dense, versions = self.corpus, self.directory, self.sparse, self.dense, self.versions
+        catalogue = self.catalogue
         cached = None
         if supplied_blocks is not None:
             supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + (block.title or next(
@@ -140,11 +143,13 @@ class SharedEvidenceProvider:
             if key not in self._supplied:
                 supplied_corpus = CorpusIndex(supplied_blocks, corpus_id=self.corpus.corpus_id,
                     snapshot_id=self.corpus_snapshot_id, source_metadata=source_metadata)
-                supplied_directory = SourceDirectory(supplied_corpus, self.template.tokenizer)
+                supplied_directory = SourceDirectory(supplied_corpus, self.template.tokenizer, unit_tokens=256)
                 self._supplied[key] = {"corpus": supplied_corpus, "directory": supplied_directory,
-                    "versions": VersionIndex.from_blocks(supplied_blocks, source_metadata)}
+                    "versions": VersionIndex.from_blocks(supplied_blocks, source_metadata),
+                    "catalogue": self._catalogue(supplied_corpus)}
             cached = self._supplied[key]
             corpus, directory, versions = cached["corpus"], cached["directory"], cached["versions"]
+            catalogue = cached["catalogue"]
         history = tuple((row.turn_id, message.role, message.content) for row in snapshot.raw_history
                         for message in history_messages((row,)))
         current_turn = max((row.turn_id for row in snapshot.raw_history), default=0) + 1
@@ -159,7 +164,7 @@ class SharedEvidenceProvider:
                     history_refs.extend(ref for ref in (condition.key_span, condition.predicate_span,
                                                         *condition.value_spans) if ref is not None)
         query = self.query_encoder.encode(history, question, request_id, current_turn,
-            catalogue=self._catalogue(corpus), source_scope=tuple(block.key for block in supplied_blocks or ()),
+            catalogue=catalogue, source_scope=tuple(block.key for block in supplied_blocks or ()),
             history_turns=tuple(dict.fromkeys(ref.turn_id for ref in history_refs)))
         intent = query.task.version_intent
         families = intent.document_families
@@ -182,16 +187,13 @@ class SharedEvidenceProvider:
         if complete_population:
             query.task = replace(query.task, coverage_scope="all_supplied_documents")
         full = complete_population and (supplied_blocks is not None or bool(families))
-        numeric = any(need.operation in {"count", "sum", "mean", "min", "max", "group"}
-                      for need in query.task.needs)
         population_units = ()
         if full:
             document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
             pool = directory.full_scope(legal)
             population_units = pool.units
-            # Column bindings consume schema addresses; CPU operations read the full rows.
-            units = ((*document_index.binding_units(), *document_index.outside_tables(pool.units))
-                     if numeric else pool.units)
+            query.source_titles = tuple(block.title for block in pool.source_blocks)
+            units = pool.units
         else:
             if supplied_blocks is not None:
                 if "dense" not in cached:
@@ -259,8 +261,7 @@ class SharedEvidenceProvider:
                     pending_dependencies.append(identity)
         initial = tuple(unit for unit in units if unit.unit_id in initial_ids)
         pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
-        encoded_units = (tuple(unit for unit in initial if numeric and unit.table_id) if full else initial)
-        evidence = self.evidence_encoder.encode(query, encoded_units)
+        evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
         selected = ()
         if complete_population and not full:
@@ -303,6 +304,10 @@ class SharedEvidenceProvider:
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units)
+        for row in sorted(catalogue, key=lambda row: (row["family"],
+                versions.versions[row["family"], row["version"]]["order"])):
+            if not families or row["family"] in families:
+                state.version_catalogue.setdefault(row["family"], []).append(row["version"])
         if supplied_blocks is not None:
             from controller.cooperative_request import document_headers
             state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)

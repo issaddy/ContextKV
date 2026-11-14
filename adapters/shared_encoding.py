@@ -64,6 +64,7 @@ class QueryEncoding:
     condition_vectors: object = None
     join_needs: frozenset = frozenset()
     distinct_needs: frozenset = frozenset()
+    source_titles: tuple = ()
 
     def text(self, refs):
         merged = []
@@ -90,7 +91,9 @@ class QueryEncoding:
     def evidence_query(self):
         needs = "\n".join(dict.fromkeys(self.search_texts[1:]))
         versions = ", ".join(self.task.version_intent.version_ids)
-        return self.task.raw_question + ("\nRequested evidence:\n"+needs if needs else "") + ("\nVersions: "+versions if versions else "")
+        return (self.task.raw_question + ("\nRequested evidence:\n"+needs if needs else "")
+            + ("\nVersions: "+versions if versions else "")
+            + ("\nDocument population:\n"+"\n".join(self.source_titles) if self.source_titles else ""))
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,63 @@ class EvidenceEncoding:
             best = int((values-seconds_price*costs/1000).argmax())
         selected = candidates[best]
         return cost_model.order(selected) if cost_model else selected
+
+    def project_population(self, units, *, body_tokens, cost_model=None, seconds_price=0.0):
+        """Cover each source, then add query-weighted representative spans within it."""
+        import torch
+        if not units:
+            return ()
+        by_id = {unit.unit_id: i for i, unit in enumerate(units)}
+        groups = {}
+        for i, unit in enumerate(units):
+            key = unit.source_spans[0].source_key
+            groups.setdefault((key.corpus_id, key.document_id, key.version), []).append(i)
+        closures = []
+        for unit in units:
+            found, pending = set(), [by_id[unit.unit_id]]
+            while pending:
+                i = pending.pop()
+                if i not in found:
+                    found.add(i)
+                    pending.extend(by_id[identity] for identity in units[i].dependencies)
+            closures.append(found)
+        selected = set()
+        sizes = [unit.body_tokens for unit in units]
+        for members in groups.values():
+            best = max(members, key=lambda i: float(self.relevance[i]))
+            selected.update(closures[best])
+        used = sum(sizes[i] for i in selected)
+        similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
+        same_source = torch.zeros_like(similarity)
+        for members in groups.values():
+            same_source[torch.tensor(members)[:, None], torch.tensor(members)[None, :]] = 1
+        relevance = self.relevance.clamp_min(0)
+        affinity = similarity*same_source*relevance[None, :]
+        weights = relevance.square()
+        represented = affinity[:, sorted(selected)].amax(1)
+        def identities(indices):
+            return tuple(units[i].unit_id for i in sorted(indices))
+        while True:
+            price = cost_model.estimate(identities(selected)) if cost_model else 0.
+            best, best_score = None, 0.
+            for i, closure in enumerate(closures):
+                extra = closure-selected
+                tokens = sum(sizes[j] for j in extra)
+                if not extra or used+tokens > body_tokens:
+                    continue
+                coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
+                gain = float(((coverage-represented)*weights).sum())
+                extra_price = (cost_model.estimate(identities(selected | extra))-price) if cost_model else 0.
+                score = (gain-seconds_price*extra_price/1000)/tokens
+                if score > best_score:
+                    best, best_score = extra, score
+            if best is None:
+                break
+            selected.update(best)
+            used += sum(sizes[i] for i in best)
+            represented = torch.maximum(represented, affinity[:, sorted(best)].amax(1))
+        # Source order preserves qualifiers and the sequence of original facts.
+        return identities(selected)
 
 def _spans(labels, coordinates):
     """Decode independent BIO labels while retaining original source addresses."""
@@ -504,6 +564,9 @@ class SharedEvidenceEncoder:
         self.model.train(train)
         self.heads.train(train)
         self.batch_tokens = batch_tokens
+        if not train:
+            self.heads.set_weights = torch.nn.Parameter(self.heads.set_weights.detach().cpu(), requires_grad=False)
+            self.heads.set_bias = torch.nn.Parameter(self.heads.set_bias.detach().cpu(), requires_grad=False)
         self.manifest = {"model_id": EVIDENCE_MODEL, "asset": str(asset_path), "shared_evidence_encoding": True}
         self.ready = ReadyBatch(self.encode_many)
 
@@ -614,17 +677,24 @@ class SharedEvidenceEncoder:
         batches = self._batches(query, units)
         rankings, bindings, binding_vectors, token_states, token_sources = [], [], [], [], []
         token_count = 0
+        needs = [(i, need) for i, need in enumerate(query.task.needs)
+                 if query.task.coverage_scope != "all_supplied_documents"
+                 or need.operation in {"count", "sum", "mean", "min", "max", "group"}]
         with torch.no_grad():
             for batch in batches:
                 states, documents, scores, addresses, count, query_vector = outputs[tuple(unit.unit_id for unit in batch)]
                 token_count += count
                 rankings.append((documents, scores, query_vector))
+                if not needs:
+                    continue
                 source_indices = [i for i, address in enumerate(addresses) if address is not None]
                 source_states = states[source_indices]
                 sources = tuple(addresses[i] for i in source_indices)
-                probabilities = self.heads.field_logits(source_states, query.need_vectors.to(states.device)).softmax(-1)
+                vectors = query.need_vectors[[i for i, _ in needs]].to(states.device)
+                probabilities = self.heads.field_logits(source_states, vectors).softmax(-1)
                 confidence, labels = probabilities.max(-1)
-                for need_index, need in enumerate(query.task.needs):
+                confidence, labels = confidence.cpu(), labels.cpu()
+                for need_index, (_, need) in enumerate(needs):
                     for role_index, role in enumerate(FIELD_ROLES):
                         for first, last in _spans(labels[need_index, :, role_index].tolist(), sources):
                             owner, key, left, _ = sources[first]
@@ -664,10 +734,10 @@ class SharedEvidenceEncoder:
             documents = torch.empty((0, 512), device=self.model.device)
             relevance = torch.empty(0, device=self.model.device)
             query_sum = torch.zeros(512, device=self.model.device)
-        return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents, relevance,
+        return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents.cpu(), relevance.cpu(),
             tuple(bindings), self.heads, tuple(token_states), tuple(token_sources),
             {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(batches)},
-            query_sum)
+            query_sum.cpu())
 
     def close(self):
         self.ready.close()
