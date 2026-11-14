@@ -403,7 +403,9 @@ class CooperativeController:
             if closed:
                 ids = ()
             elif state.query.task.coverage_scope == "all_supplied_documents":
+                share = self.engine_info.gpu_capacity_tokens//max(1, len(self._locks))
                 ids = state.evidence.project_population(units, body_tokens=budget,
+                    target_tokens=share-prompt_tokens-self.policy.max_new_tokens,
                     cost_model=costs, seconds_price=self.prices.seconds)
             else:
                 ids = state.evidence.select(units, body_tokens=budget,
