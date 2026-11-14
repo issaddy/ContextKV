@@ -270,12 +270,20 @@ class CooperativeController:
         retained = sorted(request.blocks, key=lambda block: (
             block["source_id"] not in pending, -state.retained_sources.get(block["source_id"], 0)))[
             :max(1, len(state.query.task.needs))]
-        demand = tuple({"source_id": block["source_id"],
-                        "uses": 1.0 if block["source_id"] in pending else
-                                (state.retained_sources.get(block["source_id"], 0)+1) /
-                                (state.retained_sources.get(block["source_id"], 0)+2),
-                        "native_prefix_end": block["end"]} for block in retained)
-        return replace(request, demand=demand)
+        wanted = {block["source_id"] for block in retained}
+        demand, prefix = [], set()
+        for block in request.blocks:
+            address = block["source_id"]
+            prefix.add(address)
+            if address in wanted:
+                visits = state.retained_sources.get(address, 0)
+                item = {"source_id": address, "uses": 1.0 if address in pending else (visits+1)/(visits+2)}
+                # Native reuse needs the entire preceding evidence chain.
+                # A retained non-prefix source instead has independent demand.
+                if prefix <= wanted:
+                    item["native_prefix_end"] = block["end"]
+                demand.append(item)
+        return replace(request, demand=tuple(demand))
 
     def _reading_allowance(self, state, snapshot, request, output_tokens):
         """Every read funds its own output and the reserved terminal context first."""
