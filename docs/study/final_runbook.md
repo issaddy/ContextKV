@@ -99,6 +99,10 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 停止轨迹采集前，用 `python3 -m training.calibrate_kv --config configs/study.yaml --data data/training/shared/labels.jsonl --output models/infoflow-quality.json --concurrency 4` 完成默认 4 状态的贪心质量配对。Native 和 InfoFlow 分批执行；随后每状态一次单 token 重访测量可复用阶段费用，首次编译与冷建的已付时间保留。重算比例、质量差和实测成本系数一起由控制器读取，训练采集使用相同政策。服务重启后沿用这些系数，后续请求的实测费用继续更新它们。
 
+本轮另有候选 `models/shared-evidence-diverse`（集合 48/16 状态、374 个答案标签）和 `models/shared-stop-diverse.pt`（24/8 会话、64 个终端答案）。来源状态为 `data/training/shared/value_states.jsonl`，实际标签为 `diverse_sets.jsonl`、`diverse_stop.jsonl`。默认配置继续使用原资产；候选的质量、时间与资源取舍见[实测报告](results.md)。
+
+只更新集合／停止监督时，`prepare_shared_labels --values-only` 保留任务和来源，省去未使用的字段标注。完整字段标注使用 `--label-context-tokens`（默认 32768）按真实提示分包，并预留 4096 token 输出；不按候选数量猜测提示长度。采样按会话轮转，集合与停止采集分别沿用线上回答预算和依赖闭包。
+
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
 标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样；仅更新任务头时仍训练 Need 与冻结检索空间的对齐。字段监督按原消息坐标将标注对应到预测 Need。集合头单独拟合，冻结骨干只编码一次，后续轮次复用表示。集合/停止采集共用线上读取、状态准备、回答编译和预算执行器；最终质量来自实际结论与原文组成的回答，扩展费用包含新增编码、读取和计算。集合样本保存相对无证据回答的质量增益；停止样本保存紧凑表示与多步回报费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。

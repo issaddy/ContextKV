@@ -1,0 +1,423 @@
+{
+  "date": "2026-11-15",
+  "code_commit": "7064a0c",
+  "reference_results": "results/cooperation_optimization.json",
+  "protocol": {
+    "fixed_generator": "Qwen3-32B BF16",
+    "questions_per_benchmark": 20,
+    "concurrency": 4,
+    "history": "P3: own committed history",
+    "cohorts": "results/cooperation_optimization.json:cohorts",
+    "sampling": "configs/qwen3_32b.yaml",
+    "online_devices": [
+      4,
+      6,
+      7
+    ],
+    "gpu_kv_pool_gib": 8
+  },
+  "deployment": {
+    "engine": "retain hot-path optimizations",
+    "auxiliary_weights": "retain existing default set and stop heads",
+    "reason": "New heads trade higher quality and lower occupied KV for higher MultiDoc2Dial cumulative GPU/Host use and lower MT-RAG answer relevance."
+  },
+  "infoflow": {
+    "conditions": "Same four training states, concurrency 4, greedy, original answer instruction, recompute ratio 0.15; elapsed totals sum per-request latencies.",
+    "before": {
+      "recompute_ratio": 0.15,
+      "quality_loss": -9.548908465545347e-05,
+      "costs": {
+        "exact_decode_token_ms": 19.909604942907272,
+        "prefill_token_ms": 0.3570486968580351,
+        "build_token_ms": 0.21035409501217808,
+        "score_token_ms": 0.31171271175689486,
+        "recompute_token_ms": 0.27550495640512856,
+        "infoflow_decode_token_ms": 25.350281198065687
+      },
+      "pairs": [
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_1",
+          "exact": 0.08602150537634409,
+          "infoflow": 0.06716417910447761
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_5",
+          "exact": 0.13559322033898305,
+          "infoflow": 0.16853932584269662
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_9",
+          "exact": 0.1927710843373494,
+          "infoflow": 0.19875776397515527
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_7",
+          "exact": 0.057971014492753624,
+          "infoflow": 0.03827751196172249
+        }
+      ],
+      "calibration": {
+        "concurrency": 4,
+        "first_pass_elapsed_ms": {
+          "exact": 22706.594932824373,
+          "infoflow": 44778.26815471053
+        },
+        "revisit_elapsed_ms": 4957.938157021999
+      }
+    },
+    "optimized": {
+      "recompute_ratio": 0.15,
+      "quality_loss": -9.548908465545347e-05,
+      "costs": {
+        "exact_decode_token_ms": 19.91383023462552,
+        "prefill_token_ms": 0.3598298856409701,
+        "build_token_ms": 0.21270229954813036,
+        "score_token_ms": 0.30561182308330775,
+        "recompute_token_ms": 0.2733231124344406,
+        "infoflow_decode_token_ms": 24.840081530945753
+      },
+      "pairs": [
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_1",
+          "exact": 0.08602150537634409,
+          "infoflow": 0.06716417910447761
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_5",
+          "exact": 0.13559322033898305,
+          "infoflow": 0.16853932584269662
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_9",
+          "exact": 0.1927710843373494,
+          "infoflow": 0.19875776397515527
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_7",
+          "exact": 0.057971014492753624,
+          "infoflow": 0.03827751196172249
+        }
+      ],
+      "calibration": {
+        "concurrency": 4,
+        "first_pass_elapsed_ms": {
+          "exact": 22730.47051206231,
+          "infoflow": 44049.461133778095
+        },
+        "revisit_elapsed_ms": 4844.802439212799
+      }
+    }
+  },
+  "trials": {
+    "history_condition_prompt": [
+      {
+        "dataset": "multidoc2dial",
+        "method": "contextkv",
+        "metric": "f1",
+        "completed": 20,
+        "requested": 20,
+        "quality": 0.2306153896781847,
+        "metrics": {
+          "exact_match": {
+            "mean": 0.0,
+            "scored": 20
+          },
+          "f1": {
+            "mean": 0.2306153896781847,
+            "scored": 20
+          }
+        },
+        "p95_seconds": 7.584046844206751,
+        "total_input_tokens": 13372.0,
+        "total_output_tokens": 1849.0,
+        "gpu_gib_seconds": 1528.0841048706716,
+        "host_gib_seconds": 439.9972282589524,
+        "gpu_peak_gib": 78.66796875,
+        "host_peak_gib": 22.878517150878906,
+        "actual_device_hit_tokens": 64.0,
+        "actual_host_loaded_tokens": 512.0,
+        "actual_prefill_tokens": 12796.0,
+        "new_compute_kv_pages": 239.0,
+        "gpu_kv_peak_tokens": 4160,
+        "gpu_kv_peak_gib": 1.015625,
+        "gpu_kv_active_peak_tokens": 4160,
+        "records_path": "runs/hotpath/scope/contextkv/multidoc2dial/results.jsonl",
+        "auxiliary_seconds_sum": 23.175844743847847,
+        "batch_seconds": 19.49576658755541
+      },
+      {
+        "dataset": "mtrag",
+        "method": "contextkv",
+        "metric": "mtrageval_harmonic",
+        "completed": 20,
+        "requested": 20,
+        "quality": 0.654321896495582,
+        "metrics": {
+          "RB_alg": {
+            "mean": 0.45407842056961406,
+            "scored": 20
+          },
+          "RB_alg_idk": {
+            "mean": 0.45407842056961406,
+            "scored": 20
+          },
+          "RB_llm": {
+            "mean": 0.805,
+            "scored": 20
+          },
+          "RB_llm_idk": {
+            "mean": 0.805,
+            "scored": 20
+          },
+          "RL_F": {
+            "mean": 0.87688492063,
+            "scored": 20
+          },
+          "RL_F_idk": {
+            "mean": 0.87688492063,
+            "scored": 20
+          }
+        },
+        "p95_seconds": 13.196312360092998,
+        "total_input_tokens": 47506.0,
+        "total_output_tokens": 3748.0,
+        "gpu_gib_seconds": 3309.4180580228276,
+        "host_gib_seconds": 1001.2727267814222,
+        "gpu_peak_gib": 80.59375,
+        "host_peak_gib": 24.513843536376953,
+        "actual_device_hit_tokens": 1472.0,
+        "actual_host_loaded_tokens": 1216.0,
+        "actual_prefill_tokens": 44818.0,
+        "new_compute_kv_pages": 770.0,
+        "gpu_kv_peak_tokens": 15552,
+        "gpu_kv_peak_gib": 3.796875,
+        "gpu_kv_active_peak_tokens": 15552,
+        "records_path": "runs/hotpath/scope/contextkv/mtrag/results.jsonl",
+        "auxiliary_seconds_sum": 48.37536112219095,
+        "batch_seconds": 41.3822078704834
+      }
+    ],
+    "refit_set_and_stop": [
+      {
+        "dataset": "multidoc2dial",
+        "method": "contextkv",
+        "metric": "f1",
+        "completed": 20,
+        "requested": 20,
+        "quality": 0.2768093225334463,
+        "metrics": {
+          "exact_match": {
+            "mean": 0.0,
+            "scored": 20
+          },
+          "f1": {
+            "mean": 0.2768093225334463,
+            "scored": 20
+          }
+        },
+        "p95_seconds": 7.22651344947517,
+        "total_input_tokens": 11743.0,
+        "total_output_tokens": 1382.0,
+        "gpu_gib_seconds": 1613.6975126191028,
+        "host_gib_seconds": 468.8605241361195,
+        "gpu_peak_gib": 79.1328125,
+        "host_peak_gib": 23.17463779449463,
+        "actual_device_hit_tokens": 128.0,
+        "actual_host_loaded_tokens": 576.0,
+        "actual_prefill_tokens": 11039.0,
+        "new_compute_kv_pages": 204.0,
+        "gpu_kv_peak_tokens": 3008,
+        "gpu_kv_peak_gib": 0.734375,
+        "gpu_kv_active_peak_tokens": 3008,
+        "records_path": "runs/hotpath/trained/contextkv/multidoc2dial/results.jsonl",
+        "auxiliary_seconds_sum": 31.394903637468815,
+        "batch_seconds": 20.51924018934369
+      },
+      {
+        "dataset": "mtrag",
+        "method": "contextkv",
+        "metric": "mtrageval_harmonic",
+        "completed": 20,
+        "requested": 20,
+        "quality": 0.6250434900883269,
+        "metrics": {
+          "RB_alg": {
+            "mean": 0.4198572598218748,
+            "scored": 20
+          },
+          "RB_alg_idk": {
+            "mean": 0.4198572598218748,
+            "scored": 20
+          },
+          "RB_llm": {
+            "mean": 0.79,
+            "scored": 20
+          },
+          "RB_llm_idk": {
+            "mean": 0.79,
+            "scored": 20
+          },
+          "RL_F": {
+            "mean": 0.8679942279849999,
+            "scored": 20
+          },
+          "RL_F_idk": {
+            "mean": 0.8679942279849999,
+            "scored": 20
+          }
+        },
+        "p95_seconds": 13.857287231273949,
+        "total_input_tokens": 27139.0,
+        "total_output_tokens": 3752.0,
+        "gpu_gib_seconds": 3244.543034796159,
+        "host_gib_seconds": 1003.5444111819927,
+        "gpu_peak_gib": 80.306640625,
+        "host_peak_gib": 24.827475547790527,
+        "actual_device_hit_tokens": 1600.0,
+        "actual_host_loaded_tokens": 0.0,
+        "actual_prefill_tokens": 25539.0,
+        "new_compute_kv_pages": 468.0,
+        "gpu_kv_peak_tokens": 8256,
+        "gpu_kv_peak_gib": 2.015625,
+        "gpu_kv_active_peak_tokens": 7872,
+        "records_path": "runs/hotpath/trained/contextkv/mtrag/results.jsonl",
+        "auxiliary_seconds_sum": 54.20971594378352,
+        "batch_seconds": 40.73129194974899
+      }
+    ],
+    "refit_set_original_stop": [
+      {
+        "dataset": "multidoc2dial",
+        "method": "contextkv",
+        "metric": "f1",
+        "completed": 20,
+        "requested": 20,
+        "quality": 0.24877320155679805,
+        "metrics": {
+          "exact_match": {
+            "mean": 0.0,
+            "scored": 20
+          },
+          "f1": {
+            "mean": 0.24877320155679805,
+            "scored": 20
+          }
+        },
+        "p95_seconds": 7.9993703292682765,
+        "total_input_tokens": 12311.0,
+        "total_output_tokens": 1610.0,
+        "gpu_gib_seconds": 1611.7285511498048,
+        "host_gib_seconds": 477.80183125565696,
+        "gpu_peak_gib": 79.30859375,
+        "host_peak_gib": 23.74334144592285,
+        "actual_device_hit_tokens": 192.0,
+        "actual_host_loaded_tokens": 448.0,
+        "actual_prefill_tokens": 11671.0,
+        "new_compute_kv_pages": 217.0,
+        "gpu_kv_peak_tokens": 3072,
+        "gpu_kv_peak_gib": 0.75,
+        "gpu_kv_active_peak_tokens": 2944,
+        "records_path": "runs/hotpath/set-only/contextkv/multidoc2dial/results.jsonl",
+        "auxiliary_seconds_sum": 27.575181391090155,
+        "batch_seconds": 20.388009775429964
+      },
+      {
+        "dataset": "mtrag",
+        "method": "contextkv",
+        "metric": "mtrageval_harmonic",
+        "completed": 20,
+        "requested": 20,
+        "quality": 0.6613066896924354,
+        "metrics": {
+          "RB_alg": {
+            "mean": 0.46026855945121303,
+            "scored": 20
+          },
+          "RB_alg_idk": {
+            "mean": 0.46026855945121303,
+            "scored": 20
+          },
+          "RB_llm": {
+            "mean": 0.78,
+            "scored": 20
+          },
+          "RB_llm_idk": {
+            "mean": 0.78,
+            "scored": 20
+          },
+          "RL_F": {
+            "mean": 0.9244047619050001,
+            "scored": 20
+          },
+          "RL_F_idk": {
+            "mean": 0.9244047619050001,
+            "scored": 20
+          }
+        },
+        "p95_seconds": 13.955155048891903,
+        "total_input_tokens": 38526.0,
+        "total_output_tokens": 4006.0,
+        "gpu_gib_seconds": 3490.675699625237,
+        "host_gib_seconds": 1082.4687221438307,
+        "gpu_peak_gib": 81.298828125,
+        "host_peak_gib": 25.319414138793945,
+        "actual_device_hit_tokens": 1536.0,
+        "actual_host_loaded_tokens": 448.0,
+        "actual_prefill_tokens": 36542.0,
+        "new_compute_kv_pages": 644.0,
+        "gpu_kv_peak_tokens": 13248,
+        "gpu_kv_peak_gib": 3.234375,
+        "gpu_kv_active_peak_tokens": 13248,
+        "records_path": "runs/hotpath/set-only/contextkv/mtrag/results.jsonl",
+        "auxiliary_seconds_sum": 49.288861349225044,
+        "batch_seconds": 43.267891719937325
+      }
+    ]
+  },
+  "training": {
+    "diverse_states": {
+      "states": 64,
+      "conversations": 32,
+      "splits": {
+        "dev": 16,
+        "train": 48
+      },
+      "answers": 0
+    },
+    "diverse_sets": {
+      "states": 64,
+      "conversations": 35,
+      "splits": {
+        "train": 48,
+        "dev": 16
+      },
+      "answers": 374
+    },
+    "diverse_stop": {
+      "states": 32,
+      "conversations": 32,
+      "splits": {
+        "train": 24,
+        "dev": 8
+      },
+      "answers": 64
+    },
+    "set_fit": {
+      "model": "models/jina-reranker-v3.5",
+      "states": 48,
+      "steps": 3840,
+      "loss": 0.019090224357735983,
+      "method": "shared_fields_generator_set_utility",
+      "quality_target": "bounded_answer_gain_listwise",
+      "phase": "sets",
+      "dev_states": 16,
+      "dev_loss": 0.0317249266551336,
+      "epoch": 80
+    },
+    "sources": "Official MultiDoc2Dial training dialogues and existing independently constructed relational/version training sources; no evaluation questions used for fitting.",
+    "candidate_assets": [
+      "models/shared-evidence-diverse",
+      "models/shared-stop-diverse.pt"
+    ]
+  }
+}
