@@ -217,6 +217,7 @@ class QwenInfoFlow:
                 self._attend(state, layer, q, prompt, count))
         state.counters['score_tokens'] += len(prompt)
 
+    @torch.inference_mode()
     def select(self, state):
         count, device = len(state.input_ids), state.row.device
         context = torch.zeros(count, dtype=torch.bool, device=device)
