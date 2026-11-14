@@ -286,6 +286,12 @@ def _dependencies(scores):
     return parents
 
 
+def literal_versions(question, catalogue):
+    import re
+    return tuple(dict.fromkeys(row["version"] for row in catalogue
+        if re.search(r"(?<![\w.])"+re.escape(row["version"])+r"(?![\w.])", question, re.IGNORECASE)))
+
+
 def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max_length=32768,
                 history_tokens=4096, history_turns=()):
     """The same token recipe is used by training and online task inference."""
@@ -320,7 +326,7 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
     texts[current_turn_id, "user"] = question
     add(f"Current query (turn {current_turn_id}): ")
     add(question, (current_turn_id, "user"))
-    if catalogue:
+    if catalogue and not literal_versions(question, catalogue):
         add("\nAvailable source versions:\n")
         for row in catalogue:
             start, end = add(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
@@ -495,12 +501,12 @@ class SharedQueryEncoder:
                 scope=SCOPES[int(self.heads.scope(vector).argmax())])
                 for index, (span, vector) in enumerate(zip(need_spans, need_vectors)))
             selected_versions, selected_families = [], []
-            for row, positions in catalogue_positions:
-                vector = states[positions].mean(0)
-                if self.heads.version(pooled, vector).item() > 0:
-                    selected_versions.append(row["version"])
-                if self.heads.family(pooled, vector).item() > 0:
-                    selected_families.append(row["family"])
+            if catalogue_positions:
+                catalog_vectors = torch.stack([states[positions].mean(0) for _, positions in catalogue_positions])
+                version_scores = self.heads.version.pairwise(pooled[None], catalog_vectors)[0, :, 0].tolist()
+                family_scores = self.heads.family.pairwise(pooled[None], catalog_vectors)[0, :, 0].tolist()
+                selected_versions = [row["version"] for (row, _), score in zip(catalogue_positions, version_scores) if score > 0]
+                selected_families = [row["family"] for (row, _), score in zip(catalogue_positions, family_scores) if score > 0]
             for span in spans["version"]:
                 ref = reference(span)
                 selected_versions.append(texts[ref.turn_id, ref.speaker][ref.start:ref.end])
@@ -515,9 +521,7 @@ class SharedQueryEncoder:
             mode = VERSION_MODES[int(logits["version_mode"].argmax())]
             # Literal catalogue identifiers are source constraints, independent
             # of the learned intent class. Match complete identifiers only.
-            import re
-            explicit_versions = tuple(dict.fromkeys(row["version"] for row in catalogue
-                if re.search(r"(?<![\w.])"+re.escape(row["version"])+r"(?![\w.])", question, re.IGNORECASE)))
+            explicit_versions = literal_versions(question, catalogue)
             if explicit_versions:
                 selected_versions = list(explicit_versions)
                 selected_families = [row["family"] for row in catalogue if row["version"] in explicit_versions]
