@@ -51,13 +51,13 @@ def attention_norm_squared(query, key, positions, *, query_chunk=32):
     from sglang.srt.distributed import tensor_model_parallel_all_reduce
     from sglang.srt.runtime_context import get_parallel
     groups = query.shape[1] // key.shape[1]
-    k = key.transpose(0, 1)[:, None].float()
+    k = key.permute(1, 2, 0).float()
     result = torch.zeros(len(key), device=key.device, dtype=torch.float32)
     columns = torch.arange(len(key), device=key.device)
     for start in range(0, len(query), query_chunk):
         q = query[start:start + query_chunk].permute(1, 0, 2).reshape(
-            key.shape[1], groups, -1, query.shape[-1]).float()
-        logits = (q @ k.transpose(-2, -1)) / math.sqrt(query.shape[-1])
+            key.shape[1], -1, query.shape[-1]).float()
+        logits = (q @ k).reshape(key.shape[1], groups, -1, len(key)) / math.sqrt(query.shape[-1])
         logits.masked_fill_(columns[None, :] > positions[start:start + query_chunk, None],
                             -torch.inf)
         head_sum = logits.softmax(-1).sum((0, 1))

@@ -675,14 +675,15 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                     one.input_ids, one.positions, one, None, pp_proxy_tensors)
         else:
             work_row = batch.contextkv_rows[index]
-            state.runtime.prepare(state)
-            state.layer_ids = [layer.self_attn.attn.layer_id for layer in driver.layers]
-            if state.replayed is not None:
-                count = len(state.replayed)
-                state.row[state.replayed] = work_row[state.replay_start:state.replay_start + count]
-                decoded = max(0, int(batch.seq_lens_cpu[index]) - state.work_length)
-                state.row[len(state.input_ids):len(state.input_ids) + decoded] = work_row[
-                    state.work_length:state.work_length + decoded]
+            if batch.forward_mode.is_extend():
+                state.runtime.prepare(state)
+                state.layer_ids = [layer.self_attn.attn.layer_id for layer in driver.layers]
+                if state.replayed is not None:
+                    count = len(state.replayed)
+                    state.row[state.replayed] = work_row[state.replay_start:state.replay_start + count]
+                    decoded = max(0, int(batch.seq_lens_cpu[index]) - state.work_length)
+                    state.row[len(state.input_ids):len(state.input_ids) + decoded] = work_row[
+                        state.work_length:state.work_length + decoded]
             prefilling = (batch.forward_mode.is_extend()
                           and batch.extend_prefix_lens_cpu[index] < state.work_length)
             if prefilling:

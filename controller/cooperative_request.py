@@ -16,10 +16,9 @@ SYSTEM = (
 )
 
 ANSWER_SCOPE = (
-    "Answer the current question directly. Use earlier turns to resolve references. "
-    "Include the facts or actions needed for this question, with their necessary conditions, "
-    "commands and source citations. Briefly restate any historical condition needed to make "
-    "this answer self-contained. Avoid repeating full explanations already given."
+    "Answer the current question directly. Use earlier turns to resolve references, "
+    "without repeating their explanations. Include the facts or actions needed for this question, "
+    "with their necessary conditions, commands and source citations."
 )
 
 

@@ -232,12 +232,19 @@ async def prepare_labels(args):
             if args.task_only:
                 labeled = {key: value for key, value in row.items()
                            if key not in {"units", "grounding", "reference_answer"}}
+            elif args.values_only:
+                labeled = row
             else:
-                sources, source_locations = numbered_sources(row["units"])
-                field = await complete(FIELD_INSTRUCTION, {"messages": messages, "task": task,
-                    "sources": sources, "reference_answer": row["reference_answer"]},
-                    field_label_schema(row, source_locations))
-                labeled = {**row, "bindings": source_bindings(source_locations, field["bindings"])}
+                bindings = []
+                # Source dependencies can expand a small candidate set into a whole
+                # document. Label every window without repeating that whole document.
+                for start in range(0, len(row["units"]), args.candidates):
+                    sources, source_locations = numbered_sources(row["units"][start:start+args.candidates])
+                    field = await complete(FIELD_INSTRUCTION, {"messages": messages, "task": task,
+                        "sources": sources, "reference_answer": row["reference_answer"]},
+                        field_label_schema(row, source_locations))
+                    bindings.extend(source_bindings(source_locations, field["bindings"]))
+                labeled = {**row, "bindings": bindings}
             sink.write(json.dumps(labeled, ensure_ascii=False)+"\n")
             sink.flush()
             completed.add(row["task_id"])
@@ -307,6 +314,7 @@ def main():
     parser.add_argument("--teacher-model", default="/data/models/qwen3-32b")
     parser.add_argument("--output", required=True)
     parser.add_argument("--task-only", action="store_true", help="Label diverse conversation pairs without evidence retrieval or field annotation")
+    parser.add_argument("--values-only", action="store_true", help="Prepare task/source states for set and stop collection with the existing field head")
     parser.add_argument("--refresh-coverage", nargs="+", help="Existing task/field/set labels to correct with the fixed teacher")
     parser.add_argument("--train-states", type=int, default=24)
     parser.add_argument("--dev-states", type=int, default=8)
