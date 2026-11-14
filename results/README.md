@@ -4,7 +4,8 @@
 
 | 文件 | 内容 |
 |---|---|
-| [完整性与性能优化](completeness-performance-20261114.json) | 当前四项各 20 题、普通问答对照、覆盖训练、性能剖析、全部迭代与失败费用、Native/InfoFlow 配对；[当前报告](../docs/study/shared_smoke.md) |
+| [来源投影与性能优化](source-projection-20261114.json) | 当前四项各 20 题、全文重复读取消除、共享编码与字段精简、全部迭代及评分费用；[当前报告](../docs/study/shared_smoke.md) |
+| [完整性与性能优化](completeness-performance-20261114.json) | 此前四项各 20 题、当前普通问答参照、覆盖训练、性能剖析、全部迭代与失败费用、Native/InfoFlow 配对 |
 | [信息、执行与缓存联合决策](mechanism-20261114.json) | 此前四项各 20 题、Loong 参照、集合/停止训练、迭代及补跑费用、同证据 Native/InfoFlow 配对 |
 | [回答质量迭代](quality-iteration-20261113.json) | 此前四项各 20 题结果、集合/停止训练、根因分析及长文预算补测的全部费用 |
 | [语义事实与动态决策](semantic-state-20261113.json) | 此前四项各 20 题结果、同题普通问答/LlamaIndex 参照、两题补跑及全部已付费用、辅助训练摘要 |
