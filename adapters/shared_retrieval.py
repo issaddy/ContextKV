@@ -193,6 +193,7 @@ class SharedEvidenceProvider:
             query.task = replace(query.task, coverage_scope="all_supplied_documents")
         full = complete_population and (supplied_blocks is not None or bool(families))
         population_units = ()
+        historical_ids = ()
         if full:
             document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
             pool = directory.full_scope(legal)
@@ -237,12 +238,12 @@ class SharedEvidenceProvider:
                 keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
                 pool = EvidencePool(units, corpus.resolve(keys))
             if previous_spans:
-                from itertools import zip_longest
                 prior = directory.full_scope(tuple(dict.fromkeys(span.source_key for span in previous_spans)))
                 observed = tuple(unit for unit in prior.units if any(
                     origin.source_key == span.source_key and origin.start < span.end and span.start < origin.end
                     for origin in unit.source_spans for span in previous_spans))
-                roots = tuple(unit for pair in zip_longest(units, observed) for unit in pair if unit is not None)
+                historical_ids = tuple(unit.unit_id for unit in observed)
+                roots = (*units, *observed)
                 units = self._closure(roots, {unit.unit_id: unit for unit in (*units, *prior.units)})
                 pool = EvidencePool(units, tuple({b.key: b for b in (*pool.source_blocks, *prior.source_blocks)}.values()))
         if intent.mode == "compare" and len(wanted_versions) >= 2:
@@ -267,6 +268,7 @@ class SharedEvidenceProvider:
         available = self._body_budget(snapshot, query)
         by_id = {unit.unit_id: unit for unit in units}
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
+        initial_ids.update(historical_ids)
         pending_dependencies = list(initial_ids)
         while pending_dependencies:
             for identity in by_id[pending_dependencies.pop()].dependencies:

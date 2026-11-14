@@ -173,7 +173,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         "split": split, "protocol": protocol, "task_ids": expected,
         "concurrency": concurrency, "retrieval": provider.manifest,
         "measurement_kind": "hardware",
-        "resource_scope": {"gpu_devices": devices, "process_roots": process_ids, "gpu_accounting": "owned_processes"}})
+        "resource_scope": {"gpu_devices": devices, "process_roots": process_ids, "gpu_accounting": "device_memory"}})
     catalogue_path = spec.get("supplied_source_catalogue")
     catalogue = ({row["source_id"]: {**row, "document_id": row["source_id"], "source": row["source_uri"]}
                  for row in read_jsonl(catalogue_path)} if catalogue_path else None)
