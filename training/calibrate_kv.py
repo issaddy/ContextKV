@@ -27,27 +27,32 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
     answers, pairs = [], []
     limit = asyncio.Semaphore(args.concurrency)
 
-    async def generate(row, mode):
+    async def generate(row, mode, output_tokens):
         async with limit:
             units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
             request = compile_request(template, row["question"], history(row), source_blocks(units))
             identity = f"kv-quality:{row['task_id']}:{mode}"
-            result = await engine.compute(request, session_id=identity, request_id=identity,
-                max_new_tokens=config["execution"]["output_tokens"], mode=mode,
+            return await engine.compute(request, session_id=identity, request_id=f"{identity}:{output_tokens}",
+                max_new_tokens=output_tokens, mode=mode,
                 cache_namespace=identity, cache_scope=identity, recompute_ratio=ratio)
-            item = {"source": row, "answer": result["text"]}
-            answers.append(item)
-            return item
 
     try:
         # Compare complete batches. Interleaving per-state exact/InfoFlow pairs
         # prices mixed dispatch and graph capture as if they were path costs.
-        generated = {}
+        generated, cold = {}, {}
         for mode in ("exact", "infoflow"):
-            generated[mode] = await asyncio.gather(*(generate(row, mode) for row in source))
+            results = await asyncio.gather(*(generate(row, mode, config["execution"]["output_tokens"]) for row in source))
+            cold[mode] = sum(result["elapsed_ms"] for result in results)
+            generated[mode] = [{"source": row, "answer": result["text"]} for row, result in zip(source, results)]
+            answers.extend(generated[mode])
         pairs = [(row["task_id"], {mode: values[i] for mode, values in generated.items()})
                  for i, row in enumerate(source)]
+        # One-token revisits separate reusable phase costs from first-use JIT.
+        warm = await asyncio.gather(*(generate(row, "infoflow", 1) for row in source))
         costs = (await engine.metrics())["costs"]
+        receipts = [result["meta"]["contextkv_compute"] for result in warm]
+        for phase, tokens in (("score", "score_tokens"), ("recompute", "replay_tokens")):
+            costs[phase+"_token_ms"] = sum(row[phase+"_ms"] for row in receipts)/sum(row[tokens] for row in receipts)
     finally:
         await engine.aclose()
     await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
@@ -55,7 +60,9 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
                 "infoflow": pair["infoflow"]["quality"]} for task_id, pair in pairs]
     asset = {"recompute_ratio": ratio, "quality_loss":
              sum(row["exact"]-row["infoflow"] for row in records)/len(records),
-             "costs": costs, "pairs": records}
+             "costs": costs, "pairs": records,
+             "calibration": {"concurrency": args.concurrency, "first_pass_elapsed_ms": cold,
+                 "revisit_elapsed_ms": sum(result["elapsed_ms"] for result in warm)}}
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asset, ensure_ascii=False, indent=2)+"\n")
