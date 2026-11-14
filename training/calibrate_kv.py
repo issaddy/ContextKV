@@ -27,23 +27,26 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
     answers, pairs = [], []
     limit = asyncio.Semaphore(args.concurrency)
 
-    async def pair(row):
+    async def generate(row, mode):
         async with limit:
             units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
             request = compile_request(template, row["question"], history(row), source_blocks(units))
-            observed = {}
-            for mode in ("exact", "infoflow"):
-                identity = f"kv-quality:{row['task_id']}:{mode}"
-                result = await engine.compute(request, session_id=identity, request_id=identity,
-                    max_new_tokens=config["execution"]["output_tokens"], mode=mode,
-                    cache_namespace=identity, cache_scope=identity, recompute_ratio=ratio)
-                item = {"source": row, "answer": result["text"]}
-                answers.append(item)
-                observed[mode] = item
-            pairs.append((row["task_id"], observed))
+            identity = f"kv-quality:{row['task_id']}:{mode}"
+            result = await engine.compute(request, session_id=identity, request_id=identity,
+                max_new_tokens=config["execution"]["output_tokens"], mode=mode,
+                cache_namespace=identity, cache_scope=identity, recompute_ratio=ratio)
+            item = {"source": row, "answer": result["text"]}
+            answers.append(item)
+            return item
 
     try:
-        await asyncio.gather(*(pair(row) for row in source))
+        # Compare complete batches. Interleaving per-state exact/InfoFlow pairs
+        # prices mixed dispatch and graph capture as if they were path costs.
+        generated = {}
+        for mode in ("exact", "infoflow"):
+            generated[mode] = await asyncio.gather(*(generate(row, mode) for row in source))
+        pairs = [(row["task_id"], {mode: values[i] for mode, values in generated.items()})
+                 for i, row in enumerate(source)]
         costs = (await engine.metrics())["costs"]
     finally:
         await engine.aclose()
