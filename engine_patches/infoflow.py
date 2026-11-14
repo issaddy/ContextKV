@@ -51,15 +51,16 @@ def attention_norm_squared(query, key, positions, *, query_chunk=32):
     from sglang.srt.distributed import tensor_model_parallel_all_reduce
     from sglang.srt.runtime_context import get_parallel
     groups = query.shape[1] // key.shape[1]
-    k = key.repeat_interleave(groups, dim=1).transpose(0, 1).float()
+    k = key.transpose(0, 1)[:, None].float()
     result = torch.zeros(len(key), device=key.device, dtype=torch.float32)
     columns = torch.arange(len(key), device=key.device)
     for start in range(0, len(query), query_chunk):
-        q = query[start:start + query_chunk].transpose(0, 1).float()
+        q = query[start:start + query_chunk].permute(1, 0, 2).reshape(
+            key.shape[1], groups, -1, query.shape[-1]).float()
         logits = (q @ k.transpose(-2, -1)) / math.sqrt(query.shape[-1])
         logits.masked_fill_(columns[None, :] > positions[start:start + query_chunk, None],
                             -torch.inf)
-        head_sum = logits.softmax(-1).sum(0)
+        head_sum = logits.softmax(-1).sum((0, 1))
         world = get_parallel().attn_tp_size
         if world > 1:
             head_sum = tensor_model_parallel_all_reduce(head_sum)
@@ -109,17 +110,8 @@ class RequestState:
     def scoring_keys(self, layer_id, rotary, length):
         """Restore global keys for importance scoring without copying values."""
         keys, _ = self.pool.get_kv_buffer(layer_id)
-        k = keys[self.row[:length]]
-        for block in self.blocks:
-            end = min(block.end, length)
-            if end <= block.start:
-                continue
-            count = end - block.start
-            local = torch.arange(count, device=k.device)
-            global_positions = local + block.start
-            k[block.start:end] = relocate_keys(keys[block.slots[:count]], local,
-                                               global_positions, rotary)
-        return k
+        return relocate_keys(keys[self.row[:length]], self.local_positions[:length],
+                             torch.arange(length, device=self.row.device), rotary)
 
 
 class QwenInfoFlow:
@@ -262,13 +254,21 @@ class QwenInfoFlow:
                 position_cosine=state.position_cosine.new_ones((count, bucket, width)),
                 position_sine=state.position_sine.new_zeros((count, bucket, width)), attention_workspace={},
                 input=input_ids.clone(), position=positions.clone(),
-                batch_indices=torch.arange(count, device=input_ids.device), graph=None)
+                batch_indices=torch.arange(count, device=input_ids.device),
+                owners=[None]*count, graph=None)
         fixed = graphs[key]
         for index, state in enumerate(states):
-            size = len(state.row)
-            fixed.row[index, :size].copy_(state.row)
-            fixed.position_cosine[index, :size].copy_(state.position_cosine)
-            fixed.position_sine[index, :size].copy_(state.position_sine)
+            if fixed.owners[index] is not state.row:
+                size = len(state.row)
+                fixed.row[index, :size].copy_(state.row)
+                fixed.position_cosine[index, :size].copy_(state.position_cosine)
+                fixed.position_sine[index, :size].copy_(state.position_sine)
+                fixed.owners[index] = state.row
+            else:
+                # A request can return to this graph after using another batch size.
+                # Refresh its generated tail; source pages and RoPE stay unchanged.
+                first = len(state.input_ids)
+                fixed.row[index, first:len(state.row)].copy_(state.row[first:])
         fixed.input.copy_(input_ids)
         fixed.position.copy_(positions)
         if fixed.graph is None:

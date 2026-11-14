@@ -150,12 +150,11 @@ def prepare_states(args, tokenizer):
     limits = {"train": args.train_states, "dev": args.dev_states}
     session_order = {identity: index for index, identity in enumerate(sessions)}
     tasks.sort(key=lambda row: (session_order[row["conversation_id"]], row["turn"]))
-    if args.task_only:
-        grouped = {identity: [] for identity in sessions}
-        for row in tasks:
-            grouped[row["conversation_id"]].append(row)
-        tasks = [row for start in range(0, max(map(len, grouped.values())), 2)
-                 for identity in sessions for row in grouped[identity][start:start+2]]
+    grouped = {identity: [] for identity in sessions}
+    for row in tasks:
+        grouped[row["conversation_id"]].append(row)
+    tasks = [row for start in range(0, max(map(len, grouped.values())), 2)
+             for identity in sessions for row in grouped[identity][start:start+2]]
     for row in tasks:
         split = "dev" if row["conversation_id"] in dev_sessions else "train"
         if counts[split] >= limits[split]:
