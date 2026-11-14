@@ -7,6 +7,7 @@ The attention-norm selection and sparse replay follow InfoFlow KV (ICML 2026).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 import math
 
 import torch
@@ -96,10 +97,6 @@ class RequestState:
     position_cosine: torch.Tensor | None = None
     position_sine: torch.Tensor | None = None
     attention_workspace: dict = field(default_factory=dict)
-    decode_graph: object = None
-    decode_input: torch.Tensor | None = None
-    decode_position: torch.Tensor | None = None
-    decode_output: torch.Tensor | None = None
     selected: torch.Tensor | None = None
     replayed: torch.Tensor | None = None
     prompt: torch.Tensor | None = None
@@ -253,19 +250,30 @@ class QwenInfoFlow:
 
     @torch.inference_mode()
     def decode(self, state, input_id, position):
-        """Capture the fixed Qwen decode path once per request; KV rows remain shared."""
-        if state.decode_graph is None:
-            state.decode_input = input_id.reshape(1).clone()
-            state.decode_position = position.reshape(1).clone()
-            self._decode(state, state.decode_input, state.decode_position)
-            state.decode_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(state.decode_graph):
-                state.decode_output = self._decode(state, state.decode_input, state.decode_position)
-        else:
-            state.decode_input.copy_(input_id.reshape(1))
-            state.decode_position.copy_(position.reshape(1))
-        state.decode_graph.replay()
-        return state.decode_output
+        """Reuse one decode graph per length bucket, updating only row/position maps."""
+        size = len(state.row)
+        bucket = 1 << (size-1).bit_length()
+        graphs = state.runtime.decode_graphs
+        if bucket not in graphs:
+            width = state.position_cosine.shape[1]
+            graphs[bucket] = SimpleNamespace(pool=state.pool,
+                row=state.row.new_zeros(bucket),
+                position_cosine=state.position_cosine.new_ones((bucket, width)),
+                position_sine=state.position_sine.new_zeros((bucket, width)), attention_workspace={},
+                input=input_id.reshape(1).clone(), position=position.reshape(1).clone(), graph=None)
+        fixed = graphs[bucket]
+        fixed.row[:size].copy_(state.row)
+        fixed.position_cosine[:size].copy_(state.position_cosine)
+        fixed.position_sine[:size].copy_(state.position_sine)
+        fixed.input.copy_(input_id.reshape(1))
+        fixed.position.copy_(position.reshape(1))
+        if fixed.graph is None:
+            self._decode(fixed, fixed.input, fixed.position)
+            fixed.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(fixed.graph):
+                fixed.output = self._decode(fixed, fixed.input, fixed.position)
+        fixed.graph.replay()
+        return fixed.output
 
     def _decode(self, state, input_id, position):
         positions = position.reshape(1)

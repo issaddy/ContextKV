@@ -20,6 +20,7 @@ class ComputeRuntime:
         self.allocator = scheduler.token_to_kv_pool_allocator
         self.pool = self.allocator.get_kvcache()
         self.costs = {}
+        self.decode_graphs = {}
         self.output_tokens_mean = 0.0
         self.demands = {}
         self.source_nodes = {}
@@ -645,7 +646,6 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                     state.row = work_row.new_zeros(len(state.input_ids) + state.request.sampling_params.max_new_tokens + 1)
                     state.local_positions = torch.arange(len(state.row), device=input_ids.device)
                     state.position_cosine = state.position_sine = None
-                    state.decode_graph = None
                     state.prompt = torch.tensor(state.prompt_positions, device=input_ids.device)
                     state.scores = torch.zeros((2, len(state.input_ids)), device=input_ids.device)
                     state.selected = state.replayed = None
