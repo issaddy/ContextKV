@@ -19,6 +19,7 @@ def _paged_attention(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT, LSE,
                      BATCHED: tl.constexpr, ROW_STRIDE: tl.constexpr, COS_BATCH_STRIDE: tl.constexpr):
     query_block, head = tl.program_id(0), tl.program_id(1)
     split = tl.program_id(2)
+    dimensions = tl.arange(0, HEAD_DIM)
     if BATCHED:
         Q += query_block * qs0
         OUT += query_block * os0
@@ -27,13 +28,23 @@ def _paged_attention(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT, LSE,
         COSINE += query_block * COS_BATCH_STRIDE
         SINE += query_block * COS_BATCH_STRIDE
         POSITIONS += query_block
-        query_block = 0
-    kv_head = head // GROUPS
-    rows = query_block * BLOCK_M + tl.arange(0, BLOCK_M)
-    dimensions = tl.arange(0, HEAD_DIM)
-    q = tl.load(Q + rows[:, None] * qs0 + head * qs1 + dimensions[None, :],
-                rows[:, None] < queries, other=0)
-    positions = tl.load(POSITIONS + rows, rows < queries, other=-1)
+        kv_head = head
+        lanes = tl.arange(0, BLOCK_M)
+        heads = head * GROUPS + lanes
+        valid_rows = lanes < GROUPS
+        q = tl.load(Q + heads[:, None] * qs1 + dimensions[None, :], valid_rows[:, None], other=0)
+        positions = tl.where(valid_rows, tl.load(POSITIONS), -1)
+        output_offsets = heads[:, None] * os1 + split*HEAD_DIM + dimensions[None, :]
+        lse_offsets = heads*SPLITS + split
+    else:
+        kv_head = head // GROUPS
+        rows = query_block * BLOCK_M + tl.arange(0, BLOCK_M)
+        valid_rows = rows < queries
+        q = tl.load(Q + rows[:, None] * qs0 + head * qs1 + dimensions[None, :],
+                    valid_rows[:, None], other=0)
+        positions = tl.load(POSITIONS + rows, valid_rows, other=-1)
+        output_offsets = rows[:, None] * os0 + head * os1 + split*HEAD_DIM + dimensions[None, :]
+        lse_offsets = (rows*HEADS+head)*SPLITS+split
     maximum = tl.full((BLOCK_M,), -float('inf'), tl.float32)
     denominator = tl.zeros((BLOCK_M,), tl.float32)
     accumulated = tl.zeros((BLOCK_M, HEAD_DIM), tl.float32)
@@ -71,11 +82,9 @@ def _paged_attention(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT, LSE,
         denominator = denominator * correction + tl.sum(probabilities, axis=1)
         maximum = updated_maximum
     result = tl.where(denominator[:, None] > 0, accumulated / denominator[:, None], 0.)
-    tl.store(OUT + rows[:, None] * os0 + head * os1 + split*HEAD_DIM + dimensions[None, :],
-             result, rows[:, None] < queries)
+    tl.store(OUT + output_offsets, result, valid_rows[:, None])
     if SPLITS > 1:
-        tl.store(LSE + (rows*HEADS+head)*SPLITS+split,
-                 (maximum+tl.log2(denominator))*0.6931471805599453, rows < queries)
+        tl.store(LSE + lse_offsets, (maximum+tl.log2(denominator))*0.6931471805599453, valid_rows)
 
 
 def paged_attention(query, key_pool, value_pool, rows, cosine, sine, query_positions,
@@ -125,12 +134,14 @@ def paged_decode(query, key_pool, value_pool, rows, cosine, sine, positions, rot
             indptr=torch.arange(batch+1, device=query.device, dtype=torch.int32)*length)
     partial, lse = workspace["partial"], workspace["lse"]
     output = torch.empty_like(query)
-    _paged_attention[(batch, heads, splits)](
+    groups = heads//key_pool.shape[1]
+    _paged_attention[(batch, key_pool.shape[1], splits)](
         query, key_pool, value_pool, rows, cosine, sine, positions, partial, lse, 1, length,
         query.stride(0), query.stride(1), key_pool.stride(0), key_pool.stride(1),
         value_pool.stride(0), value_pool.stride(1), partial.stride(0), partial.stride(1),
-        cosine.stride(1), heads//key_pool.shape[1], heads, width, rotary.cos_sin_cache.shape[-1],
-        rotary.is_neox_style, width**-.5, 16, 64, splits, True, rows.stride(0), cosine.stride(0), num_warps=4)
+        cosine.stride(1), groups, heads, width, rotary.cos_sin_cache.shape[-1],
+        rotary.is_neox_style, width**-.5, max(16,triton.next_power_of_2(groups)), 64, splits,
+        True, rows.stride(0), cosine.stride(0), num_warps=4)
     if splits == 1:
         return partial[:, :, 0].to(query.dtype)
     _fwd_kernel_stage2[(batch, heads)](partial, lse, output, 1., workspace["indptr"],
