@@ -7,7 +7,7 @@ import json
 import time
 from weakref import WeakValueDictionary
 
-from .cooperative_request import (SYSTEM, EvidenceCosts, blocks_for_units, compile_request,
+from .cooperative_request import (SYSTEM, ANSWER_SCOPE, EvidenceCosts, blocks_for_units, compile_request,
                                   source_address, source_body, with_document_headers, working_history, with_source_demand)
 from .schema import EvidenceBlock, EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
@@ -400,9 +400,7 @@ class CooperativeController:
         return computations
 
     def _answer_instruction(self, state):
-        instruction = ("Answer the current question directly. Use earlier turns to resolve references, "
-            "without repeating their explanations. Include the facts or actions needed for this question, "
-            "with their necessary conditions, commands and source citations.")
+        instruction = ANSWER_SCOPE
         if state.budget_exhausted:
             instruction += ("\nThe source population is only partially examined. Use the established observations; "
                             "do not present partial counts or sums as complete totals.")

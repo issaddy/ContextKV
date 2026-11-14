@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 
 from controller.config import create_model_template, load_config
-from controller.cooperative_request import compile_request
+from controller.cooperative_request import ANSWER_SCOPE, compile_request
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceUnit
 from controller.sampling import SamplingRecipe
@@ -30,7 +30,7 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
     async def generate(row, mode, output_tokens):
         async with limit:
             units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
-            request = compile_request(template, row["question"], history(row), source_blocks(units))
+            request = compile_request(template, row["question"], history(row), source_blocks(units), instruction=ANSWER_SCOPE)
             identity = f"kv-quality:{row['task_id']}:{mode}"
             return await engine.compute(request, session_id=identity, request_id=f"{identity}:{output_tokens}",
                 max_new_tokens=output_tokens, mode=mode,
