@@ -70,6 +70,7 @@ class SGLangEngineClient:
                 "session_id": session_id, "request_id": request_id, "mode": mode,
                 "cache_scope": cache_scope,
                 "blocks": list(request.blocks), "demand": list(request.demand),
+                "query_span": list(request.query_span),
                 "recompute_ratio": recompute_ratio, "quality_loss": quality_loss,
                 "quality_price_ms": quality_price_ms, "costs": costs or {},
             },

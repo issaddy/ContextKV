@@ -12,6 +12,7 @@ from controller.config import create_model_template, load_config
 from controller.cooperative_request import compile_request
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceUnit
+from controller.sampling import SamplingRecipe
 from controller.serialization import decode
 from training.collect_shared_values import source_blocks, history, score_answers
 
@@ -62,7 +63,7 @@ async def collect(args):
     config = yaml.safe_load(Path(args.config).read_text())
     run = load_config(config["generation"]["run_config"])
     template = create_model_template(run.model)
-    engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
+    engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
     return await calibrate_kv_quality(args, config, run, template, engine, source)
 

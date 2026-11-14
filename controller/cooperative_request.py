@@ -240,6 +240,7 @@ class CompiledRequest:
     reference_map: tuple
     blocks: tuple[dict, ...]
     demand: tuple[dict, ...]
+    query_span: tuple[int, int] = (0, 0)
 
 
 def source_body(evidence):
@@ -277,6 +278,9 @@ def compile_request(template, question, history, evidence, *, results=(),
     messages = (Message("system", system_prompt), Message("user", body),
                 *history_messages(history), Message("user", task))
     rendered = template.render(messages, with_offsets=True)
+    question_start = rendered.text.rindex(task)
+    query_first = next(i for i, (_, end) in enumerate(rendered.offsets) if end > question_start)
+    query_last = next(i for i, (start, _) in enumerate(rendered.offsets) if start >= question_start+len(question))
     body_start = rendered.text.index(body) if body else 0
     blocks = []
     token_cursor = 0
@@ -297,4 +301,4 @@ def compile_request(template, question, history, evidence, *, results=(),
             item["native_prefix_end"] = blocks[index]["end"]
         demand.append(item)
     return CompiledRequest(rendered.input_ids, messages, tuple(evidence), tuple(spans),
-                           tuple(references), tuple(blocks), tuple(demand))
+                           tuple(references), tuple(blocks), tuple(demand), (query_first, query_last))

@@ -198,7 +198,8 @@ class QwenInfoFlow:
     @torch.inference_mode()
     def score(self, state, prompt):
         device, count = state.row.device, int(prompt[-1]) + 1
-        query_rows = prompt >= max((block.end for block in state.blocks), default=0)
+        query_start, query_end = state.metadata['query_span']
+        query_rows = (prompt >= query_start) & (prompt < query_end)
         ids = torch.tensor(state.input_ids, device=device, dtype=torch.int64)
         hidden = self.model.embed_tokens(ids[prompt])
         # The author's default aggregates the last two layers.
@@ -207,7 +208,7 @@ class QwenInfoFlow:
             q, k, v = self._qkv(layer, hidden, prompt)
             keys, values = state.pool.get_kv_buffer(layer_id)
             keys[state.row[prompt]], values[state.row[prompt]] = k, v
-            if index >= len(self.layers) - 2:
+            if index >= len(self.layers) - 2 and count > query_start:
                 all_k, _ = state.layer_kv(layer_id, layer.self_attn.rotary_emb,
                                           count, overlay=False)
                 state.scores[index-len(self.layers)+2, :count] += attention_norm_squared(
