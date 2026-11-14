@@ -729,14 +729,19 @@ class SharedEvidenceEncoder:
                             binding_vectors.append(vector)
             for need_id in query.join_needs:
                 indices = [i for i, binding in enumerate(bindings) if binding.need_id == need_id and binding.role == "entity"]
+                if not indices:
+                    continue
+                entities = torch.stack([binding_vectors[i] for i in indices])
+                joins = self.heads.join.pairwise(entities, entities)[..., 0].cpu().tolist()
                 groups = {index: index for index in indices}
                 def root(index):
                     while groups[index] != index:
                         index = groups[index]
                     return index
                 for offset, left in enumerate(indices):
-                    for right in indices[offset+1:]:
-                        if self.heads.join(binding_vectors[left], binding_vectors[right]).item() > 0:
+                    for position in range(offset+1, len(indices)):
+                        right = indices[position]
+                        if joins[offset][position] > 0:
                             groups[root(right)] = root(left)
                 for index in indices:
                     if sum(root(other) == root(index) for other in indices) > 1:

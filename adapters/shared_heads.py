@@ -23,6 +23,13 @@ class ScaledBilinear(nn.Bilinear):
         right = F.layer_norm(right, (self.in2_features,))
         return super().forward(left, right) * self.in1_features ** -.5
 
+    def pairwise(self, left, right):
+        """Apply each learned bilinear map once per left item, not once per pair."""
+        left = F.layer_norm(left, (self.in1_features,))
+        right = F.layer_norm(right, (self.in2_features,))
+        projected = torch.einsum("ni,oij->noj", left, self.weight)
+        return (torch.einsum("noj,mj->nmo", projected, right)+self.bias) * self.in1_features ** -.5
+
 
 class QueryHeads(nn.Module):
     def __init__(self, hidden_size):
@@ -64,9 +71,7 @@ class QueryHeads(nn.Module):
         }
 
     def edges(self, left, right):
-        a = left[:, None, :].expand(-1, right.shape[0], -1)
-        b = right[None, :, :].expand(left.shape[0], -1, -1)
-        return self.edge(a, b)
+        return self.edge.pairwise(left, right)
 
 
 class EvidenceHeads(nn.Module):
