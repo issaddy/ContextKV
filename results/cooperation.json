@@ -1,0 +1,595 @@
+{
+  "protocol": {
+    "date": "2026-11-14",
+    "history": "P3, each method commits its own answers",
+    "questions_per_benchmark": 20,
+    "conversations_per_benchmark": 4,
+    "consecutive_questions_per_conversation": 5,
+    "concurrency": 4,
+    "cohort_seed": 42,
+    "model": "Qwen3-32B BF16, fixed weights",
+    "generation": {
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "max_new_tokens": 1024
+    },
+    "cache_start": "cold per method and dataset; no flush between turns",
+    "gpu_ids": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "kv_page_tokens": 64,
+    "kv_bytes_per_token": 262144,
+    "reporting": "Main queues include retrieval, auxiliary models, actual histories and complete response costs. Cache pairs replay already-prepared inputs and measure execution response, not retrieval.",
+    "resource_scope": "Physical GPU device-memory and Host process PSS integrals during online generation; judge costs separate. Per-run device lists are recorded in measurement_scopes.",
+    "training": "Query/evidence/stop weights fixed; InfoFlow costs and approximation loss recalibrated on four training states."
+  },
+  "cohorts": {
+    "mtrag": [
+      "b4614daadceeecb400f7baf0aa48dcb8<::>1",
+      "b4614daadceeecb400f7baf0aa48dcb8<::>2",
+      "b4614daadceeecb400f7baf0aa48dcb8<::>3",
+      "b4614daadceeecb400f7baf0aa48dcb8<::>4",
+      "b4614daadceeecb400f7baf0aa48dcb8<::>5",
+      "747a810abfd6da4a9c37cdb74feec95e<::>1",
+      "747a810abfd6da4a9c37cdb74feec95e<::>2",
+      "747a810abfd6da4a9c37cdb74feec95e<::>3",
+      "747a810abfd6da4a9c37cdb74feec95e<::>4",
+      "747a810abfd6da4a9c37cdb74feec95e<::>5",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>1",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>2",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>3",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>4",
+      "4c86c8740c3d49e06b7aca9d308119fa<::>5",
+      "fdee20f7fd677e420742b09989623d68<::>1",
+      "fdee20f7fd677e420742b09989623d68<::>2",
+      "fdee20f7fd677e420742b09989623d68<::>3",
+      "fdee20f7fd677e420742b09989623d68<::>4",
+      "fdee20f7fd677e420742b09989623d68<::>5"
+    ],
+    "multidoc2dial": [
+      "3727fab5e9c5b7f9a6e1cbe7935d51bb_1",
+      "3727fab5e9c5b7f9a6e1cbe7935d51bb_3",
+      "3727fab5e9c5b7f9a6e1cbe7935d51bb_5",
+      "3727fab5e9c5b7f9a6e1cbe7935d51bb_7",
+      "3727fab5e9c5b7f9a6e1cbe7935d51bb_9",
+      "bf497c2e0c66955ed04644556da12a5c_1",
+      "bf497c2e0c66955ed04644556da12a5c_3",
+      "bf497c2e0c66955ed04644556da12a5c_5",
+      "bf497c2e0c66955ed04644556da12a5c_7",
+      "bf497c2e0c66955ed04644556da12a5c_9",
+      "6070e3dcc2ef2ec0a8bbba02f8a14233_1",
+      "6070e3dcc2ef2ec0a8bbba02f8a14233_4",
+      "6070e3dcc2ef2ec0a8bbba02f8a14233_6",
+      "6070e3dcc2ef2ec0a8bbba02f8a14233_8",
+      "6070e3dcc2ef2ec0a8bbba02f8a14233_10",
+      "b3c5d441bfed9b85c3f9ea4bd652a3bc_1",
+      "b3c5d441bfed9b85c3f9ea4bd652a3bc_4",
+      "b3c5d441bfed9b85c3f9ea4bd652a3bc_6",
+      "b3c5d441bfed9b85c3f9ea4bd652a3bc_8",
+      "b3c5d441bfed9b85c3f9ea4bd652a3bc_10"
+    ]
+  },
+  "before": [
+    {
+      "dataset": "multidoc2dial",
+      "method": "ordinary_rag",
+      "metric": "f1",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.16833450346206744,
+      "metrics": {
+        "exact_match": {
+          "mean": 0,
+          "scored": 20
+        },
+        "f1": {
+          "mean": 0.16833450346206744,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 8.340745068527758,
+      "total_input_tokens": 23396,
+      "total_output_tokens": 3188,
+      "gpu_gib_seconds": 2173.9569591885447,
+      "host_gib_seconds": 598.3115179850071,
+      "gpu_peak_gib": 80.689453125,
+      "host_peak_gib": 22.087456703186035,
+      "actual_device_hit_tokens": 4160,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 19236,
+      "implementation": "8ea560f",
+      "records_path": "runs/cooperation/before/ordinary_rag/multidoc2dial/results.jsonl"
+    },
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "metric": "f1",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.20693144357396437,
+      "metrics": {
+        "exact_match": {
+          "mean": 0,
+          "scored": 20
+        },
+        "f1": {
+          "mean": 0.20693144357396437,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 7.977421220578253,
+      "total_input_tokens": 16521,
+      "total_output_tokens": 2765,
+      "gpu_gib_seconds": 2093.274245135108,
+      "host_gib_seconds": 574.5462846240331,
+      "gpu_peak_gib": 85.201171875,
+      "host_peak_gib": 23.426788330078125,
+      "actual_device_hit_tokens": 640,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 15881,
+      "implementation": "8ea560f",
+      "records_path": "runs/cooperation/before/contextkv/multidoc2dial/results.jsonl"
+    },
+    {
+      "dataset": "mtrag",
+      "method": "ordinary_rag",
+      "metric": "mtrageval_harmonic",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.5294603646053266,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.34967444121031144,
+          "scored": 20
+        },
+        "RB_alg_idk": {
+          "mean": 0.33483773628694335,
+          "scored": 20
+        },
+        "RB_llm": {
+          "mean": 0.8150000000000001,
+          "scored": 20
+        },
+        "RB_llm_idk": {
+          "mean": 0.77,
+          "scored": 20
+        },
+        "RL_F": {
+          "mean": 0.76165280798,
+          "scored": 20
+        },
+        "RL_F_idk": {
+          "mean": 0.72415280798,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 24.965477672033014,
+      "total_input_tokens": 99704,
+      "total_output_tokens": 8424,
+      "gpu_gib_seconds": 6367.555375575015,
+      "host_gib_seconds": 1759.2530343468468,
+      "gpu_peak_gib": 84.05078125,
+      "host_peak_gib": 23.290154457092285,
+      "actual_device_hit_tokens": 11008,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 88696,
+      "implementation": "8ea560f",
+      "records_path": "runs/cooperation/before/ordinary_rag/mtrag/results.jsonl"
+    },
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "metric": "mtrageval_harmonic",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.5357907507794415,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.3198725315049314,
+          "scored": 20
+        },
+        "RB_alg_idk": {
+          "mean": 0.3198725315049314,
+          "scored": 20
+        },
+        "RB_llm": {
+          "mean": 0.865,
+          "scored": 20
+        },
+        "RB_llm_idk": {
+          "mean": 0.865,
+          "scored": 20
+        },
+        "RL_F": {
+          "mean": 0.759367099085,
+          "scored": 20
+        },
+        "RL_F_idk": {
+          "mean": 0.759367099085,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 23.267336518131195,
+      "total_input_tokens": 59147,
+      "total_output_tokens": 12201,
+      "gpu_gib_seconds": 7802.203713466828,
+      "host_gib_seconds": 2242.9398872831202,
+      "gpu_peak_gib": 85.279296875,
+      "host_peak_gib": 24.780460357666016,
+      "actual_device_hit_tokens": 2240,
+      "actual_host_loaded_tokens": 384,
+      "actual_prefill_tokens": 56523,
+      "implementation": "8ea560f",
+      "records_path": "runs/cooperation/before/contextkv/mtrag/results.jsonl"
+    }
+  ],
+  "cache_pairs": {
+    "mtrag": {
+      "conditions": "Identical actual evidence members, questions, histories and arrival offsets; semantic Native order versus cache-priced order. Cold start per branch, greedy generation, all construction costs included.",
+      "branches": [
+        {
+          "mode": "exact",
+          "requests": 20,
+          "p95_seconds": 17.621941709890965,
+          "gpu_kv_peak_tokens": 32768,
+          "gpu_kv_active_peak_tokens": 16640,
+          "gpu_kv_peak_gib": 8,
+          "input_tokens": 51231,
+          "output_tokens": 9767,
+          "device_hit_tokens": 1216,
+          "host_loaded_tokens": 384,
+          "prefill_tokens": 49631,
+          "new_compute_kv_pages": 937,
+          "infoflow_requests": 0
+        },
+        {
+          "mode": "auto",
+          "requests": 20,
+          "p95_seconds": 17.573133735731247,
+          "gpu_kv_peak_tokens": 32768,
+          "gpu_kv_active_peak_tokens": 16000,
+          "gpu_kv_peak_gib": 8,
+          "input_tokens": 51231,
+          "output_tokens": 9565,
+          "device_hit_tokens": 2432,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 48799,
+          "new_compute_kv_pages": 922,
+          "infoflow_requests": 0
+        }
+      ],
+      "identical_answers": 8,
+      "questions": 20,
+      "implementation": "b69b60f",
+      "records_path": "runs/cooperation/final/contextkv/mtrag/cache_pair.json",
+      "latency_scope": "After evidence and actual history are prepared; both branches preserve the same arrival offsets. Not full retrieval-to-answer latency."
+    },
+    "multidoc2dial": {
+      "conditions": "Identical actual evidence members, questions, histories and arrival offsets; semantic Native order versus cache-priced order. Cold start per branch, greedy generation, all construction costs included.",
+      "branches": [
+        {
+          "mode": "exact",
+          "requests": 20,
+          "p95_seconds": 4.696923179179431,
+          "gpu_kv_peak_tokens": 12928,
+          "gpu_kv_active_peak_tokens": 3648,
+          "gpu_kv_peak_gib": 3.15625,
+          "input_tokens": 12019,
+          "output_tokens": 2434,
+          "device_hit_tokens": 960,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 11059,
+          "new_compute_kv_pages": 223,
+          "infoflow_requests": 0,
+          "quality_f1": 0.19299468438335124
+        },
+        {
+          "mode": "auto",
+          "requests": 20,
+          "p95_seconds": 4.789246494136751,
+          "gpu_kv_peak_tokens": 12864,
+          "gpu_kv_active_peak_tokens": 3584,
+          "gpu_kv_peak_gib": 3.140625,
+          "input_tokens": 12019,
+          "output_tokens": 2435,
+          "device_hit_tokens": 960,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 11059,
+          "new_compute_kv_pages": 222,
+          "infoflow_requests": 0,
+          "quality_f1": 0.19292385203885526
+        }
+      ],
+      "identical_answers": 15,
+      "questions": 20,
+      "implementation": "b69b60f",
+      "records_path": "runs/cooperation/final/contextkv/multidoc2dial/cache_pair.json",
+      "latency_scope": "After evidence and actual history are prepared; both branches preserve the same arrival offsets. Not full retrieval-to-answer latency."
+    }
+  },
+  "calibration": {
+    "recompute_ratio": 0.15,
+    "quality_loss": 0.018954000866640813,
+    "costs": {
+      "exact_decode_token_ms": 18.54708537547924,
+      "prefill_token_ms": 0.10731955040880521,
+      "build_token_ms": 0.22145819596960398,
+      "score_token_ms": 0.5789986904330164,
+      "recompute_token_ms": 0.301625559423347,
+      "infoflow_decode_token_ms": 25.248564887569493
+    },
+    "pairs": [
+      {
+        "task_id": "611468ee1567561df83307d715e1abf5_1",
+        "exact": 0.07171314741035857,
+        "infoflow": 0.04627249357326478
+      },
+      {
+        "task_id": "611468ee1567561df83307d715e1abf5_5",
+        "exact": 0.13793103448275862,
+        "infoflow": 0.11336032388663968
+      },
+      {
+        "task_id": "611468ee1567561df83307d715e1abf5_9",
+        "exact": 0.1782178217821782,
+        "infoflow": 0.168
+      },
+      {
+        "task_id": "611468ee1567561df83307d715e1abf5_7",
+        "exact": 0.05442176870748299,
+        "infoflow": 0.038834951456310676
+      }
+    ],
+    "implementation": "0c36706",
+    "sampling": "greedy, four training states, concurrency 1",
+    "measurement_scope": "CUDA-event phase coefficients; cold construction included in automatic path pricing. These are calibration measurements, not end-to-end benchmark improvements."
+  },
+  "revisits": {
+    "mtrag": {
+      "revisit_turns": 8,
+      "without_revisit": 12,
+      "hit_turns": 8,
+      "input_tokens": 33367,
+      "hit_tokens": 2112
+    },
+    "multidoc2dial": {
+      "revisit_turns": 5,
+      "without_revisit": 15,
+      "hit_turns": 3,
+      "input_tokens": 3929,
+      "hit_tokens": 768
+    }
+  },
+  "measurement_scopes": {
+    "before/ordinary_rag/multidoc2dial": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "before/ordinary_rag/mtrag": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "before/contextkv/multidoc2dial": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "before/contextkv/mtrag": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "accepted/contextkv/multidoc2dial": [
+      4,
+      6,
+      7
+    ],
+    "accepted/contextkv/mtrag": [
+      4,
+      6,
+      7
+    ]
+  },
+  "revisit_definition": "A turn reuses an identical document/version/passage/character span seen earlier in the same actual conversation. Hit tokens are total Native prefixes, including common instructions; they are not source-only hit counts.",
+  "current": [
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "metric": "mtrageval_harmonic",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.5423548547947857,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.329639027595332,
+          "scored": 20
+        },
+        "RB_alg_idk": {
+          "mean": 0.329639027595332,
+          "scored": 20
+        },
+        "RB_llm": {
+          "mean": 0.8550000000000001,
+          "scored": 20
+        },
+        "RB_llm_idk": {
+          "mean": 0.8550000000000001,
+          "scored": 20
+        },
+        "RL_F": {
+          "mean": 0.752886286975,
+          "scored": 20
+        },
+        "RL_F_idk": {
+          "mean": 0.752886286975,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 23.125374338217078,
+      "total_input_tokens": 66153,
+      "total_output_tokens": 10784,
+      "gpu_gib_seconds": 7262.162849968045,
+      "host_gib_seconds": 2190.222429674121,
+      "gpu_peak_gib": 81.65234375,
+      "host_peak_gib": 24.534879684448242,
+      "actual_device_hit_tokens": 2432,
+      "actual_host_loaded_tokens": 384,
+      "actual_prefill_tokens": 63337,
+      "new_compute_kv_pages": 1170,
+      "gpu_kv_peak_tokens": 32768,
+      "gpu_kv_peak_gib": 8,
+      "gpu_kv_active_peak_tokens": 17536,
+      "implementation": "1958bda",
+      "engine_implementation": "0c36706",
+      "records_path": "runs/cooperation/accepted/contextkv/mtrag/results.jsonl"
+    },
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "metric": "f1",
+      "completed": 20,
+      "requested": 20,
+      "quality": 0.21097262566768885,
+      "metrics": {
+        "exact_match": {
+          "mean": 0,
+          "scored": 20
+        },
+        "f1": {
+          "mean": 0.21097262566768885,
+          "scored": 20
+        }
+      },
+      "p95_seconds": 6.136850503832102,
+      "total_input_tokens": 12515,
+      "total_output_tokens": 2355,
+      "gpu_gib_seconds": 1767.0049247924617,
+      "host_gib_seconds": 525.2142909371329,
+      "gpu_peak_gib": 81.46875,
+      "host_peak_gib": 24.243165969848633,
+      "actual_device_hit_tokens": 1152,
+      "actual_host_loaded_tokens": 0,
+      "actual_prefill_tokens": 11363,
+      "new_compute_kv_pages": 225,
+      "gpu_kv_peak_tokens": 13184,
+      "gpu_kv_peak_gib": 3.21875,
+      "gpu_kv_active_peak_tokens": 3840,
+      "implementation": "1958bda",
+      "engine_implementation": "0c36706",
+      "records_path": "runs/cooperation/accepted/contextkv/multidoc2dial/results.jsonl"
+    }
+  ],
+  "scoring_costs": {
+    "before/ordinary_rag/multidoc2dial": {
+      "scored": 20,
+      "offline": {
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "elapsed_ms": 4.474066197872162,
+        "cost_scope": "offline_cpu"
+      },
+      "wall_elapsed_ms": 4.581373184919357
+    },
+    "before/ordinary_rag/mtrag": {
+      "scored": 20,
+      "offline": {
+        "http_calls": 80,
+        "input_tokens": 306740,
+        "output_tokens": 38327,
+        "elapsed_ms": 787315.2546770871,
+        "stage_wall_ms": 424440.378125757
+      },
+      "wall_elapsed_ms": 535044.5858053863
+    },
+    "before/contextkv/multidoc2dial": {
+      "scored": 20,
+      "offline": {
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "elapsed_ms": 2.8847381472587585,
+        "cost_scope": "offline_cpu"
+      },
+      "wall_elapsed_ms": 2.96982005238533
+    },
+    "before/contextkv/mtrag": {
+      "scored": 20,
+      "offline": {
+        "http_calls": 80,
+        "input_tokens": 244706,
+        "output_tokens": 45972,
+        "elapsed_ms": 911378.011494875,
+        "stage_wall_ms": 484884.1702193022
+      },
+      "wall_elapsed_ms": 588745.4485781491
+    },
+    "accepted/contextkv/multidoc2dial": {
+      "scored": 20,
+      "offline": {
+        "model_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "elapsed_ms": 3.2045170664787292,
+        "cost_scope": "offline_cpu"
+      },
+      "wall_elapsed_ms": 3.2910481095314026
+    },
+    "accepted/contextkv/mtrag": {
+      "scored": 20,
+      "offline": {
+        "http_calls": 80,
+        "input_tokens": 251766,
+        "output_tokens": 40593,
+        "elapsed_ms": 811540.6633168459,
+        "stage_wall_ms": 432257.1985013783
+      },
+      "wall_elapsed_ms": 521630.9357471764
+    }
+  },
+  "comparisons": [
+    {
+      "dataset": "mtrag",
+      "versus_previous_contextkv": {
+        "quality_percentage_points": 0.6564104015344241,
+        "p95_change_percent": -0.6101350698370367,
+        "gpu_gib_seconds_change_percent": -6.9216452598726335,
+        "host_gib_seconds_change_percent": -2.3503731824420893,
+        "prefill_change_percent": 12.055269536294965
+      },
+      "versus_ordinary_rag": {
+        "quality_percentage_points": 1.2894490189459096,
+        "p95_change_percent": -7.370591334117627,
+        "gpu_gib_seconds_change_percent": 14.049465165620845,
+        "host_gib_seconds_change_percent": 24.497294414915082,
+        "prefill_change_percent": -28.590917290520434
+      }
+    },
+    {
+      "dataset": "multidoc2dial",
+      "versus_previous_contextkv": {
+        "quality_percentage_points": 0.4041182093724477,
+        "p95_change_percent": -23.07225187004398,
+        "gpu_gib_seconds_change_percent": -15.586553988370856,
+        "host_gib_seconds_change_percent": -8.586252318937483,
+        "prefill_change_percent": -28.449090107675833
+      },
+      "versus_ordinary_rag": {
+        "quality_percentage_points": 4.263812220562141,
+        "p95_change_percent": -26.423233734976982,
+        "gpu_gib_seconds_change_percent": -18.71941542706451,
+        "host_gib_seconds_change_percent": -12.217252192311278,
+        "prefill_change_percent": -40.928467456851735
+      }
+    }
+  ]
+}
