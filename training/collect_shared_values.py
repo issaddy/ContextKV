@@ -156,7 +156,11 @@ async def collect(args):
                 encoded = await asyncio.to_thread(evidence_encoder.encode, query, units)
                 state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare", totals, row.get("catalogue", ()))
                 observations = []
-                for number, chosen in enumerate(candidate_sets(encoded.frontier(units))):
+                budget, _ = controller._answer_budget(state, snapshot, state.computations)
+                sizes = {unit.unit_id: unit.body_tokens for unit in units}
+                frontier = tuple(ids for ids in encoded.frontier(units)
+                                 if sum(sizes[identity] for identity in ids) <= budget)
+                for number, chosen in enumerate(candidate_sets(frontier)):
                     identity = f"sets:{row['task_id']}:{number}"
                     branch = replace(state, query=replace(state.query), selected_ids=chosen,
                         read_units=set(state.read_units), processed_tables=set(state.processed_tables),
@@ -173,8 +177,10 @@ async def collect(args):
             warm = index % 2 == 1
             state, encoded, states = None, None, []
             batch_size = min(args.batch_size, max(1, len(units) // 2))
-            for start in range(0, len(units), batch_size):
-                branch_id = f"stop:{row['task_id']}:{start}"
+            pending, observed = units, ()
+            by_id = {unit.unit_id: unit for unit in units}
+            while pending:
+                branch_id = f"stop:{row['task_id']}:{len(observed)}"
                 if warm:
                     request = compile_request(template, row["question"], snapshot.raw_history,
                         source_blocks(units), future_sources=source_blocks(units))
@@ -183,21 +189,25 @@ async def collect(args):
                         cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
                     controller.native_state[branch_id] = warmed["meta"]["contextkv_compute"]
                 first = time.monotonic()
-                fresh = units[start:start+batch_size]
+                seen = {unit.unit_id for unit in observed}
+                fresh = tuple(unit for unit in SharedEvidenceProvider._closure(pending[:batch_size], by_id)
+                              if unit.unit_id not in seen)
                 new = await asyncio.to_thread(evidence_encoder.encode, query if state is None else state.query, fresh)
                 encoded = new if encoded is None else encoded.merge(new)
-                observed = units[:start+len(fresh)]
+                observed = (*observed, *fresh)
+                seen.update(unit.unit_id for unit in fresh)
+                pending = tuple(unit for unit in pending if unit.unit_id not in seen)
                 if state is None:
                     state = state_for(query, encoded, observed, units, branch_id, totals, row.get("catalogue", ()))
                 else:
                     state = replace(state, evidence=encoded, pool=EvidencePool(observed, source_blocks(observed)),
                         costs=None, cache_scope=branch_id, cache_namespace=branch_id)
                     SharedEvidenceProvider._finish_state(state)
-                state.pending_units = units[len(observed):]
+                state.pending_units = pending
                 complete = controller.executor(branch_id, branch_id+":work", totals,
                     cache_scope=branch_id, cache_namespace=branch_id)
                 await controller.prepare_state(state, snapshot, complete)
-                transition_id = f"expand:{row['task_id']}:{start}"
+                transition_id = f"expand:{row['task_id']}:{len(observed)}"
                 windows[transition_id] = first, time.monotonic()
                 paid_seconds += windows[transition_id][1]-first
                 if states:

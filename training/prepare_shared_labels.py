@@ -54,6 +54,7 @@ source marks a passage span that supports a Need. The other roles mark original 
 entity identifiers, periods, units and constraints required to compute the requested result.
 Use condition_id to link filter/period columns to a declared query condition.
 relation_group identifies matching join keys across tables; leave it empty for non-join fields.
+Reuse the relation_group in known_join_keys when the same semantic join field occurs in another source batch.
 Label supporting evidence, necessary complementary evidence and explicit computation fields.
 The reference answer is an offline labeling aid. Bind only words in the supplied numbered sources."""
 
@@ -235,15 +236,22 @@ async def prepare_labels(args):
             elif args.values_only:
                 labeled = row
             else:
-                bindings = []
+                bindings, join_keys = [], {}
                 # Source dependencies can expand a small candidate set into a whole
                 # document. Label every window without repeating that whole document.
                 for start in range(0, len(row["units"]), args.candidates):
                     sources, source_locations = numbered_sources(row["units"][start:start+args.candidates])
                     field = await complete(FIELD_INSTRUCTION, {"messages": messages, "task": task,
-                        "sources": sources, "reference_answer": row["reference_answer"]},
+                        "sources": sources, "reference_answer": row["reference_answer"],
+                        "known_join_keys": [{"need_id": need, "field": text, "relation_group": group}
+                                            for (need, text), group in join_keys.items()]},
                         field_label_schema(row, source_locations))
                     bindings.extend(source_bindings(source_locations, field["bindings"]))
+                    for item in field["bindings"]:
+                        if item["relation_group"]:
+                            unit, offsets = source_locations[item["source"]["source_id"]]
+                            left, right = word_offsets(item["source"], offsets)
+                            join_keys[item["need_id"], unit["text"][left:right]] = item["relation_group"]
                 labeled = {**row, "bindings": bindings}
             sink.write(json.dumps(labeled, ensure_ascii=False)+"\n")
             sink.flush()
