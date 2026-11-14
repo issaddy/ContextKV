@@ -121,7 +121,7 @@ python3 -m bench.study evaluate \
 
 `--methods ordinary_rag contextkv llamaindex` 和 `--datasets multidoc2dial mtrag versionqa loong` 可指定本次范围。公开评测使用参考历史；实际历史评测在会话内顺序执行，失败轮次结束后，后续轮次使用此前已提交历史。
 
-连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次。添加 `--cache-pair` 会在 ContextKV 生成后，将同一批实际输入及到达偏移分别交给 Native 和协同缓存，均从冷缓存开始，使用贪心生成并保留答案一致数。请求只在内存中暂存，输出 `cache_pair.json`；完整队列质量仍按各 benchmark 原协议评分。KV 峰值直接读取页池，新增计算页计数不含 Host 搬运页。
+连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、历史与到达偏移一致，分别使用语义排序 Native 和缓存成本排列，均从冷缓存开始，使用贪心生成并保留答案一致数。请求只在内存中暂存，输出 `cache_pair.json`；完整队列质量仍按各 benchmark 原协议评分。KV 峰值直接读取页池，新增计算页计数不含 Host 搬运页。
 
 ## 同证据缓存配对
 

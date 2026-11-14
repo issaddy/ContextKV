@@ -63,7 +63,6 @@ class SharedEvidenceState:
     cache_scope: str = "shared"
     cache_namespace: str | None = None
     session_id: str | None = None
-    reference_ids: dict = field(default_factory=dict)
     retained_sources: dict = field(default_factory=dict)
 
     @property
@@ -319,7 +318,6 @@ class SharedEvidenceProvider:
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units)
         state.version_catalogue = catalogue_versions(catalogue, families)
-        state.reference_ids = corpus.reference_ids
         if supplied_blocks is not None:
             from controller.cooperative_request import document_headers
             state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)

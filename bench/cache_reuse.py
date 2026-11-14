@@ -58,8 +58,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                         by_id = {source_address(block): block for block in evidence}
                         evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
-                        system_prompt=original.messages[0].content,
-                        reference_ids={key: label for label,key in original.reference_map})
+                        system_prompt=original.messages[0].content)
                     if mode == "auto":
                         wanted = {d["source_id"]:d for d in original.demand}
                         request = replace(request,demand=tuple({**wanted[b["source_id"]],"native_prefix_end":b["end"]}

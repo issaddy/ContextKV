@@ -242,16 +242,13 @@ class CompiledRequest:
     demand: tuple[dict, ...]
 
 
-def source_body(evidence, reference_ids=None):
+def source_body(evidence):
     """Render source fragments once, sharing document headings and reference IDs."""
     body, spans, segments, references = "", [], [], []
-    identities = {} if reference_ids is None else reference_ids
-    seen, previous, previous_end = set(), None, 0
+    identities, previous, previous_end = {}, None, 0
     for block in evidence:
         if block.key not in identities:
             identities[block.key] = f"S{len(identities)+1}"
-        if block.key not in seen:
-            seen.add(block.key)
             references.append((identities[block.key], block.key))
         reference = identities[block.key]
         source_start = block.span[0] if block.span else 0
@@ -272,8 +269,8 @@ def source_body(evidence, reference_ids=None):
 
 
 def compile_request(template, question, history, evidence, *, results=(),
-                    future_sources=(), instruction=None, system_prompt=SYSTEM, reference_ids=None):
-    body, spans, segments, references = source_body(evidence, reference_ids)
+                    future_sources=(), instruction=None, system_prompt=SYSTEM):
+    body, spans, segments, references = source_body(evidence)
     task = answer_task(question, results)
     if instruction:
         task += "\n" + instruction

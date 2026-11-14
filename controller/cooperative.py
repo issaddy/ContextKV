@@ -233,7 +233,7 @@ class CooperativeController:
         if population:
             return
         budget, _ = self._answer_budget(state, snapshot, state.computations)
-        raw_size = len(self.template.tokenizer.encode(source_body(blocks, state.reference_ids)[0], add_special_tokens=False))
+        raw_size = len(self.template.tokenizer.encode(source_body(blocks)[0], add_special_tokens=False))
         if raw_size <= budget:
             return
         required = {need.need_id for need in state.query.task.needs
@@ -267,7 +267,7 @@ class CooperativeController:
                 state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
         request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
-            instruction=instruction or None, reference_ids=state.reference_ids)
+            instruction=instruction or None)
         # Keep a small next-turn working set; repeated sources take precedence.
         open_ids = {need.need_id for need in state.open_needs}
         open_keys = {binding.source_span.source_key for binding in state.evidence.bindings if binding.need_id in open_ids}
