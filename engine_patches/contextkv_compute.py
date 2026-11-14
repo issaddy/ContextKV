@@ -59,6 +59,7 @@ class ComputeRuntime:
                 self.demands[session] = {key: item for key, item in self.demands.get(session, {}).items()
                                          if key in retained}
                 self._refresh_priorities()
+                self._demote_unused()
             wanted = set(data['source_ids'])
             sources, prefixes = {}, []
             for address in wanted:
@@ -77,8 +78,10 @@ class ComputeRuntime:
                         page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':
-            self.demands.pop(data['session_id'], None)
+            retired = self.demands.pop(data['session_id'], None)
             self._refresh_priorities()
+            if retired:
+                self._demote_unused()
             return {'closed': True}
         if action == 'info':
             host = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
@@ -434,6 +437,22 @@ class ComputeRuntime:
                 node = node.parent
         return gpu, host
 
+    def _demote_unused(self):
+        """Keep backed-up evidence on Host when no current demand values its GPU pages."""
+        tree = self.cache.tree_core
+        pending = list(tree.evictable_device_leaves)
+        tracker = {component: 0 for component in self.cache.tree_components}
+        started = time.perf_counter()
+        while pending:
+            node = pending.pop()
+            if (node.priority == 0 and node in tree.evictable_device_leaves
+                    and node.backuped and node.write_through_pending_id is None):
+                self.cache._demote(node.id, tracker)
+                if node.parent in tree.evictable_device_leaves:
+                    pending.append(node.parent)
+        if tracker[0]:
+            self.cache.update_eviction_metrics(tracker[0], time.perf_counter()-started)
+
     def finish(self, req):
         state = req.contextkv_compute_state
         if state.published:
@@ -475,6 +494,8 @@ class ComputeRuntime:
                     self.source_nodes[source_id, 'exact'] = match.best_match_node
                     self.source_prefixes[source_id] = dict(sources=tuple(prefix), tokens=item['end'], namespace=req.cache_salt)
         self._refresh_priorities()
+        if state.metadata.get('mode') == 'auto':
+            self._demote_unused()
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, input_tokens=len(state.input_ids),
             output_tokens=output_count, elapsed_ms=elapsed,
@@ -742,11 +763,11 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
 
 
 def checkpoint_extent(req, end):
-    """Admit only the Native prefix demanded by a cooperative request."""
+    """Keep stable evidence for reuse; the turn-specific tail remains private."""
     state = getattr(req, 'contextkv_compute_state', None)
     if state is None or state.metadata.get('mode') != 'auto' or not state.metadata.get('blocks'):
         return end
-    retained = max((item.get('native_prefix_end', 0) for item in state.metadata.get('demand', ())), default=0)
+    retained = max(item['end'] for item in state.metadata['blocks'])
     return min(end, max(req.kv.cache_protected_len, retained))
 
 
