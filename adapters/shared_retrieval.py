@@ -292,8 +292,7 @@ class SharedEvidenceProvider:
             evidence = replace(evidence, unit_ids=tuple(unit.unit_id for unit in retained),
                 embeddings=evidence.embeddings[positions], relevance=evidence.relevance[positions],
                 bindings=tuple(binding for binding in evidence.bindings
-                               if binding.source_span.source_key in population_keys),
-                token_states=(), token_sources=())
+                               if binding.source_span.source_key in population_keys))
             if fresh:
                 extra = self.evidence_encoder.encode(query, fresh)
                 usage["input_tokens"] += extra.usage["input_tokens"]

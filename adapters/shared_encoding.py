@@ -115,8 +115,6 @@ class EvidenceEncoding:
     relevance: object
     bindings: tuple[FieldBinding, ...]
     heads: object
-    token_states: tuple = ()
-    token_sources: tuple = ()
     usage: dict = field(default_factory=dict)
     query_sum: object = None
 
@@ -694,7 +692,7 @@ class SharedEvidenceEncoder:
         from adapters.shared_heads import FIELD_ROLES
         started = time.perf_counter()
         batches = self._batches(query, units)
-        rankings, bindings, binding_vectors, token_states, token_sources = [], [], [], [], []
+        rankings, bindings, binding_vectors = [], [], []
         token_count = 0
         needs = [(i, need) for i, need in enumerate(query.task.needs)
                  if query.task.coverage_scope != "all_supplied_documents"
@@ -714,13 +712,17 @@ class SharedEvidenceEncoder:
                 confidence, labels = probabilities.max(-1)
                 confidence, labels = confidence.cpu(), labels.cpu()
                 for need_index, (_, need) in enumerate(needs):
-                    for role_index, role in enumerate(FIELD_ROLES):
+                    roles = FIELD_ROLES if need.operation in {"count", "sum", "mean", "min", "max", "group"} else ("source",)
+                    for role in roles:
+                        role_index = FIELD_ROLES.index(role)
                         for first, last in _spans(labels[need_index, :, role_index].tolist(), sources):
                             owner, key, left, _ = sources[first]
                             right = sources[last-1][3]
                             unit = next(item for item in batch if item.unit_id == owner)
                             base = unit.source_spans[0].start
-                            vector = source_states[first:last].mean(0)
+                            vector = (source_states[first:last].mean(0)
+                                if (role in {"filter", "period"} and need.condition_ids)
+                                or (role == "entity" and need.need_id in query.join_needs) else None)
                             condition_id = ""
                             if role in {"filter", "period"} and need.condition_ids:
                                 indices = [i for i, condition in enumerate(query.task.conditions)
@@ -759,7 +761,7 @@ class SharedEvidenceEncoder:
             relevance = torch.empty(0, device=self.model.device)
             query_sum = torch.zeros(512, device=self.model.device)
         return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents.cpu(), relevance.cpu(),
-            tuple(bindings), self.heads, tuple(token_states), tuple(token_sources),
+            tuple(bindings), self.heads,
             {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(batches)},
             query_sum.cpu())
 
