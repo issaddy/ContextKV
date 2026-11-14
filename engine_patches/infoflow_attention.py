@@ -15,9 +15,19 @@ def _paged_attention(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT, LSE,
                      position_stride: tl.constexpr, GROUPS: tl.constexpr, HEADS: tl.constexpr,
                      HEAD_DIM: tl.constexpr, ROTARY_DIM: tl.constexpr,
                      NEOX: tl.constexpr, SCALE: tl.constexpr,
-                     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, SPLITS: tl.constexpr):
+                     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, SPLITS: tl.constexpr,
+                     BATCHED: tl.constexpr, ROW_STRIDE: tl.constexpr, COS_BATCH_STRIDE: tl.constexpr):
     query_block, head = tl.program_id(0), tl.program_id(1)
     split = tl.program_id(2)
+    if BATCHED:
+        Q += query_block * qs0
+        OUT += query_block * os0
+        LSE += query_block * HEADS * SPLITS
+        ROWS += query_block * ROW_STRIDE
+        COSINE += query_block * COS_BATCH_STRIDE
+        SINE += query_block * COS_BATCH_STRIDE
+        POSITIONS += query_block
+        query_block = 0
     kv_head = head // GROUPS
     rows = query_block * BLOCK_M + tl.arange(0, BLOCK_M)
     dimensions = tl.arange(0, HEAD_DIM)
@@ -92,11 +102,39 @@ def paged_attention(query, key_pool, value_pool, rows, cosine, sine, query_posit
         value_pool.stride(0), value_pool.stride(1), partial.stride(0), partial.stride(1),
         cosine.stride(0), query.shape[1] // key_pool.shape[1], query.shape[1],
         query.shape[-1], rotary.cos_sin_cache.shape[-1], rotary.is_neox_style,
-        query.shape[-1] ** -.5, 16, 64, splits, num_warps=4)
+        query.shape[-1] ** -.5, 16, 64, splits, False, 0, 0, num_warps=4)
     if splits > 1:
         _fwd_kernel_stage2[(1, query.shape[1])](partial, lse, output, 1., workspace["indptr"],
             workspace["indptr"], None, partial.stride(0), partial.stride(1), partial.stride(2),
             output.stride(0), output.stride(1), MAX_KV_SPLITS=splits, MIN_BLOCK_KV=64,
             BLOCK_DV=query.shape[-1], Lv=query.shape[-1], HAS_SINK=False, FORCED_KV_SPLITS=splits,
             num_warps=4, num_stages=2)
+    return output
+
+
+def paged_decode(query, key_pool, value_pool, rows, cosine, sine, positions, rotary, workspace):
+    """One paged attention launch for all ready decode requests."""
+    from sglang.kernels.ops.attention.decode_attention import _fwd_kernel_stage2
+    batch, heads, width = query.shape
+    length = rows.shape[1]
+    splits = min(32, triton.cdiv(length, 1024))
+    shape = (batch, heads, splits, width)
+    if workspace.get("shape") != shape:
+        workspace.update(shape=shape, partial=torch.empty(shape, dtype=torch.float32, device=query.device),
+            lse=torch.empty(shape[:-1], dtype=torch.float32, device=query.device),
+            indptr=torch.arange(batch+1, device=query.device, dtype=torch.int32)*length)
+    partial, lse = workspace["partial"], workspace["lse"]
+    output = torch.empty_like(query)
+    _paged_attention[(batch, heads, splits)](
+        query, key_pool, value_pool, rows, cosine, sine, positions, partial, lse, 1, length,
+        query.stride(0), query.stride(1), key_pool.stride(0), key_pool.stride(1),
+        value_pool.stride(0), value_pool.stride(1), partial.stride(0), partial.stride(1),
+        cosine.stride(1), heads//key_pool.shape[1], heads, width, rotary.cos_sin_cache.shape[-1],
+        rotary.is_neox_style, width**-.5, 16, 64, splits, True, rows.stride(0), cosine.stride(0), num_warps=4)
+    if splits == 1:
+        return partial[:, :, 0].to(query.dtype)
+    _fwd_kernel_stage2[(batch, heads)](partial, lse, output, 1., workspace["indptr"],
+        workspace["indptr"], None, partial.stride(0), partial.stride(1), partial.stride(2),
+        output.stride(0), output.stride(1), MAX_KV_SPLITS=splits, MIN_BLOCK_KV=64,
+        BLOCK_DV=width, Lv=width, HAS_SINK=False, FORCED_KV_SPLITS=splits, num_warps=4, num_stages=2)
     return output

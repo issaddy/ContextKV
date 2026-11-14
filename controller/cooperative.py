@@ -260,14 +260,9 @@ class CooperativeController:
         else:
             selected = selected_blocks(state)
         selected = with_document_headers(selected, state.source_headers)
-        instruction = ("The source population is only partially examined. Use the established observations; "
-                       "do not present partial counts or sums as complete totals." if state.budget_exhausted else "")
-        if state.version_catalogue:
-            instruction += "\nAvailable document versions from the source index:\n" + json.dumps(
-                state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
         request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
-            instruction=instruction or None)
+            instruction=self._answer_instruction(state))
         # Keep a small next-turn working set; repeated sources take precedence.
         open_ids = {need.need_id for need in state.open_needs}
         open_keys = {binding.source_span.source_key for binding in state.evidence.bindings if binding.need_id in open_ids}
@@ -404,13 +399,22 @@ class CooperativeController:
             computations.append(record)
         return computations
 
+    def _answer_instruction(self, state):
+        instruction = ("Answer the current question directly. Use earlier turns to resolve references, "
+            "without repeating their explanations. Include the facts or actions needed for this question, "
+            "with their necessary conditions, commands and source citations.")
+        if state.budget_exhausted:
+            instruction += ("\nThe source population is only partially examined. Use the established observations; "
+                            "do not present partial counts or sums as complete totals.")
+        if state.version_catalogue:
+            instruction += "\nAvailable document versions from the source index:\n" + json.dumps(
+                state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
+        return instruction
+
     def _answer_budget(self, state, snapshot, computations):
         from .cooperative_request import answer_task
         from .schema import Message, history_messages
-        question = answer_task(state.query.task.raw_question, computations)
-        if state.version_catalogue:
-            question += "\nAvailable document versions from the source index:\n" + json.dumps(
-                state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
+        question = answer_task(state.query.task.raw_question, computations)+"\n"+self._answer_instruction(state)
         headers = "".join(f"[D{i+1}] {block.title}\n{block.text}\n\n"
                           for i, block in enumerate(state.source_headers))
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", headers),

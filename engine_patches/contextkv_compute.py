@@ -620,6 +620,7 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                          dtype=model.embed_tokens.weight.dtype, device=input_ids.device)
     offset = 0
     driver = QwenInfoFlow(model, batch)
+    decode_states, decode_offsets, decode_positions = [], [], []
     for index, (state, length) in enumerate(zip(states, lengths)):
         if state is None or state.mode == 'exact':
             from sglang.srt.model_executor.forward_context import forward_context, get_forward_context
@@ -685,22 +686,36 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                                            lambda: driver.replay(state, selected))
                     if end >= state.work_length:
                         result[offset + length - 1] = last_hidden
+                        # Prompt scoring is temporary. Replay now owns every
+                        # prompt position, so these aligned pages can be reused.
+                        state.runtime.cache.free_kv_row(state.request.kv, [(state.score_start, state.score_end)])
+                        state.transferred_ranges.append((state.score_start, state.score_end))
+                        state.scores = None
                 for position in range(max(first, state.work_length), end):
                     global_position = positions.new_tensor(position - state.work_length + len(state.input_ids))
                     state.row[global_position] = work_row[position]
                     result[offset + position - first] = driver.decode(
                         state, input_ids[offset + position - first], global_position)
+            elif batch.forward_mode.is_decode():
+                global_position = positions[offset] - state.work_length + len(state.input_ids)
+                state.row[global_position] = work_row[positions[offset]]
+                decode_states.append(state)
+                decode_offsets.append(offset)
+                decode_positions.append(global_position)
             else:
                 for local in range(length):
                     global_position = positions[offset + local] - state.work_length + len(state.input_ids)
                     state.row[global_position] = work_row[positions[offset + local]]
                     result[offset + local] = driver.decode(state, input_ids[offset + local], global_position)
         offset += length
+    if decode_states:
+        indices = torch.tensor(decode_offsets, device=input_ids.device)
+        result[indices] = driver.decode_many(decode_states, input_ids[indices], torch.stack(decode_positions))
     return result
 
 
 def private_release_segments(req, start, end):
-    """Native insert owns the adopted pages and has already freed duplicates."""
+    """Exclude shared pages and temporary scoring pages already returned."""
     state = getattr(req, 'contextkv_compute_state', None)
     if state is None or state.mode == 'exact':
         return [(start, end)]

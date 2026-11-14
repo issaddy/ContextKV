@@ -12,7 +12,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from sglang.srt.managers.infoflow_attention import paged_attention
+from sglang.srt.managers.infoflow_attention import paged_attention, paged_decode
 
 
 def relocate_keys(keys, local_positions, global_positions, rotary):
@@ -253,23 +253,31 @@ class QwenInfoFlow:
 
     @torch.inference_mode()
     def decode(self, state, input_id, position):
-        """Reuse one decode graph per length bucket, updating only row/position maps."""
-        size = len(state.row)
-        bucket = 1 << (size-1).bit_length()
-        graphs = state.runtime.decode_graphs
-        if bucket not in graphs:
+        return self.decode_many((state,), input_id.reshape(1), position.reshape(1))[0]
+
+    @torch.inference_mode()
+    def decode_many(self, states, input_ids, positions):
+        """Batch projections, MLPs and paged attention across ready requests."""
+        count = len(states)
+        bucket = 1 << (max(len(state.row) for state in states)-1).bit_length()
+        graphs, state = states[0].runtime.decode_graphs, states[0]
+        key = count, bucket
+        if key not in graphs:
             width = state.position_cosine.shape[1]
-            graphs[bucket] = SimpleNamespace(pool=state.pool,
-                row=state.row.new_zeros(bucket),
-                position_cosine=state.position_cosine.new_ones((bucket, width)),
-                position_sine=state.position_sine.new_zeros((bucket, width)), attention_workspace={},
-                input=input_id.reshape(1).clone(), position=position.reshape(1).clone(), graph=None)
-        fixed = graphs[bucket]
-        fixed.row[:size].copy_(state.row)
-        fixed.position_cosine[:size].copy_(state.position_cosine)
-        fixed.position_sine[:size].copy_(state.position_sine)
-        fixed.input.copy_(input_id.reshape(1))
-        fixed.position.copy_(position.reshape(1))
+            graphs[key] = SimpleNamespace(pool=state.pool,
+                row=state.row.new_zeros((count, bucket)),
+                position_cosine=state.position_cosine.new_ones((count, bucket, width)),
+                position_sine=state.position_sine.new_zeros((count, bucket, width)), attention_workspace={},
+                input=input_ids.clone(), position=positions.clone(),
+                batch_indices=torch.arange(count, device=input_ids.device), graph=None)
+        fixed = graphs[key]
+        for index, state in enumerate(states):
+            size = len(state.row)
+            fixed.row[index, :size].copy_(state.row)
+            fixed.position_cosine[index, :size].copy_(state.position_cosine)
+            fixed.position_sine[index, :size].copy_(state.position_sine)
+        fixed.input.copy_(input_ids)
+        fixed.position.copy_(positions)
         if fixed.graph is None:
             self._decode(fixed, fixed.input, fixed.position)
             fixed.graph = torch.cuda.CUDAGraph()
@@ -279,14 +287,15 @@ class QwenInfoFlow:
         return fixed.output
 
     def _decode(self, state, input_id, position):
-        positions = position.reshape(1)
-        hidden = self.model.embed_tokens(input_id.reshape(1))
-        length = len(state.row)
+        hidden = self.model.embed_tokens(input_id)
         for layer in self.layers:
             layer_id = layer.self_attn.attn.layer_id
-            q, k, v = self._qkv(layer, hidden, positions)
+            q, k, v = self._qkv(layer, hidden, position)
             keys, values = state.pool.get_kv_buffer(layer_id)
-            keys[state.row[positions]], values[state.row[positions]] = k, v
-            hidden = self._finish_layer(layer, hidden,
-                self._attend(state, layer, q, positions, length))
-        return self.model.norm(hidden)[0]
+            slots = state.row[state.batch_indices, position]
+            keys[slots], values[slots] = k, v
+            attention = paged_decode(q, keys, values, state.row,
+                state.position_cosine, state.position_sine, position,
+                layer.self_attn.rotary_emb, state.attention_workspace)
+            hidden = self._finish_layer(layer, hidden, attention)
+        return self.model.norm(hidden)
