@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import random
 
-from adapters.doc2dial import benchmark_rows, convert
+from adapters.doc2dial import benchmark_rows, convert, structural_corpus
 from adapters.corpus import CorpusIndex
 from adapters.evidence_pool import SourceDirectory
 from adapters.retrieval import BM25SRetriever
@@ -134,11 +134,13 @@ def field_label_schema(row, locations):
 
 def prepare_states(args, tokenizer):
     source = Path(args.source)
-    records, supervision, _ = convert(json.loads((source/"multidoc2dial_doc.json").read_text()),
+    documents = json.loads((source/"multidoc2dial_doc.json").read_text())
+    records, supervision, _ = convert(documents,
         json.loads((source/"multidoc2dial_dial_train.json").read_text()), dataset_version="archive-f0c034c24966",
         source_uri="https://doc2dial.github.io/multidoc2dial/", split="train", source_format="multidoc2dial")
     if not args.task_only:
-        corpus = CorpusIndex.from_records(records, corpus_id="multidoc2dial", snapshot_id="multidoc2dial-train")
+        corpus = CorpusIndex.from_records(structural_corpus(documents, records),
+            corpus_id="multidoc2dial", snapshot_id="multidoc2dial-train")
         directory = SourceDirectory(corpus, tokenizer)
         by_id = directory.units_by_id
         sparse = BM25SRetriever({identity: {"text": unit.text, "title": unit.heading} for identity, unit in by_id.items()},
@@ -179,7 +181,7 @@ def prepare_states(args, tokenizer):
         if args.task_only:
             continue
         positives = [unit.unit_id for unit in by_id.values() if any(
-            span.source_key.passage_id == label["passage_id"] and span.start < label["end"] and label["start"] < span.end
+            span.source_key.document_id == label["passage_id"] and span.start < label["end"] and label["start"] < span.end
             for span in unit.source_spans for label in row["grounding"])]
         recalled = sparse.retrieve([question], top_k=args.candidates)
         candidates = tuple(dict.fromkeys((*positives, *(item.document_id for item in recalled))))[:args.candidates]

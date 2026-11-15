@@ -46,6 +46,7 @@ class SharedEvidenceState:
     reused_claims: tuple = ()
     pending_units: tuple = ()
     body_tokens: int = 0
+    evidence_batch: int = 24
     population_units: tuple = ()
     source_headers: tuple = ()
     version_catalogue: dict = field(default_factory=dict)
@@ -318,7 +319,8 @@ class SharedEvidenceProvider:
             query.task = replace(query.task,
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
-            document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units)
+            document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units,
+            evidence_batch=self.evidence_batch)
         state.version_catalogue = catalogue_versions(catalogue, families)
         if supplied_blocks is not None:
             from controller.cooperative_request import document_headers

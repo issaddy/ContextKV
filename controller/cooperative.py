@@ -179,7 +179,7 @@ class CooperativeController:
                     def continuation():
                         summary = state.evidence.summary(state.selected_ids, state.pool.units,
                             tuple(need.need_id for need in state.query.task.needs), state.completed_needs)
-                        return self.stop.choose(summary, self._value_state(state, totals, arrived),
+                        return self.stop.choose(summary, self._value_state(state, arrived),
                                                 self.prices, can_continue=True)
                     if await asyncio.to_thread(continuation) == "finish":
                         break
@@ -448,9 +448,13 @@ class CooperativeController:
             return costs, ids
         state.costs, state.selected_ids = await asyncio.to_thread(select)
 
-    def _value_state(self, state, totals, arrived):
+    def _value_state(self, state, arrived):
+        from adapters.shared_retrieval import SharedEvidenceProvider
         native = state.costs.costs
         quote = state.costs.quote(state.selected_ids)
+        by_id = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
+        encoded = set(state.evidence.unit_ids)
+        upcoming = SharedEvidenceProvider._closure(state.pending_units[:state.evidence_batch], by_id)
         row_count = sum(len(table.rows) for table in state.document_index.tables.values())
         selected_tokens = sum(unit.body_tokens for unit in state.pool.units if unit.unit_id in state.selected_ids)
         processed = sum(len(state.document_index.tables[identity].rows) for identity in state.processed_tables)
@@ -458,7 +462,7 @@ class CooperativeController:
                 "open_need_fraction": len(state.open_needs)/max(1, len(state.query.task.needs)),
                 "unread_row_fraction": (row_count-processed)/max(1, row_count),
                 "context_fraction": selected_tokens/self.policy.max_total_model_tokens,
-                "remaining_token_fraction": (self.settings["max_total_tokens"]-totals["input_tokens"]-totals["output_tokens"])/self.settings["max_total_tokens"],
+                "next_encoding_tokens": sum(unit.body_tokens for unit in upcoming if unit.unit_id not in encoded),
                 "elapsed_seconds": time.monotonic()-arrived,
                 "answer_cost_ms": quote["milliseconds"],
                 "gpu_ready_fraction": min(1., quote["gpu_tokens"]/max(1, selected_tokens)),

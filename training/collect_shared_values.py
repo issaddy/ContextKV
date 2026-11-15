@@ -140,6 +140,7 @@ async def collect(args):
             windows[identity] = started, time.monotonic()
             item.update(call_id=identity, costs={"seconds": windows[identity][1]-started})
         answers.append(item)
+        await engine.close_session(identity)
         return item
 
     async def collect_state(row, index):
@@ -176,14 +177,22 @@ async def collect(args):
             paid_seconds = time.monotonic()-started
             warm = index % 2 == 1
             state, encoded, states = None, None, []
-            batch_size = min(args.batch_size, max(1, len(units) // 2))
+            batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
             pending, observed = units, ()
             by_id = {unit.unit_id: unit for unit in units}
             while pending:
                 branch_id = f"stop:{row['task_id']}:{len(observed)}"
                 if warm:
-                    request = compile_request(template, row["question"], snapshot.raw_history,
-                        source_blocks(units), future_sources=source_blocks(units))
+                    seed = []
+                    request = compile_request(template, row["question"], snapshot.raw_history, ())
+                    for unit in units[:batch_size]:
+                        blocks = source_blocks((*seed, unit))
+                        candidate = compile_request(template, row["question"], snapshot.raw_history,
+                            blocks, future_sources=blocks)
+                        if len(candidate.input_ids)+1 > run.context.max_total_model_tokens:
+                            break
+                        seed.append(unit)
+                        request = candidate
                     await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
                         max_new_tokens=1, mode=config["shared"]["runtime"]["kv_mode"],
                         cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
@@ -203,6 +212,7 @@ async def collect(args):
                         costs=None, cache_scope=branch_id, cache_namespace=branch_id)
                     SharedEvidenceProvider._finish_state(state)
                 state.pending_units = pending
+                state.evidence_batch = batch_size
                 complete = controller.executor(branch_id, branch_id+":work", totals,
                     cache_scope=branch_id, cache_namespace=branch_id)
                 await controller.prepare_state(state, snapshot, complete)
@@ -213,7 +223,7 @@ async def collect(args):
                     states[-1]["transition_id"] = transition_id
                 features = StopValueHead.features(encoded.summary(state.selected_ids, state.pool.units,
                     tuple(need.need_id for need in state.query.task.needs), state.completed_needs),
-                    controller._value_state(state, totals, time.monotonic()-paid_seconds)).cpu().tolist()
+                    controller._value_state(state, time.monotonic()-paid_seconds)).cpu().tolist()
                 item = await answer(row, state, snapshot, branch_id, totals)
                 states.append({"features": features, "answer": item})
             outputs.append((row, states))
@@ -254,7 +264,7 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--gpu-devices", type=int, nargs="+", default=[4, 5, 6, 7])
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, help="Evidence expansion size; defaults to the online retrieval batch")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--train-states", type=int)
     parser.add_argument("--dev-states", type=int)

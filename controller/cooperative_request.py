@@ -169,7 +169,7 @@ class EvidenceCosts:
                  "new_tokens": native_new, "pin_tokens": native_pins,
                  "gpu_tokens": prefix["gpu_tokens"] if prefix else 0,
                  "host_tokens": prefix["host_tokens"] if prefix else 0}
-        if self.mode == "exact":
+        if self.mode == "exact" or (self.mode == "auto" and not addresses):
             return exact
         costs, cold, host, gpu = self.costs, 0, 0, 0
         pins, host_nodes, cold_pages = {}, {}, 0

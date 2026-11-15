@@ -9,7 +9,7 @@ from torch import nn
 
 STATE_FIELDS = (
     "remaining_source_fraction", "open_need_fraction", "unread_row_fraction",
-    "context_fraction", "remaining_token_fraction", "elapsed_seconds", "queue_depth",
+    "context_fraction", "next_encoding_tokens", "elapsed_seconds", "queue_depth",
     "gpu_ready_fraction", "host_ready_fraction", "prefill_token_ms", "transfer_token_ms", "answer_cost_ms",
 )
 SUMMARY_SIZE = 16
@@ -61,7 +61,7 @@ class StopValueHead(nn.Module):
 
     def save(self, path):
         torch.save({"summary_size": self.summary_size, "hidden_size": self.hidden_size,
-                    "state_dict": self.state_dict()}, path)
+                    "state_fields": STATE_FIELDS, "state_dict": self.state_dict()}, path)
 
     @classmethod
     def load(cls, path, *, device="cpu"):
