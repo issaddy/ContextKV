@@ -11,7 +11,7 @@ import time
 import yaml
 
 from controller.config import apply_study_config, create_model_template, load_config, load_kv_policy
-from controller.cooperative_request import EvidenceCosts, compile_request, source_address
+from controller.cooperative_request import ANSWER_SCOPE, EvidenceCosts, compile_request, source_address
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceUnit
 from controller.serialization import decode
@@ -106,10 +106,11 @@ def receipt(result):
 
 
 async def compare(args):
+    from controller.sampling import SamplingRecipe
     config = yaml.safe_load(Path(args.config).read_text())
     run = apply_study_config(load_config(config["generation"]["run_config"]), config)
     template = create_model_template(run.model)
-    engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
+    engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
     policy = load_kv_policy(run.cooperative)
     row = next(row for row in map(json.loads, Path(args.data).read_text().splitlines())
                if row["task_id"] == args.task_id)
@@ -137,13 +138,13 @@ async def compare(args):
             if mode == "auto":
                 snapshot = await engine.evidence_state(tuple(source_address(block) for block in blocks),
                     cache_scope=namespace, cache_namespace=namespace)
-                empty = compile_request(template, row["question"], turns, ())
+                empty = compile_request(template, row["question"], turns, (), instruction=ANSWER_SCOPE)
                 costs = EvidenceCosts(units, blocks, template.tokenizer, snapshot,
                     prompt_tokens=len(empty.input_ids), output_tokens=output_tokens, policy=policy, mode=mode)
                 order = costs.order(original)
                 estimated = costs.estimate(order)
             request = compile_request(template, row["question"], turns,
-                                      source_blocks(tuple(by_id[identity] for identity in order)))
+                                      source_blocks(tuple(by_id[identity] for identity in order)), instruction=ANSWER_SCOPE)
             answer = await engine.compute(request, session_id=namespace, request_id=namespace+":answer",
                 max_new_tokens=output_tokens, mode=mode, cache_scope=namespace,
                 cache_namespace=namespace, **policy)
@@ -161,7 +162,8 @@ async def compare(args):
         "task_id": row["task_id"], "question": row["question"], "source_count": len(units),
         "quality_metric": None if args.prefill_only else (
             "token_f1" if row["dataset"] == "multidoc2dial" else "training_reference_correctness"),
-        "conditions": "Fresh cache per branch; identical reversed-source warmup, history and evidence set. "
+        "conditions": "Fresh cache per branch; greedy generation with the deployed answer instruction; "
+                      "identical reversed-source warmup, history and evidence set. "
                       "Complete time includes quote, ordering and compilation where used.",
         "results": results}
     path = Path(args.output)

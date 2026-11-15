@@ -39,10 +39,11 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
     try:
         # Compare complete batches. Interleaving per-state exact/InfoFlow pairs
         # prices mixed dispatch and graph capture as if they were path costs.
-        generated, cold = {}, {}
+        generated, cold, output_lengths = {}, {}, {}
         for mode in ("exact", "infoflow"):
             results = await asyncio.gather(*(generate(row, mode, config["execution"]["output_tokens"]) for row in source))
             cold[mode] = sum(result["elapsed_ms"] for result in results)
+            output_lengths[mode+"_output_tokens"] = sum(result["meta"]["completion_tokens"] for result in results)/len(results)
             generated[mode] = [{"source": row, "answer": result["text"]} for row, result in zip(source, results)]
             answers.extend(generated[mode])
         pairs = [(row["task_id"], {mode: values[i] for mode, values in generated.items()})
@@ -50,6 +51,7 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
         # One-token revisits separate reusable phase costs from first-use JIT.
         warm = await asyncio.gather(*(generate(row, "infoflow", 1) for row in source))
         costs = (await engine.metrics())["costs"]
+        costs.update(output_lengths)
         receipts = [result["meta"]["contextkv_compute"] for result in warm]
         for phase, tokens in (("score", "score_tokens"), ("recompute", "replay_tokens")):
             costs[phase+"_token_ms"] = sum(row[phase+"_ms"] for row in receipts)/sum(row[tokens] for row in receipts)

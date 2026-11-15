@@ -21,7 +21,6 @@ class ComputeRuntime:
         self.pool = self.allocator.get_kvcache()
         self.costs = {}
         self.decode_graphs = {}
-        self.output_tokens_mean = 0.0
         self.demands = {}
         self.source_nodes = {}
         self.source_prefixes = {}
@@ -76,7 +75,7 @@ class ComputeRuntime:
                     if gpu or host:
                         prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host,
                                              unpinned_nodes=self._page_nodes(source_id, 'exact')))
-            return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs), output_tokens=self.output_tokens_mean,
+            return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs),
                         page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':
@@ -209,11 +208,12 @@ class ComputeRuntime:
         native = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
             array('q', ids), req.extra_key, cache_salt=req.cache_salt)))
         exact = (len(ids) - native.device_prefix_len - native.host_hit_length) * prefill + native.host_hit_length * transfer
-        expected_output = min(req.sampling_params.max_new_tokens,
-                              self.output_tokens_mean or req.sampling_params.max_new_tokens)
+        expected_output = {mode: min(req.sampling_params.max_new_tokens,
+            costs.get(mode+'_output_tokens', req.sampling_params.max_new_tokens))
+            for mode in ('exact', 'infoflow')}
         exact_decode = costs.get('exact_decode_token_ms', 0.0)
-        approximate += expected_output * costs.get('infoflow_decode_token_ms', exact_decode)
-        exact += expected_output * exact_decode
+        approximate += expected_output['infoflow'] * costs.get('infoflow_decode_token_ms', exact_decode)
+        exact += expected_output['exact'] * exact_decode
         # A future consumer saves each source block's work once. Demand for
         # another block never finances this block's independent construction.
         cold_consumers = {}
@@ -477,7 +477,8 @@ class ComputeRuntime:
         output_count = len(req.output_ids_through_stop)
         # A length-capped prefill/warmup is a censored sample, not a short answer.
         if req.finished_reason.to_json()['type'] == 'stop':
-            self.output_tokens_mean = (.8 * (self.output_tokens_mean or output_count) + .2 * output_count)
+            name = state.mode + '_output_tokens'
+            self.costs[name] = .8 * self.costs.get(name, output_count) + .2 * output_count
         if output_count > 1:
             name = state.mode + '_decode_token_ms'
             measured = (stats.completion_time - stats.prefill_finished_time) * 1000 / (output_count - 1)

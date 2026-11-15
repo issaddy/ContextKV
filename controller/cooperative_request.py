@@ -113,7 +113,9 @@ class EvidenceCosts:
         self.snapshot = snapshot
         self.costs = {**policy["costs"], **snapshot["costs"]}
         self.prompt_tokens = prompt_tokens-sum(self.lengths[address] for address in self.headers)
-        self.output_tokens = min(output_tokens, snapshot["output_tokens"] or output_tokens)
+        self.output_tokens = output_tokens
+        self.expected_output = {mode: min(output_tokens, self.costs.get(mode+"_output_tokens", output_tokens))
+                                for mode in ("exact", "infoflow")}
         self.ratio = policy["recompute_ratio"]
         self.quality_cost = max(0., policy.get("quality_loss", 0)) * policy.get("quality_price_ms", 0)
         self.mode = mode
@@ -133,7 +135,7 @@ class EvidenceCosts:
             if addresses[:len(chain)] == chain:
                 saved = max(saved, prefix["gpu_tokens"]*costs["prefill_token_ms"] +
                     prefix["host_tokens"]*(costs["prefill_token_ms"]-transfer))
-        return max(0.0, tokens*costs["prefill_token_ms"]-saved) + self.output_tokens*costs["exact_decode_token_ms"]
+        return max(0.0, tokens*costs["prefill_token_ms"]-saved) + self.expected_output["exact"]*costs["exact_decode_token_ms"]
 
     def order(self, ids):
         ids = tuple(ids)
@@ -184,7 +186,7 @@ class EvidenceCosts:
         transfer = costs.get("transfer_token_ms", costs["prefill_token_ms"] * .05)
         infoflow = (cold*costs["build_token_ms"] + host*transfer +
             prompt*costs["score_token_ms"] + (prompt+self.ratio*body)*costs["recompute_token_ms"] +
-            self.output_tokens*costs["infoflow_decode_token_ms"] + self.quality_cost)
+            self.expected_output["infoflow"]*costs["infoflow_decode_token_ms"] + self.quality_cost)
         approximate = {"mode": "infoflow", "milliseconds": infoflow,
             "new_tokens": cold_pages+sum(host_nodes.values())+rounded(prompt)+rounded(prompt+self.ratio*body+self.output_tokens),
             "pin_tokens": sum(pins.values())}
