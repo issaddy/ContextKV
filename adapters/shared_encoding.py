@@ -89,8 +89,10 @@ class QueryEncoding:
 
     @property
     def evidence_query(self):
+        conditions = {identity for need in self.task.needs for identity in need.condition_ids}
         references = (*(ref for need in self.task.needs for ref in need.subject_refs),
-            *(ref for condition in self.task.conditions for ref in condition.value_spans),
+            *(ref for condition in self.task.conditions if condition.condition_id in conditions
+              for ref in (condition.key_span, condition.predicate_span, *condition.value_spans) if ref is not None),
             *self.task.version_intent.time_refs)
         history = self.text(tuple(ref for ref in references if ref.turn_id != self.task.current_turn_id))
         versions = ", ".join(self.task.version_intent.version_ids)
