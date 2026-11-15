@@ -1,0 +1,180 @@
+{
+  "benchmarks": [
+    {
+      "dataset": "mtrag",
+      "method": "ordinary_rag",
+      "metric": "mtrageval_harmonic",
+      "completed": 205,
+      "requested": 205,
+      "quality": 0.47513616160355515,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.3255144327236547,
+          "scored": 205
+        },
+        "RB_alg_idk": {
+          "mean": 0.29944575644970955,
+          "scored": 205
+        },
+        "RB_llm": {
+          "mean": 0.7975609756097561,
+          "scored": 205
+        },
+        "RB_llm_idk": {
+          "mean": 0.6921951219512196,
+          "scored": 205
+        },
+        "RL_F": {
+          "mean": 0.7308987869917073,
+          "scored": 205
+        },
+        "RL_F_idk": {
+          "mean": 0.6536814209668292,
+          "scored": 205
+        }
+      },
+      "p95_seconds": 77.22393924444913,
+      "total_input_tokens": 1132316.0,
+      "total_output_tokens": 75513.0,
+      "gpu_gib_seconds": 54721.42653379175,
+      "host_gib_seconds": 15495.616846136658,
+      "gpu_peak_gib": 85.615234375,
+      "host_peak_gib": 24.328699111938477,
+      "actual_device_hit_tokens": 14528.0,
+      "actual_host_loaded_tokens": 5760.0,
+      "actual_prefill_tokens": 1112028.0,
+      "new_compute_kv_pages": 18652.0,
+      "gpu_kv_peak_tokens": 32768,
+      "gpu_kv_peak_gib": 8.0,
+      "gpu_kv_active_peak_tokens": 32640
+    },
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "metric": "mtrageval_harmonic",
+      "completed": 205,
+      "requested": 205,
+      "quality": 0.5156224611298673,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.38789226324737636,
+          "scored": 205
+        },
+        "RB_alg_idk": {
+          "mean": 0.37466123752210456,
+          "scored": 205
+        },
+        "RB_llm": {
+          "mean": 0.6570731707317072,
+          "scored": 205
+        },
+        "RB_llm_idk": {
+          "mean": 0.62,
+          "scored": 205
+        },
+        "RL_F": {
+          "mean": 0.6743861755648781,
+          "scored": 205
+        },
+        "RL_F_idk": {
+          "mean": 0.6509444411478049,
+          "scored": 205
+        }
+      },
+      "p95_seconds": 46.76671287119389,
+      "total_input_tokens": 247133.0,
+      "total_output_tokens": 24631.0,
+      "gpu_gib_seconds": 32140.96305121942,
+      "host_gib_seconds": 9911.864202662933,
+      "gpu_peak_gib": 89.708984375,
+      "host_peak_gib": 27.985295295715332,
+      "actual_device_hit_tokens": 3779.0,
+      "actual_host_loaded_tokens": 10240.0,
+      "actual_prefill_tokens": 382396.0,
+      "new_compute_kv_pages": 6696.0,
+      "gpu_kv_peak_tokens": 24128,
+      "gpu_kv_peak_gib": 5.890625,
+      "gpu_kv_active_peak_tokens": 22016
+    },
+    {
+      "dataset": "mtrag",
+      "method": "llamaindex",
+      "metric": "mtrageval_harmonic",
+      "completed": 205,
+      "requested": 205,
+      "quality": 0.5380809187109751,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.3416717414310468,
+          "scored": 205
+        },
+        "RB_alg_idk": {
+          "mean": 0.34195295780119866,
+          "scored": 205
+        },
+        "RB_llm": {
+          "mean": 0.7273170731707317,
+          "scored": 205
+        },
+        "RB_llm_idk": {
+          "mean": 0.6814634146341463,
+          "scored": 205
+        },
+        "RL_F": {
+          "mean": 0.9069829285160976,
+          "scored": 205
+        },
+        "RL_F_idk": {
+          "mean": 0.8449081943068293,
+          "scored": 205
+        }
+      },
+      "p95_seconds": 72.55621377080678,
+      "total_input_tokens": 1107043.0,
+      "total_output_tokens": 74027.0,
+      "gpu_gib_seconds": 48317.74687341352,
+      "host_gib_seconds": 15524.363414222564,
+      "gpu_peak_gib": 87.248046875,
+      "host_peak_gib": 28.685636520385742,
+      "actual_device_hit_tokens": 21376.0,
+      "actual_host_loaded_tokens": 2432.0,
+      "actual_prefill_tokens": 1083235.0,
+      "new_compute_kv_pages": 18277.0,
+      "gpu_kv_peak_tokens": 32768,
+      "gpu_kv_peak_gib": 8.0,
+      "gpu_kv_active_peak_tokens": 19328
+    }
+  ],
+  "comparisons": [
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "reference": "ordinary_rag",
+      "quality_difference": 0.040486299526312164,
+      "p95_ratio": 0.6055986437464143
+    },
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "reference": "llamaindex",
+      "quality_difference": -0.02245845758110776,
+      "p95_ratio": 0.6445583422933602
+    }
+  ],
+  "protocol": {
+    "benchmark": "MT-RAG IBM Cloud",
+    "split": "test",
+    "questions": 205,
+    "sessions": 26,
+    "history": "P3 own committed",
+    "concurrency": 4,
+    "generator": "Qwen3-32B BF16",
+    "online_devices": [
+      4,
+      5
+    ],
+    "auxiliary_devices": "both query and evidence on GPU 5",
+    "code": "d4af354",
+    "concurrent_workload": "MultiDoc2Dial generation on GPUs 6,7"
+  }
+}
