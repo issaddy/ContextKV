@@ -1,0 +1,132 @@
+{
+  "benchmarks": [
+    {
+      "dataset": "multidoc2dial",
+      "method": "ordinary_rag",
+      "metric": "f1",
+      "completed": 4094,
+      "requested": 4094,
+      "quality": 0.18847277597895093,
+      "metrics": {
+        "exact_match": {
+          "mean": 0.0,
+          "scored": 4094
+        },
+        "f1": {
+          "mean": 0.18847277597895093,
+          "scored": 4094
+        }
+      },
+      "p95_seconds": 867.3632140342146,
+      "total_input_tokens": 5336829.0,
+      "total_output_tokens": 686542.0,
+      "gpu_gib_seconds": 405976.5751742002,
+      "host_gib_seconds": 116355.1570199092,
+      "gpu_peak_gib": 97.7919921875,
+      "host_peak_gib": 34.280025482177734,
+      "actual_device_hit_tokens": 39040.0,
+      "actual_host_loaded_tokens": 20864.0,
+      "actual_prefill_tokens": 5276925.0,
+      "new_compute_kv_pages": 95201.0,
+      "gpu_kv_peak_tokens": 32768,
+      "gpu_kv_peak_gib": 8.0,
+      "gpu_kv_active_peak_tokens": 13760
+    },
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "metric": "f1",
+      "completed": 4094,
+      "requested": 4094,
+      "quality": 0.25173083574483973,
+      "metrics": {
+        "exact_match": {
+          "mean": 0.0,
+          "scored": 4094
+        },
+        "f1": {
+          "mean": 0.25173083574483973,
+          "scored": 4094
+        }
+      },
+      "p95_seconds": 493.7823416367173,
+      "total_input_tokens": 2066060.0,
+      "total_output_tokens": 370444.0,
+      "gpu_gib_seconds": 238089.39007532538,
+      "host_gib_seconds": 120191.73619998634,
+      "gpu_peak_gib": 87.208984375,
+      "host_peak_gib": 50.09179496765137,
+      "actual_device_hit_tokens": 341312.0,
+      "actual_host_loaded_tokens": 103552.0,
+      "actual_prefill_tokens": 1621196.0,
+      "new_compute_kv_pages": 33153.0,
+      "gpu_kv_peak_tokens": 32704,
+      "gpu_kv_peak_gib": 7.984375,
+      "gpu_kv_active_peak_tokens": 6080
+    },
+    {
+      "dataset": "multidoc2dial",
+      "method": "llamaindex",
+      "metric": "f1",
+      "completed": 4094,
+      "requested": 4094,
+      "quality": 0.17280429611699344,
+      "metrics": {
+        "exact_match": {
+          "mean": 0.0,
+          "scored": 4094
+        },
+        "f1": {
+          "mean": 0.17280429611699344,
+          "scored": 4094
+        }
+      },
+      "p95_seconds": 895.8370429920033,
+      "total_input_tokens": 5866521.0,
+      "total_output_tokens": 912519.0,
+      "gpu_gib_seconds": 491078.22251246823,
+      "host_gib_seconds": 305586.3307421863,
+      "gpu_peak_gib": 89.9609375,
+      "host_peak_gib": 61.283989906311035,
+      "actual_device_hit_tokens": 388352.0,
+      "actual_host_loaded_tokens": 75968.0,
+      "actual_prefill_tokens": 5402201.0,
+      "new_compute_kv_pages": 102322.0,
+      "gpu_kv_peak_tokens": 32704,
+      "gpu_kv_peak_gib": 7.984375,
+      "gpu_kv_active_peak_tokens": 11712
+    }
+  ],
+  "comparisons": [
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "reference": "ordinary_rag",
+      "quality_difference": 0.0632580597658888,
+      "p95_ratio": 0.5692913114680919
+    },
+    {
+      "dataset": "multidoc2dial",
+      "method": "contextkv",
+      "reference": "llamaindex",
+      "quality_difference": 0.07892653962784629,
+      "p95_ratio": 0.5511966104767618
+    }
+  ],
+  "protocol": {
+    "benchmark": "MultiDoc2Dial",
+    "split": "test",
+    "questions": 4094,
+    "sessions": 661,
+    "history": "P1 reference",
+    "concurrency": 4,
+    "generator": "Qwen3-32B BF16",
+    "online_devices": [
+      6,
+      7
+    ],
+    "auxiliary_devices": "both query and evidence on GPU 7",
+    "code": "d4af354",
+    "concurrent_workload": "Other benchmark generation or scoring on GPUs 4,5"
+  }
+}
