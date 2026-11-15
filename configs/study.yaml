@@ -32,11 +32,11 @@ shared:
     device: cuda:2
   evidence:
     model_path: models/jina-reranker-v3.5
-    asset_path: models/shared-evidence
+    asset_path: models/shared-evidence-sections
     device: cuda:3
     batch_tokens: 16384
   runtime:
-    stop_asset: models/shared-stop.pt
+    stop_asset: models/shared-stop-sections.pt
     kv_quality_asset: models/infoflow-quality.json
     kv_mode: auto
     recompute_ratio: 0.15

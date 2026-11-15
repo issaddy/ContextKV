@@ -32,7 +32,7 @@
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
-现有可用资产：`models/shared-query`（任务头 286/63、总体覆盖头 382/95 个训练/开发状态）、`models/shared-evidence`（字段输入 54/23、实际集合 22/6 状态）、`models/shared-stop.pt`（实际 11/4 状态）。覆盖训练使用整段当前问题的 token 均值，独立开发准确率 96.84%；覆盖专用行不生成任务关系标签。集合和停止资产分别保留 142、33 个答案标签；总体必需读取状态不参与可选集合/停止采集。集合头为 7 参数信息增益校准，停止头使用 16 维共享信息摘要与 12 维状态、32 维隐藏层。当前评测固定辅助权重与生成权重，KV 费用与质量差通过校准入口更新。以下命令包含标签准备、资产更新与评测入口；现有数据和索引可直接复用。
+当前默认资产：`models/shared-query`（任务头 286/63、总体覆盖头 382/95 个训练/开发状态）、`models/shared-evidence-sections`（沿用字段头，章节集合 24/6 状态）、`models/shared-stop-sections.pt`（24/6 会话、90 个终端答案）。集合头使用 180 个实际答案标签，来源为 MultiDoc2Dial 官方训练会话；评测会话独立。集合头为 7 参数信息增益校准，停止头使用 16 维共享摘要、12 维状态与 32 维隐藏层。候选采用作者章节，扩展批大小直接读取 `retrieval.evidence_batch`，当前为 24。停止特征包含下一批未编码来源的 token 量及当前证据的实际缓存报价。固定生成权重，查询和字段权重本轮未更新。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -76,30 +76,37 @@ python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
   --init-asset models/shared-evidence --data data/training/shared/labels.jsonl \
-  --output models/shared-evidence --device cuda:3 --field-only --epochs 1
+  --output models/shared-evidence-sections --device cuda:3 --field-only --epochs 1
+
+python3 -m training.prepare_shared_labels \
+  --values-only --source data/multidoc2dial/source \
+  --query-model models/qwen3-embedding-0.6b \
+  --endpoint http://127.0.0.1:30000 \
+  --output data/training/shared/value_states.jsonl \
+  --train-states 24 --dev-states 8 --candidates 50 --concurrency 4
 
 python3 -m training.collect_shared_values sets \
-  --config configs/study.yaml --data data/training/shared/labels.jsonl \
+  --config configs/study.yaml --data data/training/shared/value_states.jsonl \
   --output data/training/shared/sets.jsonl --train-states 24 --dev-states 6 --concurrency 4
 
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
-  --init-asset models/shared-evidence --data data/training/shared/sets.jsonl \
-  --output models/shared-evidence --device cuda:3 --epochs 80 --learning-rate 0.001
+  --init-asset models/shared-evidence-sections --data data/training/shared/sets.jsonl \
+  --output models/shared-evidence-sections --device cuda:3 --epochs 80 --learning-rate 0.001
 
 python3 -m training.collect_shared_values stop \
-  --config configs/study.yaml --data data/training/shared/labels.jsonl \
+  --config configs/study.yaml --data data/training/shared/value_states.jsonl \
   --output data/training/shared/stop.jsonl --train-states 12 --dev-states 4 --concurrency 4
 
 python3 -m training.stop_value data/training/shared/stop.jsonl \
-  --output models/shared-stop.pt --device cuda:2 \
+  --output models/shared-stop-sections.pt --device cuda:2 \
   --seconds-price 0.001 --tail-price 0.001
 ```
 
 停止轨迹采集前，用 `python3 -m training.calibrate_kv --config configs/study.yaml --data data/training/shared/labels.jsonl --output models/infoflow-quality.json --concurrency 4` 完成默认 4 状态的贪心质量配对。Native 和 InfoFlow 分批执行；随后每状态一次单 token 重访测量可复用阶段费用，首次编译与冷建的已付时间保留。重算比例、质量差和实测成本系数一起由控制器读取，训练采集使用相同政策。服务重启后沿用这些系数，后续请求的实测费用继续更新它们。
 
-本轮另有候选 `models/shared-evidence-diverse`（集合 48/16 状态、374 个答案标签）和 `models/shared-stop-diverse.pt`（24/8 会话、64 个终端答案）。来源状态为 `data/training/shared/value_states.jsonl`，实际标签为 `diverse_sets.jsonl`、`diverse_stop.jsonl`。默认配置继续使用原资产；候选的质量、时间与资源取舍见[实测报告](results.md)。
+本轮实际训练数据为 `data/training/shared/section_states.jsonl`、`section_sets.jsonl` 和 `section_stop.jsonl`。新建数据时使用上面的标准入口；已有状态可直接采集新答案。代码 `4d9fdd5` 的最终 20 题队列位于 `runs/mechanism/sections/`，成本校准位于 `models/infoflow-quality.json`。比较结果见[实测报告](results.md)。
 
 只更新集合／停止监督时，`prepare_shared_labels --values-only` 保留任务和来源，省去未使用的字段标注。完整字段标注使用 `--label-context-tokens`（默认 32768）按真实提示分包，并预留 4096 token 输出；不按候选数量猜测提示长度。采样按会话轮转，集合与停止采集分别沿用线上回答预算和依赖闭包。
 

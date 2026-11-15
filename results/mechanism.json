@@ -1,0 +1,632 @@
+{
+  "date": "2026-11-15",
+  "reference": "results/cooperation_optimization.json",
+  "variants": {
+    "shared": {
+      "benchmarks": [
+        {
+          "dataset": "multidoc2dial",
+          "method": "contextkv",
+          "metric": "f1",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.26411386334301207,
+          "metrics": {
+            "exact_match": {
+              "mean": 0.0,
+              "scored": 20
+            },
+            "f1": {
+              "mean": 0.26411386334301207,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 9.730268996395173,
+          "total_input_tokens": 11355.0,
+          "total_output_tokens": 1781.0,
+          "gpu_gib_seconds": 2069.1689990360246,
+          "host_gib_seconds": 605.9237574194706,
+          "gpu_peak_gib": 79.1796875,
+          "host_peak_gib": 23.355308532714844,
+          "actual_device_hit_tokens": 827.0,
+          "actual_host_loaded_tokens": 1024.0,
+          "actual_prefill_tokens": 18719.0,
+          "new_compute_kv_pages": 347.0,
+          "gpu_kv_peak_tokens": 4352,
+          "gpu_kv_peak_gib": 1.0625,
+          "gpu_kv_active_peak_tokens": 4288,
+          "auxiliary_seconds": 26.273384157568216,
+          "online_compute_seconds": 87.34500891715288,
+          "batch_seconds": 26.30623099580407,
+          "extra_prefill_requests": 20
+        },
+        {
+          "dataset": "mtrag",
+          "method": "contextkv",
+          "metric": "mtrageval_harmonic",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.610236437942837,
+          "metrics": {
+            "RB_alg": {
+              "mean": 0.4017574495013144,
+              "scored": 20
+            },
+            "RB_alg_idk": {
+              "mean": 0.4017574495013144,
+              "scored": 20
+            },
+            "RB_llm": {
+              "mean": 0.765,
+              "scored": 20
+            },
+            "RB_llm_idk": {
+              "mean": 0.765,
+              "scored": 20
+            },
+            "RL_F": {
+              "mean": 0.8929578011449999,
+              "scored": 20
+            },
+            "RL_F_idk": {
+              "mean": 0.8929578011449999,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 24.34046780522914,
+          "total_input_tokens": 42887.0,
+          "total_output_tokens": 4573.0,
+          "gpu_gib_seconds": 6513.151098502429,
+          "host_gib_seconds": 2003.966307544659,
+          "gpu_peak_gib": 81.11328125,
+          "host_peak_gib": 24.805110931396484,
+          "actual_device_hit_tokens": 2200.0,
+          "actual_host_loaded_tokens": 1600.0,
+          "actual_prefill_tokens": 44765.0,
+          "new_compute_kv_pages": 788.0,
+          "gpu_kv_peak_tokens": 15808,
+          "gpu_kv_peak_gib": 3.859375,
+          "gpu_kv_active_peak_tokens": 15424,
+          "auxiliary_seconds": 41.583517495542765,
+          "online_compute_seconds": 255.88754499703646,
+          "batch_seconds": 81.36056524887681,
+          "extra_prefill_requests": 9
+        }
+      ],
+      "comparisons": []
+    },
+    "final": {
+      "benchmarks": [
+        {
+          "dataset": "multidoc2dial",
+          "method": "contextkv",
+          "metric": "f1",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.29218868098914186,
+          "metrics": {
+            "exact_match": {
+              "mean": 0.0,
+              "scored": 20
+            },
+            "f1": {
+              "mean": 0.29218868098914186,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 6.882285888306797,
+          "total_input_tokens": 15103.0,
+          "total_output_tokens": 1532.0,
+          "gpu_gib_seconds": 1481.224534643683,
+          "host_gib_seconds": 432.7076579134529,
+          "gpu_peak_gib": 78.880859375,
+          "host_peak_gib": 23.179994583129883,
+          "actual_device_hit_tokens": 448.0,
+          "actual_host_loaded_tokens": 832.0,
+          "actual_prefill_tokens": 13823.0,
+          "new_compute_kv_pages": 249.0,
+          "gpu_kv_peak_tokens": 6016,
+          "gpu_kv_peak_gib": 1.46875,
+          "gpu_kv_active_peak_tokens": 5184,
+          "auxiliary_seconds": 26.54289624840021,
+          "online_compute_seconds": 60.74692325294018,
+          "batch_seconds": 18.879165481776,
+          "extra_prefill_requests": 0
+        },
+        {
+          "dataset": "mtrag",
+          "method": "contextkv",
+          "metric": "mtrageval_harmonic",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.6419732948741944,
+          "metrics": {
+            "RB_alg": {
+              "mean": 0.4164726325290702,
+              "scored": 20
+            },
+            "RB_alg_idk": {
+              "mean": 0.4164726325290702,
+              "scored": 20
+            },
+            "RB_llm": {
+              "mean": 0.835,
+              "scored": 20
+            },
+            "RB_llm_idk": {
+              "mean": 0.835,
+              "scored": 20
+            },
+            "RL_F": {
+              "mean": 0.9307792207800001,
+              "scored": 20
+            },
+            "RL_F_idk": {
+              "mean": 0.9307792207800001,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 17.116035013087096,
+          "total_input_tokens": 58469.0,
+          "total_output_tokens": 5310.0,
+          "gpu_gib_seconds": 4033.065738227313,
+          "host_gib_seconds": 1229.5875666217803,
+          "gpu_peak_gib": 81.0859375,
+          "host_peak_gib": 24.766035079956055,
+          "actual_device_hit_tokens": 3072.0,
+          "actual_host_loaded_tokens": 3776.0,
+          "actual_prefill_tokens": 51621.0,
+          "new_compute_kv_pages": 900.0,
+          "gpu_kv_peak_tokens": 21120,
+          "gpu_kv_peak_gib": 5.15625,
+          "gpu_kv_active_peak_tokens": 21120,
+          "auxiliary_seconds": 47.47321214899421,
+          "online_compute_seconds": 171.62899450212717,
+          "batch_seconds": 50.21639348939061,
+          "extra_prefill_requests": 0
+        }
+      ],
+      "comparisons": []
+    },
+    "calibrated": {
+      "benchmarks": [
+        {
+          "dataset": "multidoc2dial",
+          "method": "contextkv",
+          "metric": "f1",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.27541062169358194,
+          "metrics": {
+            "exact_match": {
+              "mean": 0.0,
+              "scored": 20
+            },
+            "f1": {
+              "mean": 0.27541062169358194,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 7.141380492970347,
+          "total_input_tokens": 11763.0,
+          "total_output_tokens": 1498.0,
+          "gpu_gib_seconds": 1500.8867243329805,
+          "host_gib_seconds": 443.6080243729195,
+          "gpu_peak_gib": 79.529296875,
+          "host_peak_gib": 23.65956974029541,
+          "actual_device_hit_tokens": 448.0,
+          "actual_host_loaded_tokens": 704.0,
+          "actual_prefill_tokens": 10611.0,
+          "new_compute_kv_pages": 197.0,
+          "gpu_kv_peak_tokens": 3904,
+          "gpu_kv_peak_gib": 0.953125,
+          "gpu_kv_active_peak_tokens": 3584,
+          "auxiliary_seconds": 28.88701893016696,
+          "online_compute_seconds": 60.22488474100828,
+          "batch_seconds": 18.958962351083755,
+          "extra_prefill_requests": 0
+        },
+        {
+          "dataset": "mtrag",
+          "method": "contextkv",
+          "metric": "mtrageval_harmonic",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.6499873064042372,
+          "metrics": {
+            "RB_alg": {
+              "mean": 0.4402511408775389,
+              "scored": 20
+            },
+            "RB_alg_idk": {
+              "mean": 0.4402511408775389,
+              "scored": 20
+            },
+            "RB_llm": {
+              "mean": 0.805,
+              "scored": 20
+            },
+            "RB_llm_idk": {
+              "mean": 0.805,
+              "scored": 20
+            },
+            "RL_F": {
+              "mean": 0.9075992063499999,
+              "scored": 20
+            },
+            "RL_F_idk": {
+              "mean": 0.9075992063499999,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 12.401560645364224,
+          "total_input_tokens": 33639.0,
+          "total_output_tokens": 4307.0,
+          "gpu_gib_seconds": 3569.7395991543963,
+          "host_gib_seconds": 1107.1765138896646,
+          "gpu_peak_gib": 81.2109375,
+          "host_peak_gib": 25.125622749328613,
+          "actual_device_hit_tokens": 1600.0,
+          "actual_host_loaded_tokens": 0.0,
+          "actual_prefill_tokens": 32039.0,
+          "new_compute_kv_pages": 577.0,
+          "gpu_kv_peak_tokens": 10368,
+          "gpu_kv_peak_gib": 2.53125,
+          "gpu_kv_active_peak_tokens": 10368,
+          "auxiliary_seconds": 51.589678663760424,
+          "online_compute_seconds": 143.78248453512788,
+          "batch_seconds": 44.388312976807356,
+          "extra_prefill_requests": 0
+        }
+      ],
+      "comparisons": []
+    },
+    "sections": {
+      "benchmarks": [
+        {
+          "dataset": "multidoc2dial",
+          "method": "contextkv",
+          "metric": "f1",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.2827193059547251,
+          "metrics": {
+            "exact_match": {
+              "mean": 0.0,
+              "scored": 20
+            },
+            "f1": {
+              "mean": 0.2827193059547251,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 6.895405666157603,
+          "total_input_tokens": 11640.0,
+          "total_output_tokens": 1443.0,
+          "gpu_gib_seconds": 1376.9540347683578,
+          "host_gib_seconds": 413.4975321166387,
+          "gpu_peak_gib": 79.857421875,
+          "host_peak_gib": 24.152090072631836,
+          "actual_device_hit_tokens": 576.0,
+          "actual_host_loaded_tokens": 576.0,
+          "actual_prefill_tokens": 10488.0,
+          "new_compute_kv_pages": 196.0,
+          "gpu_kv_peak_tokens": 4096,
+          "gpu_kv_peak_gib": 1.0,
+          "gpu_kv_active_peak_tokens": 3712,
+          "auxiliary_seconds": 25.43151231110096,
+          "online_compute_seconds": 56.041391901671886,
+          "batch_seconds": 17.324097078293562,
+          "extra_prefill_requests": 0
+        },
+        {
+          "dataset": "mtrag",
+          "method": "contextkv",
+          "metric": "mtrageval_harmonic",
+          "completed": 20,
+          "requested": 20,
+          "quality": 0.6521113824406565,
+          "metrics": {
+            "RB_alg": {
+              "mean": 0.4531552288601287,
+              "scored": 20
+            },
+            "RB_alg_idk": {
+              "mean": 0.4531552288601287,
+              "scored": 20
+            },
+            "RB_llm": {
+              "mean": 0.82,
+              "scored": 20
+            },
+            "RB_llm_idk": {
+              "mean": 0.82,
+              "scored": 20
+            },
+            "RL_F": {
+              "mean": 0.85165849673,
+              "scored": 20
+            },
+            "RL_F_idk": {
+              "mean": 0.85165849673,
+              "scored": 20
+            }
+          },
+          "p95_seconds": 12.481053336523473,
+          "total_input_tokens": 25683.0,
+          "total_output_tokens": 3546.0,
+          "gpu_gib_seconds": 3127.4193191861486,
+          "host_gib_seconds": 985.6387926282744,
+          "gpu_peak_gib": 81.14453125,
+          "host_peak_gib": 25.707788467407227,
+          "actual_device_hit_tokens": 1600.0,
+          "actual_host_loaded_tokens": 0.0,
+          "actual_prefill_tokens": 24083.0,
+          "new_compute_kv_pages": 440.0,
+          "gpu_kv_peak_tokens": 7936,
+          "gpu_kv_peak_gib": 1.9375,
+          "gpu_kv_active_peak_tokens": 6784,
+          "auxiliary_seconds": 45.918841522186995,
+          "online_compute_seconds": 120.67255981266499,
+          "batch_seconds": 38.79381272941828,
+          "extra_prefill_requests": 0
+        }
+      ],
+      "comparisons": []
+    }
+  },
+  "infoflow": {
+    "reference": {
+      "recompute_ratio": 0.15,
+      "quality_loss": -0.0035589472085267755,
+      "costs": {
+        "exact_decode_token_ms": 20.066243646532016,
+        "prefill_token_ms": 0.4550091721912751,
+        "build_token_ms": 0.203942877585049,
+        "score_token_ms": 0.3330870451750579,
+        "recompute_token_ms": 0.32093079864482404,
+        "infoflow_decode_token_ms": 27.92937943123791
+      },
+      "pairs": [
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_1",
+          "exact": 0.038834951456310676,
+          "infoflow": 0.033003300330033
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_5",
+          "exact": 0.13559322033898305,
+          "infoflow": 0.16853932584269662
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_9",
+          "exact": 0.1927710843373494,
+          "infoflow": 0.19875776397515527
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_7",
+          "exact": 0.05714285714285714,
+          "infoflow": 0.03827751196172249
+        }
+      ],
+      "calibration": {
+        "concurrency": 4,
+        "first_pass_elapsed_ms": {
+          "exact": 28088.326681405306,
+          "infoflow": 53213.737167418
+        },
+        "revisit_elapsed_ms": 6123.721610754728
+      }
+    },
+    "optimized": {
+      "recompute_ratio": 0.15,
+      "quality_loss": -0.003096284119787996,
+      "costs": {
+        "exact_output_tokens": 288.0,
+        "exact_decode_token_ms": 19.806761543292204,
+        "prefill_token_ms": 0.4485829087078329,
+        "build_token_ms": 0.19593644486284095,
+        "score_token_ms": 0.3333448159574258,
+        "recompute_token_ms": 0.3203886570951864,
+        "infoflow_output_tokens": 347.25,
+        "infoflow_decode_token_ms": 22.281255834244867
+      },
+      "pairs": [
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_1",
+          "exact": 0.038834951456310676,
+          "infoflow": 0.03115264797507788
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_5",
+          "exact": 0.13559322033898305,
+          "infoflow": 0.16853932584269662
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_9",
+          "exact": 0.1927710843373494,
+          "infoflow": 0.19875776397515527
+        },
+        {
+          "task_id": "611468ee1567561df83307d715e1abf5_7",
+          "exact": 0.05714285714285714,
+          "infoflow": 0.03827751196172249
+        }
+      ],
+      "calibration": {
+        "concurrency": 4,
+        "first_pass_elapsed_ms": {
+          "exact": 27731.33460059762,
+          "infoflow": 46077.68830657005
+        },
+        "revisit_elapsed_ms": 6127.8325244784355
+      }
+    },
+    "nonprefix_pair": {
+      "kind": "same-evidence-cache-pair",
+      "task_id": "611468ee1567561df83307d715e1abf5_1",
+      "question": "Hi, I need more information on VA life insurance",
+      "source_count": 6,
+      "quality_metric": "token_f1",
+      "conditions": "Fresh cache per branch; greedy generation with the deployed answer instruction; identical reversed-source warmup, history and evidence set. Complete time includes quote, ordering and compilation where used.",
+      "results": [
+        {
+          "method": "Native ranked context",
+          "complete_ms": 8556.738831102848,
+          "estimated_ms": null,
+          "selected_order": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "seed": {
+            "engine_ms": 533.2870669662952,
+            "input_tokens": 4682,
+            "output_tokens": 1,
+            "mode": "exact",
+            "device_hit_tokens": 0,
+            "host_loaded_tokens": 0,
+            "prefill_tokens": 4682
+          },
+          "engine_ms": 8545.30581831932,
+          "input_tokens": 4726,
+          "output_tokens": 429,
+          "mode": "exact",
+          "device_hit_tokens": 0,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 4726,
+          "quality": 0.04040404040404041,
+          "answer": "VA life insurance offers financial security for Veterans, service members, and their spouses and dependent children. You can explore your options, manage your policy, and file claims to get the insurance benefits you've earned [S1].\n\nTo determine which life insurance program you may be eligible for, consider the following options:\n\n1. **Servicemembers Group Life Insurance (SGLI)**: Provides group life insurance while you're serving.\n2. **Family Servicemembers Group Life Insurance (FSGLI)**: Adds coverage for your spouse and dependent children.\n3. **Traumatic Injury Protection (TSGLI)**: Offers short-term financial support to help you recover from a severe injury.\n4. **Veterans Group Life Insurance (VGLI)**: Provides group life insurance once you've ended your service.\n5. **Service-Disabled Veterans Insurance (S-DVI)**: If you're disabled because of an injury or illness caused or made worse by your active service, you can continue your life insurance beyond 2 years after you leave the military.\n6. **Veterans Mortgage Life Insurance (VMLI)**: If you have a severe service-connected disability, this mortgage protection insurance can help your family pay off the home mortgage on a home that's been adapted to meet your needs [S5].\n\nIf you are a service-disabled Veteran, you may be eligible for **Service-Disabled Veterans Life Insurance (S-DVI)**, which provides low-cost coverage. To apply for S-DVI, you must meet specific requirements, including having a service-connected disability and being in good health except for any service-connected conditions [S3].\n\nFor managing your policy, you can access your VA life insurance policy online to check your policy's status, pay your premium, update your beneficiary, and more [S4].\n\nIf you become totally disabled or terminally ill, you may be eligible for certain benefit options, such as a waiver of premiums or accelerated benefits [S6].\n\nFor more information or assistance, you can contact the VA Life Insurance Center at 800-669-8477 [S3]."
+        },
+        {
+          "method": "ContextKV cache-priced order",
+          "complete_ms": 10218.335594981909,
+          "estimated_ms": 9249.289256726433,
+          "selected_order": [
+            5,
+            4,
+            3,
+            2,
+            1,
+            0
+          ],
+          "seed": {
+            "engine_ms": 532.5047448277473,
+            "input_tokens": 4682,
+            "output_tokens": 1,
+            "mode": "exact",
+            "device_hit_tokens": 0,
+            "host_loaded_tokens": 0,
+            "prefill_tokens": 4682
+          },
+          "engine_ms": 10191.904786974192,
+          "input_tokens": 4726,
+          "output_tokens": 545,
+          "mode": "exact",
+          "device_hit_tokens": 4608,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 118,
+          "quality": 0.039735099337748346,
+          "answer": "VA life insurance offers various options for Veterans, service members, and their families. Here are the key points and actions you can take:\n\n1. **Determine Eligibility and Choose a Program**:\n   - **Servicemembers Group Life Insurance (SGLI)**: Provides group life insurance for active service members.\n   - **Family Servicemembers Group Life Insurance (FSGLI)**: Adds coverage for a service member\u2019s spouse and dependent children.\n   - **Traumatic Injury Protection (TSGLI)**: Offers short-term financial support after a severe injury.\n   - **Veterans Group Life Insurance (VGLI)**: Available to Veterans after they leave the military.\n   - **Service-Disabled Veterans Insurance (S-DVI)**: For Veterans with a service-connected disability.\n   - **Veterans Mortgage Life Insurance (VMLI)**: Mortgage protection for Veterans with severe service-connected disabilities who receive a Specially Adapted Housing (SAH) grant [S2].\n\n2. **Access and Manage Your Policy Online**:\n   - Use the VA or Prudential Insurance Company of America portals to check your policy status, pay premiums, update beneficiaries, and review renewal options [S3].\n\n3. **Special Circumstances**:\n   - **Totally Disabled Policyholders**: You may qualify for a **waiver of premiums** if you are totally disabled and meet specific conditions (e.g., disability occurs before age 65 and lasts at least 6 months). Apply using **VA Form 29-357** [S1].\n   - **Terminally Ill Policyholders**: You may receive **accelerated benefits** (up to 50% of the face value of your policy) if you or your spouse has a terminal illness with a prognosis of 9 months or less. Apply using **Claim for Accelerated Benefits SGLV 8284** or **SGLV 8284A** [S1].\n\n4. **Apply for S-DVI**:\n   - You must have a service-connected disability (even if rated at 0%), be in good health (except for service-connected conditions), and apply within 2 years of receiving a new service-connected disability rating [S4].\n\n5. **Contact for Help**:\n   - For SGLI or VGLI: Call **800-419-1473**.\n   - For all other VA life insurance programs: Call **800-669-8477** [S6].\n\nFor more information, visit the VA website or use the VA Life Insurance Center\u2019s resources."
+        },
+        {
+          "method": "InfoFlow non-prefix reuse",
+          "complete_ms": 12990.460805594921,
+          "estimated_ms": null,
+          "selected_order": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "seed": {
+            "engine_ms": 949.4108967483044,
+            "input_tokens": 4682,
+            "output_tokens": 1,
+            "mode": "infoflow",
+            "device_hit_tokens": 0,
+            "host_loaded_tokens": 0,
+            "prefill_tokens": 5605
+          },
+          "engine_ms": 12977.45779901743,
+          "input_tokens": 4726,
+          "output_tokens": 593,
+          "mode": "infoflow",
+          "device_hit_tokens": 4423,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 1270,
+          "quality": 0.03115264797507788,
+          "answer": "VA life insurance offers various options for Veterans, service members, and their families. Here is a summary of the key points and actions you can take:\n\n1. **Eligibility and Types of Coverage**:\n   - **Servicemembers Group Life Insurance (SGLI)**: Available to active-duty service members. Provides up to $400,000 in coverage [S5].\n   - **Family SGLI (FSGLI)**: Adds coverage for a service member's spouse and dependent children [S1].\n   - **Veterans Group Life Insurance (VGLI)**: Available to Veterans who had SGLI and want to continue coverage after leaving the military [S1].\n   - **Service-Disabled Veterans Insurance (S-DVI)**: For Veterans with a service-connected disability. Provides low-cost coverage [S3].\n   - **Traumatic Injury Protection (TSGLI)**: Short-term financial support for service members who suffer a severe injury [S1].\n   - **Veterans Mortgage Life Insurance (VMLI)**: For Veterans with severe service-connected disabilities who have had their homes adapted [S3].\n\n2. **Applying for Coverage**:\n   - **SGLI/VGLI**: Apply online or through VA Form 29-4364 [S1].\n   - **S-DVI**: Apply if you were rated for a service-connected disability (even 0%) and are in good health otherwise [S3].\n   - **TSGLI**: File a claim if you have a traumatic injury [S1].\n   - **VMLI**: Apply through the Specially Adapted Housing (SAH) Grant process [S3].\n\n3. **Managing Your Policy**:\n   - **Online Access**: Use the VA portal to check policy status, update beneficiaries, and pay premiums [S4].\n   - **Beneficiary Updates**: Keep beneficiary information current to ensure smooth claims processing [S1].\n   - **Premium Waivers**: If totally disabled, you may qualify for a waiver of premiums for S-DVI [S6].\n\n4. **Special Circumstances**:\n   - **Totally Disabled or Terminally Ill**: You may be eligible for an SGLI extension, premium waivers, or accelerated benefits [S6].\n   - **Accelerated Benefits**: If terminally ill, you can receive up to 50% of the face value of your policy in advance [S1].\n\n5. **Contact and Resources**:\n   - **VA Life Insurance Center**: Call 800-669-8477 for assistance with claims or policy questions [S1].\n   - **Forms and Publications**: Download VA forms and handbooks for detailed guidance [S1].\n\nFor more information, visit the VA website or contact the Office of Servicemembers Group Life Insurance (OSGLI) [S1]."
+        }
+      ]
+    }
+  },
+  "training": {
+    "set": {
+      "model": "models/jina-reranker-v3.5",
+      "states": 24,
+      "steps": 1920,
+      "loss": 0.02532705110485646,
+      "method": "shared_fields_generator_set_utility",
+      "quality_target": "bounded_answer_gain_listwise",
+      "phase": "sets",
+      "dev_states": 6,
+      "dev_loss": 0.007754523850356539,
+      "epoch": 80,
+      "answers": 180
+    },
+    "stop": {
+      "train": 24,
+      "dev": 6,
+      "answers": 90
+    },
+    "data": "data/training/shared/section_{states,sets,stop}.jsonl"
+  },
+  "code_commit": "4d9fdd5",
+  "protocol": {
+    "generator": "Qwen3-32B BF16, frozen",
+    "questions_per_benchmark": 20,
+    "concurrency": 4,
+    "history": "P3: own committed history",
+    "cohorts": "results/cooperation_optimization.json:cohorts",
+    "sampling": "configs/qwen3_32b.yaml",
+    "online_gpu_devices": [
+      4,
+      6,
+      7
+    ],
+    "scoring_gpu_devices": [
+      5
+    ],
+    "physical_kv_pool_gib": 8,
+    "baseline": "reuse same-cohort prior ordinary RAG results"
+  },
+  "deployment": {
+    "selected_variant": "sections",
+    "set_asset": "models/shared-evidence-sections",
+    "stop_asset": "models/shared-stop-sections.pt",
+    "kv_asset": "models/infoflow-quality.json",
+    "reason": "Higher composite quality on both benchmarks and lower auxiliary, GPU and KV cost than the intermediate calibrated candidate; one configuration for both benchmarks."
+  },
+  "validation": {
+    "field_factor_max_abs_error": 1.907e-06,
+    "segmented_attention_max_abs_error_short": 0.001857,
+    "segmented_attention_max_abs_error_long": 0.00031,
+    "attention_replay_ms": {
+      "short_before": 0.021299,
+      "short_after": 0.010097,
+      "long_before": 0.071847,
+      "long_after": 0.030021
+    }
+  },
+  "remaining": [
+    "InfoFlow full requests still have no net benefit versus Native in the measured pairing.",
+    "MT-RAG auxiliary wall time is above the prior retained version and faithfulness declined.",
+    "MultiDoc2Dial cumulative GPU/Host occupancy remains above the prior retained version."
+  ]
+}

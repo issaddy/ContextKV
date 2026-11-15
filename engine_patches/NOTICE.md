@@ -12,6 +12,12 @@ selection and sparse causal replay. The author's [Qwen implementation](https://g
 provided the algorithm reference. ContextKV implements these operations over
 SGLang's Qwen weights and shared native GPU/Host pages.
 
-Split-K decode partials use SGLang's `_fwd_kernel_stage2` log-sum-exp merger
+Sparse attention split-K partials use SGLang's `_fwd_kernel_stage2` log-sum-exp merger
 from `sglang/kernels/ops/attention/decode_attention.py`. Independent block
 prefill uses PyTorch's optimized `causal_lower_right` SDPA dispatch.
+
+Segmented decoding calls SGLang's `_decode_grouped_att_m_fwd` directly. It applies
+inverse block RoPE to queries, and merges native segment/split outputs with the
+same log-sum-exp identity. The packing, query rotation and segmented merger are
+ContextKV kernels; shared KV pages remain immutable. Sparse replay continues to
+use the global-position attention path and the upstream split-K merger.
