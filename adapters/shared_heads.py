@@ -87,9 +87,12 @@ class EvidenceHeads(nn.Module):
     def field_logits(self, states, need_vectors):
         queries = F.layer_norm(self.query(need_vectors), (states.shape[-1],))
         tokens = F.layer_norm(states, (states.shape[-1],))
-        a, b = queries[:, None, :], tokens[None, :, :]
-        # The product gives each Need its own token ordering in each BIO/role logit.
-        return self.field(b + a + b*a).view(len(queries), len(states), len(FIELD_ROLES), 3)
+        # W(b+a+b*a)+c = (W*(1+a))b + Wa+c. Contract the small
+        # output dimension instead of materializing Need x token x hidden.
+        weights = self.field.weight[None] * (1 + queries[:, None, :])
+        logits = torch.einsum("td,nod->nto", tokens, weights)
+        logits = logits + self.field(queries)[:, None, :]
+        return logits.view(len(queries), len(states), len(FIELD_ROLES), 3)
 
     @staticmethod
     def features(embeddings, relevance, selected, support, completed):

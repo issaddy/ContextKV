@@ -12,7 +12,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from sglang.srt.managers.infoflow_attention import paged_attention, paged_decode
+from sglang.srt.managers.infoflow_attention import paged_attention, segmented_decode, pack_decode_rows
 
 
 def relocate_keys(keys, local_positions, global_positions, rotary):
@@ -102,6 +102,9 @@ class RequestState:
     replayed: torch.Tensor | None = None
     prompt: torch.Tensor | None = None
     scores: torch.Tensor | None = None
+    decode_order: torch.Tensor | None = None
+    decode_lengths: tuple = ()
+    decode_offsets: tuple = ()
     complete: bool = False
     counters: dict = field(default_factory=lambda: dict(
         cold_tokens=0, reused_tokens=0, recomputed_tokens=0, replay_tokens=0, score_tokens=0,
@@ -214,6 +217,13 @@ class QwenInfoFlow:
         amount = min(len(context_positions), math.ceil(len(context_positions) * ratio))
         selected = context_positions[scores[context_positions].topk(amount).indices]
         state.selected = torch.cat((state.prompt, selected)).sort().values
+        private = set(state.selected.tolist())
+        groups = [sorted(private),
+            *[[i for i in range(block.start, block.end) if i not in private] for block in state.blocks]]
+        state.decode_order = torch.tensor([i for group in groups for i in group]
+            + list(range(count, len(state.row))), device=device, dtype=state.row.dtype)
+        state.decode_lengths = tuple(map(len, groups))
+        state.decode_offsets = (0, *(block.start for block in state.blocks))
         state.position_cosine[state.selected] = 1
         state.position_sine[state.selected] = 0
         state.replayed = state.selected[:0]
@@ -245,30 +255,48 @@ class QwenInfoFlow:
         """Batch projections, MLPs and paged attention across ready requests."""
         count = len(states)
         bucket = 1 << (max(len(state.row) for state in states)-1).bit_length()
+        segments = 1 << (max(len(state.decode_lengths) for state in states)-1).bit_length()
         graphs, state = states[0].runtime.decode_graphs, states[0]
-        key = count, bucket
+        key = count, bucket, segments
         if key not in graphs:
             width = state.position_cosine.shape[1]
             graphs[key] = SimpleNamespace(pool=state.pool,
                 row=state.row.new_zeros((count, bucket)),
-                position_cosine=state.position_cosine.new_ones((count, bucket, width)),
-                position_sine=state.position_sine.new_zeros((count, bucket, width)), attention_workspace={},
+                order=state.row.new_zeros((count, bucket)),
+                lengths=state.row.new_zeros((count, segments), dtype=torch.int32),
+                input_lengths=state.row.new_zeros(count),
+                position_cosine=state.position_cosine.new_ones((count*segments, width)),
+                position_sine=state.position_sine.new_zeros((count*segments, width)), attention_workspace={},
                 input=input_ids.clone(), position=positions.clone(),
                 batch_indices=torch.arange(count, device=input_ids.device),
                 owners=[None]*count, graph=None)
         fixed = graphs[key]
+        changed = False
         for index, state in enumerate(states):
             if fixed.owners[index] is not state.row:
+                changed = True
                 size = len(state.row)
                 fixed.row[index, :size].copy_(state.row)
-                fixed.position_cosine[index, :size].copy_(state.position_cosine)
-                fixed.position_sine[index, :size].copy_(state.position_sine)
+                fixed.order[index, :size].copy_(state.decode_order)
+                lengths = (*state.decode_lengths, *((0,)*(segments-len(state.decode_lengths))))
+                fixed.lengths[index].copy_(torch.tensor(lengths, device=input_ids.device, dtype=torch.int32))
+                fixed.input_lengths[index] = len(state.input_ids)
+                offsets = (*state.decode_offsets, *((0,)*(segments-len(state.decode_offsets))))
+                rotary = self.layers[0].self_attn.rotary_emb.cos_sin_cache.float()
+                old_cos, old_sin = rotary[list(offsets)].chunk(2, -1)
+                new_cos, new_sin = rotary[0].chunk(2, -1)
+                norm = old_cos.square()+old_sin.square()
+                fixed.position_cosine[index*segments:(index+1)*segments].copy_((new_cos*old_cos+new_sin*old_sin)/norm)
+                fixed.position_sine[index*segments:(index+1)*segments].copy_((new_sin*old_cos-new_cos*old_sin)/norm)
                 fixed.owners[index] = state.row
             else:
                 # A request can return to this graph after using another batch size.
                 # Refresh its generated tail; source pages and RoPE stay unchanged.
                 first = len(state.input_ids)
                 fixed.row[index, first:len(state.row)].copy_(state.row[first:])
+        if changed and fixed.attention_workspace:
+            fixed.attention_workspace['partial'].zero_()
+            fixed.attention_workspace['lse'].fill_(-torch.inf)
         fixed.input.copy_(input_ids)
         fixed.position.copy_(positions)
         if fixed.graph is None:
@@ -281,14 +309,19 @@ class QwenInfoFlow:
 
     def _decode(self, state, input_id, position):
         hidden = self.model.embed_tokens(input_id)
+        lengths = state.lengths.clone()
+        lengths[:, 0] += (position+1-state.input_lengths).to(lengths.dtype)
+        indptr = torch.cat((lengths.new_zeros(1), lengths.flatten().cumsum(0, dtype=torch.int32)))
+        indices = pack_decode_rows(state.row, state.order, position, indptr, state.input_lengths,
+                                   state.lengths, lengths.shape[1])
         for layer in self.layers:
             layer_id = layer.self_attn.attn.layer_id
             q, k, v = self._qkv(layer, hidden, position)
             keys, values = state.pool.get_kv_buffer(layer_id)
             slots = state.row[state.batch_indices, position]
             keys[slots], values[slots] = k, v
-            attention = paged_decode(q, keys, values, state.row,
-                state.position_cosine, state.position_sine, position,
+            attention = segmented_decode(q, keys, values, indptr, indices,
+                state.position_cosine, state.position_sine, lengths.shape[1],
                 layer.self_attn.rotary_emb, state.attention_workspace)
             hidden = self._finish_layer(layer, hidden, attention)
         return self.model.norm(hidden)

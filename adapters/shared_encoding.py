@@ -89,9 +89,13 @@ class QueryEncoding:
 
     @property
     def evidence_query(self):
-        needs = "\n".join(dict.fromkeys(self.search_texts[1:]))
+        references = (*self.task.working_history,
+            *(ref for need in self.task.needs for ref in need.subject_refs),
+            *(ref for condition in self.task.conditions for ref in condition.value_spans),
+            *self.task.version_intent.time_refs)
+        history = self.text(tuple(ref for ref in references if ref.turn_id != self.task.current_turn_id))
         versions = ", ".join(self.task.version_intent.version_ids)
-        return (self.task.raw_question + ("\nRequested evidence:\n"+needs if needs else "")
+        return (self.task.raw_question + ("\nConversation references:\n"+history if history else "")
             + ("\nVersions: "+versions if versions else "")
             + ("\nDocument population:\n"+"\n".join(self.source_titles) if self.source_titles else ""))
 
@@ -690,15 +694,14 @@ class SharedEvidenceEncoder:
         import torch
         from adapters.shared_heads import FIELD_ROLES
         started = time.perf_counter()
-        batches = self._batches(query, units)
+        by_id = {unit.unit_id: unit for unit in units}
         rankings, bindings, binding_vectors = [], [], []
         token_count = 0
         needs = [(i, need) for i, need in enumerate(query.task.needs)
                  if query.task.coverage_scope != "all_supplied_documents"
                  or need.operation in {"count", "sum", "mean", "min", "max", "group"}]
         with torch.no_grad():
-            for batch in batches:
-                states, documents, scores, addresses, count, query_vector = outputs[tuple(unit.unit_id for unit in batch)]
+            for states, documents, scores, addresses, count, query_vector in outputs.values():
                 token_count += count
                 rankings.append((documents, scores, query_vector))
                 if not needs:
@@ -717,7 +720,7 @@ class SharedEvidenceEncoder:
                         for first, last in _spans(labels[need_index, :, role_index].tolist(), sources):
                             owner, key, left, _ = sources[first]
                             right = sources[last-1][3]
-                            unit = next(item for item in batch if item.unit_id == owner)
+                            unit = by_id[owner]
                             base = unit.source_spans[0].start
                             vector = (source_states[first:last].mean(0)
                                 if (role in {"filter", "period"} and need.condition_ids)
@@ -761,7 +764,7 @@ class SharedEvidenceEncoder:
             query_sum = torch.zeros(512, device=self.model.device)
         return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents.cpu(), relevance.cpu(),
             tuple(bindings), self.heads,
-            {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(batches)},
+            {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(outputs)},
             query_sum.cpu())
 
     def close(self):

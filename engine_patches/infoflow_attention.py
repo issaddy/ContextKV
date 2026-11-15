@@ -121,31 +121,79 @@ def paged_attention(query, key_pool, value_pool, rows, cosine, sine, query_posit
     return output
 
 
-def paged_decode(query, key_pool, value_pool, rows, cosine, sine, positions, rotary, workspace):
-    """One paged attention launch for all ready decode requests."""
-    from sglang.kernels.ops.attention.decode_attention import _fwd_kernel_stage2
+@triton.jit
+def _pack_decode_rows(ROWS, ORDER, POSITIONS, INDPTR, INPUT_LENGTHS, LENGTHS, INDICES,
+                      WIDTH: tl.constexpr, SEGMENTS: tl.constexpr, TILE: tl.constexpr):
+    request = tl.program_id(0)
+    offsets = tl.program_id(1)*TILE + tl.arange(0, TILE)
+    valid = offsets <= tl.load(POSITIONS+request)
+    positions = tl.load(ORDER+request*WIDTH+offsets, valid, other=0)
+    slots = tl.load(ROWS+request*WIDTH+positions, valid, other=0)
+    first = tl.load(INDPTR+request*SEGMENTS)
+    original = tl.load(INPUT_LENGTHS+request)
+    private = tl.load(LENGTHS+request*SEGMENTS)
+    generated = tl.load(POSITIONS+request)+1-original
+    destination = tl.where(offsets >= original, private+offsets-original,
+                           tl.where(offsets >= private, offsets+generated, offsets))
+    tl.store(INDICES+first+destination, slots, valid)
+
+
+def pack_decode_rows(rows, order, positions, indptr, input_lengths, lengths, segments):
+    indices = torch.empty(rows.numel(), device=rows.device, dtype=rows.dtype)
+    _pack_decode_rows[(len(rows), triton.cdiv(rows.shape[1], 256))](
+        rows, order, positions, indptr, input_lengths, lengths, indices, rows.shape[1], segments, 256)
+    return indices
+
+
+@triton.jit
+def _segment_queries(Q, COSINE, SINE, OUT, HEADS: tl.constexpr, DIM: tl.constexpr,
+                     ROTARY_DIM: tl.constexpr, SEGMENTS: tl.constexpr, NEOX: tl.constexpr,
+                     QS0: tl.constexpr, QS1: tl.constexpr):
+    segment, head = tl.program_id(0), tl.program_id(1)
+    dims = tl.arange(0, DIM)
+    if NEOX:
+        pair = (dims+ROTARY_DIM//2) % ROTARY_DIM
+        frequency = dims % (ROTARY_DIM//2)
+        sign = tl.where(dims < ROTARY_DIM//2, -1., 1.)
+    else:
+        pair = dims ^ 1
+        frequency = dims//2
+        sign = tl.where(dims % 2 == 0, -1., 1.)
+    first = segment//SEGMENTS*QS0+head*QS1
+    q = tl.load(Q+first+dims).to(tl.float32)
+    paired = tl.load(Q+first+pair).to(tl.float32)
+    c = tl.load(COSINE+segment*(ROTARY_DIM//2)+frequency, dims < ROTARY_DIM, other=1.)
+    s = tl.load(SINE+segment*(ROTARY_DIM//2)+frequency, dims < ROTARY_DIM, other=0.)
+    tl.store(OUT+(segment*HEADS+head)*DIM+dims, q*c+paired*sign*s)
+
+
+def segmented_decode(query, key_pool, value_pool, indptr, indices, cosine, sine,
+                     segments, rotary, workspace):
+    """Rotate each block's query once, then reuse native GQA attention and LSE merging.
+
+    Shared blocks retain local RoPE. Private replay and generated tokens form a
+    global-position segment. Each context token belongs to exactly one segment.
+    """
+    from sglang.kernels.ops.attention.decode_attention import (
+        _decode_grouped_att_m_fwd, _fwd_kernel_stage2)
     batch, heads, width = query.shape
-    length = rows.shape[1]
-    splits = min(32, triton.cdiv(length, 1024))
-    shape = (batch, heads, splits, width)
-    if workspace.get("shape") != shape:
-        workspace.update(shape=shape, partial=torch.empty(shape, dtype=torch.float32, device=query.device),
-            lse=torch.empty(shape[:-1], dtype=torch.float32, device=query.device),
-            indptr=torch.arange(batch+1, device=query.device, dtype=torch.int32)*length)
-    partial, lse = workspace["partial"], workspace["lse"]
+    shape = (batch*segments, heads, 1, width)
+    if not workspace:
+        workspace.update(partial=torch.zeros(shape, dtype=torch.float32, device=query.device),
+            lse=torch.full(shape[:-1], -torch.inf, dtype=torch.float32, device=query.device),
+            splits=torch.ones(batch*segments, dtype=torch.int32, device=query.device),
+            merge_indptr=torch.arange(batch+1, device=query.device, dtype=torch.int32)*segments)
+    rotated = query.new_empty((batch*segments, heads, width))
+    _segment_queries[(batch*segments, heads)](query, cosine, sine, rotated,
+        heads, width, rotary.cos_sin_cache.shape[-1], segments, rotary.is_neox_style,
+        query.stride(0), query.stride(1), num_warps=4)
+    partial, lse = workspace['partial'], workspace['lse']
+    _decode_grouped_att_m_fwd(rotated, key_pool, value_pool, partial, lse,
+        indptr, indices, workspace['splits'], 1, width**-.5, 0.)
+    partial = partial.view(batch, segments, heads, width).permute(0, 2, 1, 3)
     output = torch.empty_like(query)
-    groups = heads//key_pool.shape[1]
-    _paged_attention[(batch, key_pool.shape[1], splits)](
-        query, key_pool, value_pool, rows, cosine, sine, positions, partial, lse, 1, length,
-        query.stride(0), query.stride(1), key_pool.stride(0), key_pool.stride(1),
-        value_pool.stride(0), value_pool.stride(1), partial.stride(0), partial.stride(1),
-        cosine.stride(1), groups, heads, width, rotary.cos_sin_cache.shape[-1],
-        rotary.is_neox_style, width**-.5, max(16,triton.next_power_of_2(groups)), 64, splits,
-        True, rows.stride(0), cosine.stride(0), num_warps=4)
-    if splits == 1:
-        return partial[:, :, 0].to(query.dtype)
-    _fwd_kernel_stage2[(batch, heads)](partial, lse, output, 1., workspace["indptr"],
-        workspace["indptr"], None, partial.stride(0), partial.stride(1), partial.stride(2),
-        output.stride(0), output.stride(1), MAX_KV_SPLITS=splits, MIN_BLOCK_KV=64,
-        BLOCK_DV=width, Lv=width, HAS_SINK=False, FORCED_KV_SPLITS=splits, num_warps=4, num_stages=2)
+    _fwd_kernel_stage2[(batch, heads)](partial, lse, output, 1., workspace['merge_indptr'],
+        workspace['merge_indptr'], None, partial.stride(0), partial.stride(1), partial.stride(2),
+        output.stride(0), output.stride(1), MAX_KV_SPLITS=segments, MIN_BLOCK_KV=1,
+        BLOCK_DV=width, Lv=width, HAS_SINK=False, FORCED_KV_SPLITS=segments, num_warps=4, num_stages=2)
     return output
