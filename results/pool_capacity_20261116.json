@@ -1,0 +1,334 @@
+{
+  "protocol": {
+    "questions_per_benchmark": 20,
+    "sessions_per_benchmark": 4,
+    "history": "P3 own committed",
+    "concurrency": 4,
+    "gpu_kv_pool_gib": 4,
+    "gpu_kv_pool_tokens": 16384,
+    "generator": "Qwen3-32B BF16",
+    "devices": [
+      4,
+      5
+    ],
+    "auxiliary_devices": "both query and evidence on GPU 5",
+    "code": "992a30c",
+    "concurrent_workload": "MultiDoc2Dial generation on GPUs 6,7",
+    "cohorts": "results/cooperation_optimization.json",
+    "comparison_8g": "results/concurrency_20261116.json"
+  },
+  "benchmarks": {
+    "multidoc2dial": {
+      "ordinary_rag": {
+        "declared": 20,
+        "recorded": 20,
+        "completed": 20,
+        "scored": 20,
+        "completion_rate": 1.0,
+        "missing_execution_task_ids": [],
+        "unresolved_task_ids": [],
+        "failed_task_ids": [],
+        "blocked_task_ids": [],
+        "unscored_answer_task_ids": [],
+        "queue_primary_score": 0.1565832231934007,
+        "queue_score_bounds": [
+          0.1565832231934007,
+          0.1565832231934007
+        ],
+        "components": {
+          "f1": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.1565832231934007,
+              0.1565832231934007
+            ]
+          }
+        },
+        "scored_subset_primary": 0.1565832231934007,
+        "benchmark_metrics": {
+          "exact_match": {
+            "mean": 0.0,
+            "scored": 20
+          },
+          "f1": {
+            "mean": 0.1565832231934007,
+            "scored": 20
+          }
+        },
+        "cost": {
+          "mean_complete_ms": 4273.991302773356,
+          "p95_complete_ms": 8538.506121560931,
+          "total_input_tokens": 23607.0,
+          "total_output_tokens": 2846.0,
+          "online_compute_ms": 83288.53770717978,
+          "actual_prefill_tokens": 19063.0,
+          "actual_device_hit_tokens": 4544.0,
+          "actual_host_loaded_tokens": 0.0,
+          "new_compute_kv_pages": 352.0,
+          "gpu_gib_seconds": 2292.9124605338366,
+          "gpu_peak_gib": 78.28125,
+          "host_gib_seconds": 656.8630140075552,
+          "host_peak_gib": 22.471936225891113,
+          "gpu_kv_peak_tokens": 16320,
+          "gpu_kv_peak_gib": 3.984375,
+          "gpu_kv_active_peak_tokens": 5760,
+          "online_tokens": 26453.0,
+          "token_accounting": "fixed_generation_model",
+          "p95_delivered_ms": 8538.506121560931
+        },
+        "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
+        "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"
+      },
+      "contextkv": {
+        "declared": 20,
+        "recorded": 20,
+        "completed": 20,
+        "scored": 20,
+        "completion_rate": 1.0,
+        "missing_execution_task_ids": [],
+        "unresolved_task_ids": [],
+        "failed_task_ids": [],
+        "blocked_task_ids": [],
+        "unscored_answer_task_ids": [],
+        "queue_primary_score": 0.27690869393451484,
+        "queue_score_bounds": [
+          0.27690869393451484,
+          0.27690869393451484
+        ],
+        "components": {
+          "f1": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.27690869393451484,
+              0.27690869393451484
+            ]
+          }
+        },
+        "scored_subset_primary": 0.27690869393451484,
+        "benchmark_metrics": {
+          "exact_match": {
+            "mean": 0.0,
+            "scored": 20
+          },
+          "f1": {
+            "mean": 0.27690869393451484,
+            "scored": 20
+          }
+        },
+        "cost": {
+          "mean_complete_ms": 2868.8746320083737,
+          "p95_complete_ms": 5578.179449029267,
+          "total_input_tokens": 11673.0,
+          "total_output_tokens": 1556.0,
+          "online_compute_ms": 54801.10860988498,
+          "actual_prefill_tokens": 10969.0,
+          "actual_device_hit_tokens": 384.0,
+          "actual_host_loaded_tokens": 320.0,
+          "new_compute_kv_pages": 206.0,
+          "gpu_gib_seconds": 1398.41023489293,
+          "gpu_peak_gib": 78.984375,
+          "host_gib_seconds": 420.54213020389255,
+          "host_peak_gib": 23.84919548034668,
+          "gpu_kv_peak_tokens": 4480,
+          "gpu_kv_peak_gib": 1.09375,
+          "gpu_kv_active_peak_tokens": 4032,
+          "online_tokens": 13229.0,
+          "token_accounting": "fixed_generation_model",
+          "p95_delivered_ms": 5578.179449029267
+        },
+        "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
+        "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"
+      }
+    },
+    "mtrag": {
+      "ordinary_rag": {
+        "declared": 20,
+        "recorded": 20,
+        "completed": 20,
+        "scored": 20,
+        "completion_rate": 1.0,
+        "missing_execution_task_ids": [],
+        "unresolved_task_ids": [],
+        "failed_task_ids": [],
+        "blocked_task_ids": [],
+        "unscored_answer_task_ids": [],
+        "queue_primary_score": 0.5401861707515649,
+        "queue_score_bounds": [
+          0.5401861707515649,
+          0.5401861707515649
+        ],
+        "components": {
+          "RL_F": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.7761916208849999,
+              0.7761916208849999
+            ]
+          },
+          "RB_llm": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.79,
+              0.79
+            ]
+          },
+          "RB_alg": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.33339151730849614,
+              0.33339151730849614
+            ]
+          }
+        },
+        "scored_subset_primary": 0.5401861707515649,
+        "benchmark_metrics": {
+          "RB_alg": {
+            "mean": 0.33339151730849614,
+            "scored": 20
+          },
+          "RB_alg_idk": {
+            "mean": 0.33339151730849614,
+            "scored": 20
+          },
+          "RB_llm": {
+            "mean": 0.79,
+            "scored": 20
+          },
+          "RB_llm_idk": {
+            "mean": 0.79,
+            "scored": 20
+          },
+          "RL_F": {
+            "mean": 0.7761916208849999,
+            "scored": 20
+          },
+          "RL_F_idk": {
+            "mean": 0.7761916208849999,
+            "scored": 20
+          }
+        },
+        "cost": {
+          "mean_complete_ms": 19624.61681626737,
+          "p95_complete_ms": 28870.679362118248,
+          "total_input_tokens": 100556.0,
+          "total_output_tokens": 8861.0,
+          "online_compute_ms": 389287.92568296194,
+          "actual_prefill_tokens": 89676.0,
+          "actual_device_hit_tokens": 6720.0,
+          "actual_host_loaded_tokens": 4160.0,
+          "new_compute_kv_pages": 1549.0,
+          "gpu_gib_seconds": 9102.63061183795,
+          "gpu_peak_gib": 78.408203125,
+          "host_gib_seconds": 2624.0692029729735,
+          "host_peak_gib": 22.52189826965332,
+          "gpu_kv_peak_tokens": 16384,
+          "gpu_kv_peak_gib": 4.0,
+          "gpu_kv_active_peak_tokens": 15168,
+          "online_tokens": 109417.0,
+          "token_accounting": "fixed_generation_model",
+          "p95_delivered_ms": 28870.679362118248
+        },
+        "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
+        "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"
+      },
+      "contextkv": {
+        "declared": 20,
+        "recorded": 20,
+        "completed": 20,
+        "scored": 20,
+        "completion_rate": 1.0,
+        "missing_execution_task_ids": [],
+        "unresolved_task_ids": [],
+        "failed_task_ids": [],
+        "blocked_task_ids": [],
+        "unscored_answer_task_ids": [],
+        "queue_primary_score": 0.6547178948422407,
+        "queue_score_bounds": [
+          0.6547178948422407,
+          0.6547178948422407
+        ],
+        "components": {
+          "RL_F": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.88037948163,
+              0.88037948163
+            ]
+          },
+          "RB_llm": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.795,
+              0.795
+            ]
+          },
+          "RB_alg": {
+            "observed_count": 20,
+            "unscored_answers": 0,
+            "bounds": [
+              0.4569567905202948,
+              0.4569567905202948
+            ]
+          }
+        },
+        "scored_subset_primary": 0.6547178948422407,
+        "benchmark_metrics": {
+          "RB_alg": {
+            "mean": 0.4569567905202948,
+            "scored": 20
+          },
+          "RB_alg_idk": {
+            "mean": 0.4569567905202948,
+            "scored": 20
+          },
+          "RB_llm": {
+            "mean": 0.795,
+            "scored": 20
+          },
+          "RB_llm_idk": {
+            "mean": 0.795,
+            "scored": 20
+          },
+          "RL_F": {
+            "mean": 0.88037948163,
+            "scored": 20
+          },
+          "RL_F_idk": {
+            "mean": 0.88037948163,
+            "scored": 20
+          }
+        },
+        "cost": {
+          "mean_complete_ms": 6010.733238607645,
+          "p95_complete_ms": 9784.025801718237,
+          "total_input_tokens": 22493.0,
+          "total_output_tokens": 2998.0,
+          "online_compute_ms": 112884.07041877508,
+          "actual_prefill_tokens": 20893.0,
+          "actual_device_hit_tokens": 1536.0,
+          "actual_host_loaded_tokens": 64.0,
+          "new_compute_kv_pages": 382.0,
+          "gpu_gib_seconds": 2830.908296494046,
+          "gpu_peak_gib": 79.033203125,
+          "host_gib_seconds": 853.1855050165682,
+          "host_peak_gib": 24.133047103881836,
+          "gpu_kv_peak_tokens": 6976,
+          "gpu_kv_peak_gib": 1.703125,
+          "gpu_kv_active_peak_tokens": 6592,
+          "online_tokens": 25491.0,
+          "token_accounting": "fixed_generation_model",
+          "p95_delivered_ms": 9784.025801718237
+        },
+        "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
+        "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"
+      }
+    }
+  }
+}
