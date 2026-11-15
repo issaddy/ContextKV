@@ -181,7 +181,8 @@ class CooperativeController:
                             tuple(need.need_id for need in state.query.task.needs), state.completed_needs)
                         return self.stop.choose(summary, self._value_state(state, arrived),
                                                 self.prices, can_continue=True)
-                    if await asyncio.to_thread(continuation) == "finish":
+                    if (self.settings.get("continuation_policy", "value") == "value"
+                            and await asyncio.to_thread(continuation) == "finish"):
                         break
                     state = await provider.expand(state)
                     auxiliary = {**auxiliary,
@@ -205,6 +206,8 @@ class CooperativeController:
     async def prepare_state(self, state, snapshot, complete):
         """Select useful evidence before spending model work on its representation."""
         await self._select_evidence(state, snapshot, state.computations)
+        if self.settings.get("document_compute", True) is False:
+            return
         previous = state.computations
         await self.read_required(state, snapshot, complete)
         if state.computations != previous:
@@ -441,6 +444,11 @@ class CooperativeController:
             elif state.query.task.coverage_scope == "all_supplied_documents":
                 ids = state.evidence.project_population(units, body_tokens=budget,
                     cost_model=costs, seconds_price=self.prices.seconds)
+            elif self.settings.get("evidence_selection", "utility") == "ranked":
+                sizes = {unit.unit_id: unit.body_tokens for unit in units}
+                frontier = state.evidence.frontier(units)
+                ids = costs.order(next((ids for ids in reversed(frontier)
+                    if sum(sizes[identity] for identity in ids) <= budget), ()))
             else:
                 ids = state.evidence.select(units, body_tokens=budget,
                     cost_model=costs, seconds_price=self.prices.seconds,
