@@ -738,6 +738,8 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                         state.runtime.cache.free_kv_row(state.request.kv, [(state.score_start, state.score_end)])
                         state.transferred_ranges.append((state.score_start, state.score_end))
                         state.scores = None
+                        state.local_positions = state.position_cosine = state.position_sine = None
+                        state.attention_workspace.clear()
                 for position in range(max(first, state.work_length), end):
                     global_position = positions.new_tensor(position - state.work_length + len(state.input_ids))
                     state.row[global_position] = work_row[position]

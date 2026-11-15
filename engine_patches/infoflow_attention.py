@@ -15,36 +15,18 @@ def _paged_attention(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT, LSE,
                      position_stride: tl.constexpr, GROUPS: tl.constexpr, HEADS: tl.constexpr,
                      HEAD_DIM: tl.constexpr, ROTARY_DIM: tl.constexpr,
                      NEOX: tl.constexpr, SCALE: tl.constexpr,
-                     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, SPLITS: tl.constexpr,
-                     BATCHED: tl.constexpr, ROW_STRIDE: tl.constexpr, COS_BATCH_STRIDE: tl.constexpr):
+                     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, SPLITS: tl.constexpr):
     query_block, head = tl.program_id(0), tl.program_id(1)
     split = tl.program_id(2)
     dimensions = tl.arange(0, HEAD_DIM)
-    if BATCHED:
-        Q += query_block * qs0
-        OUT += query_block * os0
-        LSE += query_block * HEADS * SPLITS
-        ROWS += query_block * ROW_STRIDE
-        COSINE += query_block * COS_BATCH_STRIDE
-        SINE += query_block * COS_BATCH_STRIDE
-        POSITIONS += query_block
-        kv_head = head
-        lanes = tl.arange(0, BLOCK_M)
-        heads = head * GROUPS + lanes
-        valid_rows = lanes < GROUPS
-        q = tl.load(Q + heads[:, None] * qs1 + dimensions[None, :], valid_rows[:, None], other=0)
-        positions = tl.where(valid_rows, tl.load(POSITIONS), -1)
-        output_offsets = heads[:, None] * os1 + split*HEAD_DIM + dimensions[None, :]
-        lse_offsets = heads*SPLITS + split
-    else:
-        kv_head = head // GROUPS
-        rows = query_block * BLOCK_M + tl.arange(0, BLOCK_M)
-        valid_rows = rows < queries
-        q = tl.load(Q + rows[:, None] * qs0 + head * qs1 + dimensions[None, :],
-                    valid_rows[:, None], other=0)
-        positions = tl.load(POSITIONS + rows, valid_rows, other=-1)
-        output_offsets = rows[:, None] * os0 + head * os1 + split*HEAD_DIM + dimensions[None, :]
-        lse_offsets = (rows*HEADS+head)*SPLITS+split
+    kv_head = head // GROUPS
+    rows = query_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    valid_rows = rows < queries
+    q = tl.load(Q + rows[:, None] * qs0 + head * qs1 + dimensions[None, :],
+                valid_rows[:, None], other=0)
+    positions = tl.load(POSITIONS + rows, valid_rows, other=-1)
+    output_offsets = rows[:, None] * os0 + head * os1 + split*HEAD_DIM + dimensions[None, :]
+    lse_offsets = (rows*HEADS+head)*SPLITS+split
     maximum = tl.full((BLOCK_M,), -float('inf'), tl.float32)
     denominator = tl.zeros((BLOCK_M,), tl.float32)
     accumulated = tl.zeros((BLOCK_M, HEAD_DIM), tl.float32)
@@ -111,7 +93,7 @@ def paged_attention(query, key_pool, value_pool, rows, cosine, sine, query_posit
         value_pool.stride(0), value_pool.stride(1), partial.stride(0), partial.stride(1),
         cosine.stride(0), query.shape[1] // key_pool.shape[1], query.shape[1],
         query.shape[-1], rotary.cos_sin_cache.shape[-1], rotary.is_neox_style,
-        query.shape[-1] ** -.5, 16, 64, splits, False, 0, 0, num_warps=4)
+        query.shape[-1] ** -.5, 16, 64, splits, num_warps=4)
     if splits > 1:
         _fwd_kernel_stage2[(1, query.shape[1])](partial, lse, output, 1., workspace["indptr"],
             workspace["indptr"], None, partial.stride(0), partial.stride(1), partial.stride(2),

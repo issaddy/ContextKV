@@ -259,14 +259,14 @@ class QwenInfoFlow:
         graphs, state = states[0].runtime.decode_graphs, states[0]
         key = count, bucket, segments
         if key not in graphs:
-            width = state.position_cosine.shape[1]
+            width = self.layers[0].self_attn.rotary_emb.cos_sin_cache.shape[1]//2
             graphs[key] = SimpleNamespace(pool=state.pool,
                 row=state.row.new_zeros((count, bucket)),
                 order=state.row.new_zeros((count, bucket)),
                 lengths=state.row.new_zeros((count, segments), dtype=torch.int32),
                 input_lengths=state.row.new_zeros(count),
-                position_cosine=state.position_cosine.new_ones((count*segments, width)),
-                position_sine=state.position_sine.new_zeros((count*segments, width)), attention_workspace={},
+                position_cosine=torch.ones((count*segments, width), device=input_ids.device, dtype=torch.float32),
+                position_sine=torch.zeros((count*segments, width), device=input_ids.device, dtype=torch.float32), attention_workspace={},
                 input=input_ids.clone(), position=positions.clone(),
                 batch_indices=torch.arange(count, device=input_ids.device),
                 owners=[None]*count, graph=None)
