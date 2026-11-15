@@ -1,0 +1,217 @@
+{
+  "protocol": {
+    "benchmark": "MT-RAG IBM Cloud",
+    "split": "test",
+    "questions": 205,
+    "history": "P1 reference",
+    "concurrency": 4,
+    "generator": "Qwen3-32B BF16",
+    "devices": [
+      4,
+      6,
+      7
+    ],
+    "note": "Native baseline generated at e4c81a7; ContextKV and LlamaIndex at d4af354. Baseline one missing faithfulness score after one retry. GPU 5 online was idle."
+  },
+  "ordinary_rag": {
+    "declared": 205,
+    "recorded": 205,
+    "completed": 205,
+    "scored": 204,
+    "completion_rate": 1.0,
+    "missing_execution_task_ids": [],
+    "unresolved_task_ids": [],
+    "failed_task_ids": [],
+    "blocked_task_ids": [],
+    "unscored_answer_task_ids": [
+      "e1b602e47ded79a35d8df4eefe194e39<::>2"
+    ],
+    "queue_primary_score": null,
+    "queue_score_bounds": [
+      0.49251069276878157,
+      0.49334345935486396
+    ],
+    "components": {
+      "RL_F": {
+        "observed_count": 204,
+        "unscored_answers": 1,
+        "bounds": [
+          0.6863497151980488,
+          0.6912277639785366
+        ]
+      },
+      "RB_llm": {
+        "observed_count": 205,
+        "unscored_answers": 0,
+        "bounds": [
+          0.6346341463414634,
+          0.6346341463414634
+        ]
+      },
+      "RB_alg": {
+        "observed_count": 205,
+        "unscored_answers": 0,
+        "bounds": [
+          0.3269529420236422,
+          0.3269529420236422
+        ]
+      }
+    },
+    "scored_subset_primary": 0.49332008334797756,
+    "benchmark_metrics": {
+      "RB_alg": {
+        "mean": 0.35355677736712393,
+        "scored": 205
+      },
+      "RB_alg_idk": {
+        "mean": 0.3269529420236422,
+        "scored": 205
+      },
+      "RB_llm": {
+        "mean": 0.7175609756097561,
+        "scored": 205
+      },
+      "RB_llm_idk": {
+        "mean": 0.6346341463414634,
+        "scored": 205
+      },
+      "RL_F": {
+        "mean": 0.7516289618686275,
+        "scored": 204
+      },
+      "RL_F_idk": {
+        "mean": 0.6897141745862745,
+        "scored": 204
+      }
+    },
+    "cost": {
+      "mean_complete_ms": 46158.993088999174,
+      "p95_complete_ms": 66856.68232664463,
+      "total_input_tokens": 953773.0,
+      "total_output_tokens": 53462.0,
+      "online_compute_ms": 1668254.0141008794,
+      "actual_prefill_tokens": 945133.0,
+      "actual_device_hit_tokens": 5312.0,
+      "actual_host_loaded_tokens": 3328.0,
+      "new_compute_kv_pages": 15699.0,
+      "gpu_gib_seconds": 36598.626015626054,
+      "gpu_peak_gib": 83.994140625,
+      "host_gib_seconds": 10298.01832246685,
+      "host_peak_gib": 24.276294708251953,
+      "gpu_kv_peak_tokens": 32704,
+      "gpu_kv_peak_gib": 7.984375,
+      "gpu_kv_active_peak_tokens": 23296,
+      "online_tokens": 1007235.0,
+      "token_accounting": "fixed_generation_model",
+      "p95_delivered_ms": 66856.68232664463
+    },
+    "quality_rule": "declared task denominator; confirmed non-delivery is zero; missing outcomes and scores remain unknown",
+    "cost_rule": "all saved requests including failures; incomplete totals retain known lower bounds"
+  },
+  "methods": [
+    {
+      "dataset": "mtrag",
+      "method": "contextkv",
+      "metric": "mtrageval_harmonic",
+      "completed": 205,
+      "requested": 205,
+      "quality": 0.5321997794581788,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.39625742984573514,
+          "scored": 205
+        },
+        "RB_alg_idk": {
+          "mean": 0.37898883039865994,
+          "scored": 205
+        },
+        "RB_llm": {
+          "mean": 0.6751219512195122,
+          "scored": 205
+        },
+        "RB_llm_idk": {
+          "mean": 0.6409756097560976,
+          "scored": 205
+        },
+        "RL_F": {
+          "mean": 0.7320001429590244,
+          "scored": 205
+        },
+        "RL_F_idk": {
+          "mean": 0.6952850829512196,
+          "scored": 205
+        }
+      },
+      "p95_seconds": 40.95667018666863,
+      "total_input_tokens": 249983.0,
+      "total_output_tokens": 28170.0,
+      "gpu_gib_seconds": 24314.661142853933,
+      "host_gib_seconds": 7428.212579166183,
+      "gpu_peak_gib": 81.47265625,
+      "host_peak_gib": 25.733969688415527,
+      "actual_device_hit_tokens": 14848.0,
+      "actual_host_loaded_tokens": 4288.0,
+      "actual_prefill_tokens": 230847.0,
+      "new_compute_kv_pages": 4138.0,
+      "gpu_kv_peak_tokens": 21312,
+      "gpu_kv_peak_gib": 5.203125,
+      "gpu_kv_active_peak_tokens": 17920
+    },
+    {
+      "dataset": "mtrag",
+      "method": "llamaindex",
+      "metric": "mtrageval_harmonic",
+      "completed": 205,
+      "requested": 205,
+      "quality": 0.5392578947162752,
+      "metrics": {
+        "RB_alg": {
+          "mean": 0.3511874928194269,
+          "scored": 205
+        },
+        "RB_alg_idk": {
+          "mean": 0.339959249370518,
+          "scored": 205
+        },
+        "RB_llm": {
+          "mean": 0.7468292682926829,
+          "scored": 205
+        },
+        "RB_llm_idk": {
+          "mean": 0.6990243902439025,
+          "scored": 205
+        },
+        "RL_F": {
+          "mean": 0.9043716616390244,
+          "scored": 205
+        },
+        "RL_F_idk": {
+          "mean": 0.839555407432683,
+          "scored": 205
+        }
+      },
+      "p95_seconds": 69.08106233924627,
+      "total_input_tokens": 958862.0,
+      "total_output_tokens": 71352.0,
+      "gpu_gib_seconds": 46128.80504190911,
+      "host_gib_seconds": 14040.870909805979,
+      "gpu_peak_gib": 87.6953125,
+      "host_peak_gib": 26.968350410461426,
+      "actual_device_hit_tokens": 13056.0,
+      "actual_host_loaded_tokens": 2944.0,
+      "actual_prefill_tokens": 942862.0,
+      "new_compute_kv_pages": 16029.0,
+      "gpu_kv_peak_tokens": 32704,
+      "gpu_kv_peak_gib": 7.984375,
+      "gpu_kv_active_peak_tokens": 19136
+    }
+  ],
+  "interrupted": {
+    "completed": 57,
+    "failed": 56,
+    "recorded": 113,
+    "input_tokens": 45988,
+    "output_tokens": 8581,
+    "resource_note": "Host reload failure; full batch resource integral unavailable."
+  }
+}
