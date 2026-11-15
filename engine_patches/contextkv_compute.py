@@ -311,6 +311,7 @@ class ComputeRuntime:
                 block.host_lock = None
 
     def prepare(self, state):
+        loads = []
         for block in state.blocks:
             if block.owned or block.slots is not None:
                 continue
@@ -329,10 +330,16 @@ class ComputeRuntime:
                 started, loaded = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                 started.record()
                 self.cache.load_back(block.node, req=state.request)
-                self.cache.cache_controller.start_loading()
-                for ack in self.cache.cache_controller.ack_load_queue:
-                    if block.node in ack.node_ids:
-                        torch.cuda.current_stream().wait_event(ack.finish_event)
+                loads.append((block, original_node, started, loaded))
+        if loads:
+            controller = self.cache.cache_controller
+            counter = controller.layer_done_counter
+            counter.events[(counter.producer_index + 1) % counter.num_counters].finish_event.synchronize()
+            controller.start_loading()
+            for ack in controller.ack_load_queue:
+                if any(block.node in ack.node_ids for block, _, _, _ in loads):
+                    torch.cuda.current_stream().wait_event(ack.finish_event)
+            for block, original_node, started, loaded in loads:
                 loaded.record()
                 state.events.append(('transfer', started, loaded, block.host_tokens))
                 match = self._match(block.source_id, block.cache_ids)
