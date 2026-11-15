@@ -151,7 +151,7 @@ class EvidenceEncoding:
         """Use the shared field bindings as soft support, with computed Needs already known."""
         by_id = {unit.unit_id: unit for unit in units}
         positions = {identity: i for i, identity in enumerate(need_ids)}
-        support = self.embeddings.new_zeros((len(self.unit_ids), len(need_ids)))
+        support = [[0.] * len(need_ids) for _ in self.unit_ids]
         for binding in self.bindings:
             if binding.role == "source" and binding.need_id in positions:
                 for i, identity in enumerate(self.unit_ids):
@@ -159,8 +159,9 @@ class EvidenceEncoding:
                            and span.start <= binding.source_span.start and binding.source_span.end <= span.end
                            for span in by_id[identity].source_spans):
                         j = positions[binding.need_id]
-                        support[i, j] = max(float(support[i, j]), binding.score)
-        return support, self.embeddings.new_tensor([identity in completed for identity in need_ids])
+                        support[i][j] = max(support[i][j], binding.score)
+        return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids)),
+                self.embeddings.new_tensor([identity in completed for identity in need_ids]))
 
     def frontier(self, units):
         """Nested relevance-ranked sets, each containing its source dependencies."""
