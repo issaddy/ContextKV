@@ -76,6 +76,7 @@ class ComputeRuntime:
                         prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host,
                                              unpinned_nodes=self._page_nodes(source_id, 'exact')))
             return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs),
+                        queue_depth=len(self.scheduler.waiting_queue),
                         page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':

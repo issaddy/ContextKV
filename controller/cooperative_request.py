@@ -162,19 +162,22 @@ class EvidenceCosts:
         total = self.prompt_tokens+sum(self.lengths[address]+20 for address in addresses)+self.output_tokens
         prefix = max((item for item in self.snapshot["prefixes"]
                       if addresses[:len(item["source_ids"])] == tuple(item["source_ids"])),
-                     key=lambda item: item["gpu_tokens"], default=None)
+                     key=lambda item: (item["gpu_tokens"], item["host_tokens"]), default=None)
         native_new = rounded(max(0, total-(prefix["gpu_tokens"] if prefix else 0)))
         native_pins = sum(prefix["unpinned_nodes"].values()) if prefix else 0
         exact = {"mode": "exact", "milliseconds": native,
-                 "new_tokens": native_new, "pin_tokens": native_pins}
+                 "new_tokens": native_new, "pin_tokens": native_pins,
+                 "gpu_tokens": prefix["gpu_tokens"] if prefix else 0,
+                 "host_tokens": prefix["host_tokens"] if prefix else 0}
         if self.mode == "exact":
             return exact
-        costs, cold, host = self.costs, 0, 0
+        costs, cold, host, gpu = self.costs, 0, 0, 0
         pins, host_nodes, cold_pages = {}, {}, 0
         for address in addresses:
             resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
             length = self.lengths[address]
             if resident["gpu_tokens"] + resident["host_tokens"] >= length:
+                gpu += min(length, resident["gpu_tokens"])
                 host += min(length, resident["host_tokens"])
                 pins.update(resident["unpinned_nodes"])
                 host_nodes.update(resident["host_nodes"])
@@ -189,7 +192,7 @@ class EvidenceCosts:
             self.expected_output["infoflow"]*costs["infoflow_decode_token_ms"] + self.quality_cost)
         approximate = {"mode": "infoflow", "milliseconds": infoflow,
             "new_tokens": cold_pages+sum(host_nodes.values())+rounded(prompt)+rounded(prompt+self.ratio*body+self.output_tokens),
-            "pin_tokens": sum(pins.values())}
+            "pin_tokens": sum(pins.values()), "gpu_tokens": gpu, "host_tokens": host}
         if self.mode == "infoflow":
             return approximate
         return min((exact, approximate), key=lambda item: item["milliseconds"])

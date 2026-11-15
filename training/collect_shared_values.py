@@ -184,10 +184,9 @@ async def collect(args):
                 if warm:
                     request = compile_request(template, row["question"], snapshot.raw_history,
                         source_blocks(units), future_sources=source_blocks(units))
-                    warmed = await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
+                    await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
                         max_new_tokens=1, mode=config["shared"]["runtime"]["kv_mode"],
                         cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
-                    controller.native_state[branch_id] = warmed["meta"]["contextkv_compute"]
                 first = time.monotonic()
                 seen = {unit.unit_id for unit in observed}
                 fresh = tuple(unit for unit in SharedEvidenceProvider._closure(pending[:batch_size], by_id)
@@ -214,7 +213,7 @@ async def collect(args):
                     states[-1]["transition_id"] = transition_id
                 features = StopValueHead.features(encoded.summary(state.selected_ids, state.pool.units,
                     tuple(need.need_id for need in state.query.task.needs), state.completed_needs),
-                    controller._value_state(state, totals, time.monotonic()-paid_seconds, branch_id)).cpu().tolist()
+                    controller._value_state(state, totals, time.monotonic()-paid_seconds)).cpu().tolist()
                 item = await answer(row, state, snapshot, branch_id, totals)
                 states.append({"features": features, "answer": item})
             outputs.append((row, states))

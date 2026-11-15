@@ -73,7 +73,6 @@ class CooperativeController:
         self.store, self.engine, self.template = store, engine, template
         self.settings, self.policy, self.dialogue_mode = settings, policy, dialogue_mode
         self._locks = WeakValueDictionary()
-        self.native_state = {}
         self.reuse = {}
         self.engine_info = None
         self.kv_policy = {}
@@ -94,7 +93,6 @@ class CooperativeController:
 
     async def close_session(self, session_id):
         self._locks.pop(session_id, None)
-        self.native_state.pop(session_id, None)
         self.reuse.pop(session_id, None)
         await self.engine.close_session(session_id)
 
@@ -119,7 +117,6 @@ class CooperativeController:
                 **self.kv_policy, response_schema=schema, cache_scope=cache_scope, cache_namespace=cache_namespace)
             meta = result["meta"]
             native = meta["contextkv_compute"]
-            self.native_state[session_id] = native
             totals["input_tokens"] += meta["prompt_tokens"]
             totals["output_tokens"] += meta["completion_tokens"]
             totals["elapsed_ms"] += result["elapsed_ms"]
@@ -182,7 +179,7 @@ class CooperativeController:
                     def continuation():
                         summary = state.evidence.summary(state.selected_ids, state.pool.units,
                             tuple(need.need_id for need in state.query.task.needs), state.completed_needs)
-                        return self.stop.choose(summary, self._value_state(state, totals, arrived, session_id),
+                        return self.stop.choose(summary, self._value_state(state, totals, arrived),
                                                 self.prices, can_continue=True)
                     if await asyncio.to_thread(continuation) == "finish":
                         break
@@ -451,8 +448,9 @@ class CooperativeController:
             return costs, ids
         state.costs, state.selected_ids = await asyncio.to_thread(select)
 
-    def _value_state(self, state, totals, arrived, session_id):
-        native = {**self.kv_policy["costs"], **self.native_state.get(session_id, {})}
+    def _value_state(self, state, totals, arrived):
+        native = state.costs.costs
+        quote = state.costs.quote(state.selected_ids)
         row_count = sum(len(table.rows) for table in state.document_index.tables.values())
         selected_tokens = sum(unit.body_tokens for unit in state.pool.units if unit.unit_id in state.selected_ids)
         processed = sum(len(state.document_index.tables[identity].rows) for identity in state.processed_tables)
@@ -462,11 +460,12 @@ class CooperativeController:
                 "context_fraction": selected_tokens/self.policy.max_total_model_tokens,
                 "remaining_token_fraction": (self.settings["max_total_tokens"]-totals["input_tokens"]-totals["output_tokens"])/self.settings["max_total_tokens"],
                 "elapsed_seconds": time.monotonic()-arrived,
-                "answer_cost_ms": state.costs.estimate(state.selected_ids) if state.costs else 0.0,
-                "gpu_ready_fraction": min(1., native.get("gpu_ready_tokens", 0)/max(1, selected_tokens)),
-                "host_ready_fraction": min(1., native.get("host_ready_tokens", 0)/max(1, selected_tokens)),
+                "answer_cost_ms": quote["milliseconds"],
+                "gpu_ready_fraction": min(1., quote["gpu_tokens"]/max(1, selected_tokens)),
+                "host_ready_fraction": min(1., quote["host_tokens"]/max(1, selected_tokens)),
+                "queue_depth": state.costs.snapshot["queue_depth"],
                 **{name: native.get(name, 0) for name in (
-                    "queue_depth", "prefill_token_ms", "transfer_token_ms")}}
+                    "prefill_token_ms", "transfer_token_ms")}}
 
     async def _ordinary(self, snapshot, query, request_id, retrieve_evidence, complete, totals, arrived):
         from .cooperative_request import CompiledRequest
