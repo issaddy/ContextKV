@@ -462,7 +462,7 @@ class CooperativeController:
                 "open_need_fraction": len(state.open_needs)/max(1, len(state.query.task.needs)),
                 "unread_row_fraction": (row_count-processed)/max(1, row_count),
                 "context_fraction": selected_tokens/self.policy.max_total_model_tokens,
-                "next_encoding_tokens": sum(unit.body_tokens for unit in upcoming if unit.unit_id not in encoded),
+                "next_source_tokens": sum(unit.body_tokens for unit in upcoming if unit.unit_id not in encoded),
                 "elapsed_seconds": time.monotonic()-arrived,
                 "answer_cost_ms": quote["milliseconds"],
                 "gpu_ready_fraction": min(1., quote["gpu_tokens"]/max(1, selected_tokens)),

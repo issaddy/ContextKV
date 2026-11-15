@@ -9,7 +9,7 @@ from torch import nn
 
 STATE_FIELDS = (
     "remaining_source_fraction", "open_need_fraction", "unread_row_fraction",
-    "context_fraction", "next_encoding_tokens", "elapsed_seconds", "queue_depth",
+    "context_fraction", "next_source_tokens", "elapsed_seconds", "queue_depth",
     "gpu_ready_fraction", "host_ready_fraction", "prefill_token_ms", "transfer_token_ms", "answer_cost_ms",
 )
 SUMMARY_SIZE = 16
