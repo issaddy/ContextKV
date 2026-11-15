@@ -148,7 +148,7 @@ def pack_decode_rows(rows, order, positions, indptr, input_lengths, lengths, seg
 @triton.jit
 def _segment_queries(Q, COSINE, SINE, OUT, HEADS: tl.constexpr, DIM: tl.constexpr,
                      ROTARY_DIM: tl.constexpr, SEGMENTS: tl.constexpr, NEOX: tl.constexpr,
-                     QS0: tl.constexpr, QS1: tl.constexpr):
+                     QS0: tl.constexpr, QS1: tl.constexpr, CS0: tl.constexpr, SS0: tl.constexpr):
     segment, head = tl.program_id(0), tl.program_id(1)
     dims = tl.arange(0, DIM)
     if NEOX:
@@ -162,9 +162,23 @@ def _segment_queries(Q, COSINE, SINE, OUT, HEADS: tl.constexpr, DIM: tl.constexp
     first = segment//SEGMENTS*QS0+head*QS1
     q = tl.load(Q+first+dims).to(tl.float32)
     paired = tl.load(Q+first+pair).to(tl.float32)
-    c = tl.load(COSINE+segment*(ROTARY_DIM//2)+frequency, dims < ROTARY_DIM, other=1.)
-    s = tl.load(SINE+segment*(ROTARY_DIM//2)+frequency, dims < ROTARY_DIM, other=0.)
+    c = tl.load(COSINE+segment*CS0+frequency, dims < ROTARY_DIM, other=1.)
+    s = tl.load(SINE+segment*SS0+frequency, dims < ROTARY_DIM, other=0.)
     tl.store(OUT+(segment*HEADS+head)*DIM+dims, q*c+paired*sign*s)
+
+
+@triton.jit
+def _merge_segments(PARTIAL, LSE, OUT, HEADS: tl.constexpr, DIM: tl.constexpr,
+                    SEGMENTS: tl.constexpr, SPLITS: tl.constexpr):
+    request, head = tl.program_id(0), tl.program_id(1)
+    terms = tl.arange(0, SEGMENTS*SPLITS)
+    offsets = ((request*SEGMENTS+terms//SPLITS)*HEADS+head)*SPLITS + terms%SPLITS
+    scores = tl.load(LSE+offsets)
+    weights = tl.exp(scores-tl.max(scores, 0))
+    dims = tl.arange(0, DIM)
+    values = tl.load(PARTIAL+offsets[:, None]*DIM+dims[None, :])
+    result = tl.sum(weights[:, None]*values, 0)/tl.sum(weights, 0)
+    tl.store(OUT+(request*HEADS+head)*DIM+dims, result)
 
 
 def segmented_decode(query, key_pool, value_pool, indptr, indices, cosine, sine,
@@ -174,26 +188,21 @@ def segmented_decode(query, key_pool, value_pool, indptr, indices, cosine, sine,
     Shared blocks retain local RoPE. Private replay and generated tokens form a
     global-position segment. Each context token belongs to exactly one segment.
     """
-    from sglang.kernels.ops.attention.decode_attention import (
-        _decode_grouped_att_m_fwd, _fwd_kernel_stage2)
+    from sglang.kernels.ops.attention.decode_attention import _decode_grouped_att_m_fwd
     batch, heads, width = query.shape
-    shape = (batch*segments, heads, 1, width)
+    splits = 4
+    shape = (batch*segments, heads, splits, width)
     if not workspace:
         workspace.update(partial=torch.zeros(shape, dtype=torch.float32, device=query.device),
             lse=torch.full(shape[:-1], -torch.inf, dtype=torch.float32, device=query.device),
-            splits=torch.ones(batch*segments, dtype=torch.int32, device=query.device),
-            merge_indptr=torch.arange(batch+1, device=query.device, dtype=torch.int32)*segments)
+            splits=torch.full((batch*segments,), splits, dtype=torch.int32, device=query.device))
     rotated = query.new_empty((batch*segments, heads, width))
     _segment_queries[(batch*segments, heads)](query, cosine, sine, rotated,
         heads, width, rotary.cos_sin_cache.shape[-1], segments, rotary.is_neox_style,
-        query.stride(0), query.stride(1), num_warps=4)
+        query.stride(0), query.stride(1), cosine.stride(0), sine.stride(0), num_warps=4)
     partial, lse = workspace['partial'], workspace['lse']
     _decode_grouped_att_m_fwd(rotated, key_pool, value_pool, partial, lse,
-        indptr, indices, workspace['splits'], 1, width**-.5, 0.)
-    partial = partial.view(batch, segments, heads, width).permute(0, 2, 1, 3)
+        indptr, indices, workspace['splits'], splits, width**-.5, 0.)
     output = torch.empty_like(query)
-    _fwd_kernel_stage2[(batch, heads)](partial, lse, output, 1., workspace['merge_indptr'],
-        workspace['merge_indptr'], None, partial.stride(0), partial.stride(1), partial.stride(2),
-        output.stride(0), output.stride(1), MAX_KV_SPLITS=segments, MIN_BLOCK_KV=1,
-        BLOCK_DV=width, Lv=width, HAS_SINK=False, FORCED_KV_SPLITS=segments, num_warps=4, num_stages=2)
+    _merge_segments[(batch, heads)](partial, lse, output, heads, width, segments, splits, num_warps=4)
     return output

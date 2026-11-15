@@ -225,7 +225,8 @@ class ComputeRuntime:
                 for consumer in identities:
                     consumers[consumer] = max(consumers.get(consumer, 0), float(item.get('uses', 0))/len(identities))
         build_value = sum(length * sum(consumers.values()) * marginal_value for length, consumers in cold_consumers.values())
-        quality_loss = float(metadata.get('quality_loss', 0.0))
+        # Approximation is charged for quality loss, never credited as evidence gain.
+        quality_loss = max(0.0, float(metadata.get('quality_loss', 0.0)))
         quality_price_ms = float(metadata.get('quality_price_ms', 0.0))
         mode = metadata.get('mode', 'auto')
         if mode == 'auto':

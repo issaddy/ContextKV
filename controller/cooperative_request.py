@@ -115,7 +115,7 @@ class EvidenceCosts:
         self.prompt_tokens = prompt_tokens-sum(self.lengths[address] for address in self.headers)
         self.output_tokens = min(output_tokens, snapshot["output_tokens"] or output_tokens)
         self.ratio = policy["recompute_ratio"]
-        self.quality_cost = policy.get("quality_loss", 0) * policy.get("quality_price_ms", 0)
+        self.quality_cost = max(0., policy.get("quality_loss", 0)) * policy.get("quality_price_ms", 0)
         self.mode = mode
 
     def addresses(self, ids):

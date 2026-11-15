@@ -282,9 +282,9 @@ class QwenInfoFlow:
                 fixed.lengths[index].copy_(torch.tensor(lengths, device=input_ids.device, dtype=torch.int32))
                 fixed.input_lengths[index] = len(state.input_ids)
                 offsets = (*state.decode_offsets, *((0,)*(segments-len(state.decode_offsets))))
-                rotary = self.layers[0].self_attn.rotary_emb.cos_sin_cache.float()
-                old_cos, old_sin = rotary[list(offsets)].chunk(2, -1)
-                new_cos, new_sin = rotary[0].chunk(2, -1)
+                rotary = self.layers[0].self_attn.rotary_emb.cos_sin_cache
+                old_cos, old_sin = rotary[list(offsets)].float().chunk(2, -1)
+                new_cos, new_sin = rotary[0].float().chunk(2, -1)
                 norm = old_cos.square()+old_sin.square()
                 fixed.position_cosine[index*segments:(index+1)*segments].copy_((new_cos*old_cos+new_sin*old_sin)/norm)
                 fixed.position_sine[index*segments:(index+1)*segments].copy_((new_sin*old_cos-new_cos*old_sin)/norm)

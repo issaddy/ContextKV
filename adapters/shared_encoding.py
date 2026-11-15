@@ -89,8 +89,7 @@ class QueryEncoding:
 
     @property
     def evidence_query(self):
-        references = (*self.task.working_history,
-            *(ref for need in self.task.needs for ref in need.subject_refs),
+        references = (*(ref for need in self.task.needs for ref in need.subject_refs),
             *(ref for condition in self.task.conditions for ref in condition.value_spans),
             *self.task.version_intent.time_refs)
         history = self.text(tuple(ref for ref in references if ref.turn_id != self.task.current_turn_id))
