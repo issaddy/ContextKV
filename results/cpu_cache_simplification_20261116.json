@@ -1,0 +1,37 @@
+{
+  "revision": "8f9fd328458d7df23e63da7f99b01822c2236679",
+  "method": "Baseline git-show versus current production EvidenceCosts; synthetic sources and cache snapshots",
+  "constructor": {
+    "method": "Actual baseline git-show and patched constructor; 7 repetitions, median CPU wall time",
+    "tokenizer": "Deterministic one-character/token fixture, 256-token sources; identical tokenizer calls, no model inference",
+    "timings": [
+      {
+        "sources": 128,
+        "units": 128,
+        "baseline_ms": 4.752507999910449,
+        "patched_ms": 2.2428229995057336,
+        "speedup": 2.1189848690502067
+      },
+      {
+        "sources": 512,
+        "units": 512,
+        "baseline_ms": 55.79604000013205,
+        "patched_ms": 8.315250000123342,
+        "speedup": 6.710085685854835
+      },
+      {
+        "sources": 1024,
+        "units": 1024,
+        "baseline_ms": 247.29684100020677,
+        "patched_ms": 16.797627999949327,
+        "speedup": 14.722128683939946
+      }
+    ],
+    "equivalence": {
+      "states": 12,
+      "order_checks": 72,
+      "quote_estimate_fits_checks": 144,
+      "headers_overlap_duplicates_gpu_host": true
+    }
+  }
+}

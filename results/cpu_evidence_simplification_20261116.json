@@ -1,0 +1,52 @@
+{
+  "base_commit": "8f9fd328458d7df23e63da7f99b01822c2236679",
+  "torch": "2.15.0+cpu",
+  "threads": 1,
+  "measurement": "Synthetic source-labelled vectors and actual EvidenceCosts; no model inference",
+  "timing": "One warm-up and three alternating-order repetitions; median CPU wall time",
+  "equivalence": {
+    "cross_document_dependency_cases": 4,
+    "identical_selections": 4,
+    "near_tie_seed": 44,
+    "near_tie_selected_ids": [
+      "u0",
+      "u1",
+      "u2",
+      "u3",
+      "u24"
+    ],
+    "near_tie_equal": true
+  },
+  "timings": [
+    {
+      "candidates": 64,
+      "documents": 8,
+      "dimension": 512,
+      "selected_tokens": 8192,
+      "selected_ids_equal": true,
+      "baseline_ms": 36.73624900056893,
+      "single_quote_ms": 28.919754000526154,
+      "speedup": 1.270282209174413
+    },
+    {
+      "candidates": 256,
+      "documents": 8,
+      "dimension": 512,
+      "selected_tokens": 8192,
+      "selected_ids_equal": true,
+      "baseline_ms": 213.80425699953776,
+      "single_quote_ms": 162.00318800019886,
+      "speedup": 1.3197533927497482
+    },
+    {
+      "candidates": 1024,
+      "documents": 8,
+      "dimension": 512,
+      "selected_tokens": 8192,
+      "selected_ids_equal": true,
+      "baseline_ms": 1012.8914670003724,
+      "single_quote_ms": 760.0369080000746,
+      "speedup": 1.3326872107640764
+    }
+  ]
+}

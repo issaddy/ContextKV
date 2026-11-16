@@ -242,11 +242,13 @@ class EvidenceEncoding:
                 tokens = sum(sizes[j] for j in extra)
                 if not extra or used+tokens > body_tokens:
                     continue
-                if cost_model and not cost_model.fits(identities(selected | extra), preserve_order=True):
+                candidate = identities(selected | extra)
+                quote = cost_model.quote(candidate, preserve_order=True) if cost_model else None
+                if quote and quote["new_tokens"]+quote["pin_tokens"] > cost_model.snapshot["available_tokens"]:
                     continue
                 coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
                 gain = float(((coverage-represented)*weights).sum())
-                extra_price = (cost_model.estimate(identities(selected | extra), preserve_order=True)-price) if cost_model else 0.
+                extra_price = quote["milliseconds"]-price if quote else 0.
                 score = (gain-seconds_price*extra_price/1000)/tokens
                 if score > best_score:
                     best, best_score = extra, score
