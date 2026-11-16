@@ -103,8 +103,12 @@ class EvidenceCosts:
         self.covered_headers = {}
         self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
                             for block in source_headers)
+        fragments = {(block.key, *block.span): block
+                     for block in blocks_for_units(units, source_blocks)}
         for unit in units:
-            blocks = blocks_for_units((unit,), source_blocks)
+            unit_blocks = (fragments[span.source_key, span.start, span.end]
+                           for span in unit.source_spans)
+            blocks = tuple({source_address(block): block for block in unit_blocks}.values())
             self.sources[unit.unit_id] = tuple(source_address(block) for block in blocks)
             missing = with_document_headers(blocks, source_headers)[:-len(blocks)]
             self.covered_headers[unit.unit_id] = set(self.headers)-{source_address(block) for block in missing}

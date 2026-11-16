@@ -162,9 +162,6 @@ class ComputeRuntime:
         scope = metadata.get('cache_scope', 'shared')
         self.costs = {**metadata.get('costs', {}), **self.costs}
         ratio = float(metadata.get('recompute_ratio', .15))
-        prefill = self.costs.get('prefill_token_ms', 1.0)
-        replay = self.costs.get('recompute_token_ms', prefill)
-        marginal_value = max(0.0, prefill - ratio * replay)
         request_demand = {(scope, item['source_id']): {**item, 'recompute_ratio': ratio}
                           for item in metadata.get('demand', ())}
         self.demands[session] = request_demand if metadata.get('mode') != 'exact' else {}
@@ -203,7 +200,6 @@ class ComputeRuntime:
         score = costs.get('score_token_ms', prefill)
         replay = costs.get('recompute_token_ms', prefill)
         transfer = costs.get('transfer_token_ms', prefill * .05)
-        ratio = float(metadata.get('recompute_ratio', .15))
         prompt = len(ids) - warm - cold
         approximate = cold * build + prompt * score + (prompt + (warm + cold) * ratio) * replay + len(host_pages) * transfer
         native = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
@@ -215,24 +211,14 @@ class ComputeRuntime:
         exact_decode = costs.get('exact_decode_token_ms', 0.0)
         approximate += expected_output['infoflow'] * costs.get('infoflow_decode_token_ms', exact_decode)
         exact += expected_output['exact'] * exact_decode
-        # A future consumer saves each source block's work once. Demand for
-        # another block never finances this block's independent construction.
-        cold_consumers = {}
-        for source_id, start, end, match, block_ids in blocks:
-            item = request_demand.get(source_id)
-            if item is not None and 'native_prefix_end' not in item and match.device_prefix_len+match.host_hit_length < len(block_ids):
-                consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, {}))[1]
-                identities = item.get('consumer_ids', ()) or ('next',)
-                for consumer in identities:
-                    consumers[consumer] = max(consumers.get(consumer, 0), float(item.get('uses', 0))/len(identities))
-        build_value = sum(length * sum(consumers.values()) * marginal_value for length, consumers in cold_consumers.values())
+        # Future demand affects retention; admission pays this request's full cost.
         # Approximation is charged for quality loss, never credited as evidence gain.
         quality_loss = max(0.0, float(metadata.get('quality_loss', 0.0)))
         quality_price_ms = float(metadata.get('quality_price_ms', 0.0))
         mode = metadata.get('mode', 'auto')
         if mode == 'auto':
             mode = ('infoflow' if 'prefill_token_ms' in costs and blocks
-                    and approximate + quality_loss * quality_price_ms - build_value < exact
+                    and approximate + quality_loss * quality_price_ms < exact
                     else 'exact')
             cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
                             if match.device_prefix_len+match.host_hit_length < len(tokens))

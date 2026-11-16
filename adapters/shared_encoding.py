@@ -224,37 +224,55 @@ class EvidenceEncoding:
             best = max(members, key=lambda i: float(self.relevance[i]))
             selected.update(closures[best])
         used = sum(sizes[i] for i in selected)
-        similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
-        same_source = torch.zeros_like(similarity)
-        for members in groups.values():
-            same_source[torch.tensor(members)[:, None], torch.tensor(members)[None, :]] = 1
         relevance = self.relevance.clamp_min(0)
-        affinity = similarity*same_source*relevance[None, :]
-        weights = relevance.square()
-        represented = affinity[:, sorted(selected)].amax(1)
+        # Cross-source affinity is zero; a closure contributes only in sources it touches.
+        blocks = []
+        for members in groups.values():
+            positions = {i: j for j, i in enumerate(members)}
+            member_set = set(members)
+            embeddings = self.embeddings[members]
+            affinity = (embeddings@embeddings.T).clamp(0, 1)*relevance[members][None, :]
+            candidates, effects = [], []
+            for i, closure in enumerate(closures):
+                inside = sorted(closure & member_set)
+                if inside:
+                    candidates.append(i)
+                    effects.append(affinity[:, [positions[j] for j in inside]].amax(1))
+            represented = affinity[:, [positions[j] for j in sorted(selected & member_set)]].amax(1)
+            blocks.append((torch.tensor(candidates, device=self.embeddings.device),
+                torch.stack(effects, 1), relevance[members].square(), represented))
         def identities(indices):
             return tuple(units[i].unit_id for i in sorted(indices))
         while True:
             price = cost_model.estimate(identities(selected), preserve_order=True) if cost_model else 0.
+            gains = relevance.new_zeros(len(units))
+            for indexes, effects, weights, represented in blocks:
+                gains[indexes] += ((torch.maximum(represented[:, None], effects)
+                    - represented[:, None])*weights[:, None]).sum(0)
             best, best_score = None, 0.
-            for i, closure in enumerate(closures):
+            for i, gain in enumerate(gains.tolist()):
+                closure = closures[i]
                 extra = closure-selected
                 tokens = sum(sizes[j] for j in extra)
                 if not extra or used+tokens > body_tokens:
                     continue
-                if cost_model and not cost_model.fits(identities(selected | extra), preserve_order=True):
+                candidate = identities(selected | extra)
+                quote = cost_model.quote(candidate, preserve_order=True) if cost_model else None
+                if quote and quote["new_tokens"]+quote["pin_tokens"] > cost_model.snapshot["available_tokens"]:
                     continue
-                coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
-                gain = float(((coverage-represented)*weights).sum())
-                extra_price = (cost_model.estimate(identities(selected | extra), preserve_order=True)-price) if cost_model else 0.
+                extra_price = quote["milliseconds"]-price if quote else 0.
                 score = (gain-seconds_price*extra_price/1000)/tokens
                 if score > best_score:
-                    best, best_score = extra, score
+                    best, best_score = i, score
             if best is None:
                 break
-            selected.update(best)
-            used += sum(sizes[i] for i in best)
-            represented = torch.maximum(represented, affinity[:, sorted(best)].amax(1))
+            extra = closures[best]-selected
+            selected.update(extra)
+            used += sum(sizes[i] for i in extra)
+            for indexes, effects, _, represented in blocks:
+                position = (indexes == best).nonzero().flatten()
+                if len(position):
+                    represented.copy_(torch.maximum(represented, effects[:, int(position[0])]))
         # Source order preserves qualifiers and the sequence of original facts.
         return identities(selected)
 
