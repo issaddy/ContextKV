@@ -2,271 +2,51 @@
   "base_commit": "8f9fd328458d7df23e63da7f99b01822c2236679",
   "torch": "2.15.0+cpu",
   "threads": 1,
-  "seed": 9123,
-  "data": "synthetic source-labelled vectors; no model weights or benchmark traces available",
-  "exact_equivalence": {
-    "cases": 24,
-    "identical_selections": 24,
-    "includes_cross_document_dependencies": true,
-    "uses_production_EvidenceCosts": true
+  "measurement": "Synthetic source-labelled vectors and actual EvidenceCosts; no model inference",
+  "timing": "One warm-up and three alternating-order repetitions; median CPU wall time",
+  "equivalence": {
+    "cross_document_dependency_cases": 4,
+    "identical_selections": 4,
+    "near_tie_seed": 44,
+    "near_tie_selected_ids": [
+      "u0",
+      "u1",
+      "u2",
+      "u3",
+      "u24"
+    ],
+    "near_tie_equal": true
   },
   "timings": [
     {
-      "n": 128,
-      "documents": 1,
-      "dimension": 128,
-      "actual_cost_function": false,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 42.64838900007817,
-      "blocked_ms": 10.202617999766517,
-      "speedup": 4.180141704908893,
-      "original_similarity_elements": 16384,
-      "blocked_similarity_elements": 16384
-    },
-    {
-      "n": 128,
-      "documents": 1,
-      "dimension": 128,
-      "actual_cost_function": true,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 114.63663499989707,
-      "blocked_ms": 66.05703100012761,
-      "speedup": 1.7354191259318879,
-      "original_similarity_elements": 16384,
-      "blocked_similarity_elements": 16384
-    },
-    {
-      "n": 128,
-      "documents": 8,
-      "dimension": 128,
-      "actual_cost_function": false,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 36.74003400010406,
-      "blocked_ms": 12.591070999860676,
-      "speedup": 2.917943517315612,
-      "original_similarity_elements": 16384,
-      "blocked_similarity_elements": 2048
-    },
-    {
-      "n": 128,
-      "documents": 8,
-      "dimension": 128,
-      "actual_cost_function": true,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 95.00311300007525,
-      "blocked_ms": 57.88383800017982,
-      "speedup": 1.6412718348043907,
-      "original_similarity_elements": 16384,
-      "blocked_similarity_elements": 2048
-    },
-    {
-      "n": 512,
-      "documents": 1,
-      "dimension": 128,
-      "actual_cost_function": false,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 234.21463400018183,
-      "blocked_ms": 68.11233100006575,
-      "speedup": 3.438652451932026,
-      "original_similarity_elements": 262144,
-      "blocked_similarity_elements": 262144
-    },
-    {
-      "n": 512,
-      "documents": 1,
-      "dimension": 128,
-      "actual_cost_function": true,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 639.6615789999487,
-      "blocked_ms": 362.7239280003778,
-      "speedup": 1.7634942986151232,
-      "original_similarity_elements": 262144,
-      "blocked_similarity_elements": 262144
-    },
-    {
-      "n": 512,
-      "documents": 8,
-      "dimension": 128,
-      "actual_cost_function": false,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 205.1914539997597,
-      "blocked_ms": 41.07715800000733,
-      "speedup": 4.995269000833092,
-      "original_similarity_elements": 262144,
-      "blocked_similarity_elements": 32768
-    },
-    {
-      "n": 512,
-      "documents": 8,
-      "dimension": 128,
-      "actual_cost_function": true,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 474.52816099985284,
-      "blocked_ms": 246.43544599985034,
-      "speedup": 1.9255678056968355,
-      "original_similarity_elements": 262144,
-      "blocked_similarity_elements": 32768
-    },
-    {
-      "n": 1024,
-      "documents": 8,
-      "dimension": 128,
-      "actual_cost_function": false,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 514.4105539998236,
-      "blocked_ms": 71.39605600013965,
-      "speedup": 7.205027599827327,
-      "original_similarity_elements": 1048576,
-      "blocked_similarity_elements": 131072
-    },
-    {
-      "n": 1024,
-      "documents": 8,
-      "dimension": 128,
-      "actual_cost_function": true,
-      "selected_tokens": 8192,
-      "selected_ids_equal": true,
-      "original_ms": 1171.5497420000247,
-      "blocked_ms": 500.62266900022223,
-      "speedup": 2.3401851624891252,
-      "original_similarity_elements": 1048576,
-      "blocked_similarity_elements": 131072
-    },
-    {
-      "n": 1024,
+      "candidates": 64,
       "documents": 8,
       "dimension": 512,
-      "actual_cost_function": false,
       "selected_tokens": 8192,
       "selected_ids_equal": true,
-      "original_ms": 433.61705100005565,
-      "blocked_ms": 70.37717100001828,
-      "speedup": 6.1613310799313465,
-      "original_similarity_elements": 1048576,
-      "blocked_similarity_elements": 131072
+      "baseline_ms": 36.73624900056893,
+      "single_quote_ms": 28.919754000526154,
+      "speedup": 1.270282209174413
     },
     {
-      "n": 1024,
+      "candidates": 256,
       "documents": 8,
       "dimension": 512,
-      "actual_cost_function": true,
       "selected_tokens": 8192,
       "selected_ids_equal": true,
-      "original_ms": 993.3652909999182,
-      "blocked_ms": 469.21661599981235,
-      "speedup": 2.1170718536538686,
-      "original_similarity_elements": 1048576,
-      "blocked_similarity_elements": 131072
+      "baseline_ms": 213.80425699953776,
+      "single_quote_ms": 162.00318800019886,
+      "speedup": 1.3197533927497482
+    },
+    {
+      "candidates": 1024,
+      "documents": 8,
+      "dimension": 512,
+      "selected_tokens": 8192,
+      "selected_ids_equal": true,
+      "baseline_ms": 1012.8914670003724,
+      "single_quote_ms": 760.0369080000746,
+      "speedup": 1.3326872107640764
     }
-  ],
-  "equal_4096_token_proxy_means_16_seeds": {
-    "production": {
-      "tokens": 4096,
-      "facility_objective": 39.775879710912704,
-      "document_topic_pairs": 16
-    },
-    "deduplicate": {
-      "tokens": 4096,
-      "facility_objective": 38.13602912425995,
-      "document_topic_pairs": 16
-    },
-    "ranked": {
-      "tokens": 4096,
-      "facility_objective": 19.843921542167664,
-      "document_topic_pairs": 4.4375
-    }
-  },
-  "equal_4096_token_cpu_timing": {
-    "baseline": {
-      "median_ms": 17.230599999948026,
-      "selected_tokens": 4096
-    },
-    "optimized": {
-      "median_ms": 5.344877999959863,
-      "selected_tokens": 4096
-    },
-    "deduplicate": {
-      "median_ms": 1.3015630001973477,
-      "selected_tokens": 4096
-    },
-    "ranked": {
-      "median_ms": 0.2837659999386233,
-      "selected_tokens": 4096
-    }
-  },
-  "prefix_counterexample": {
-    "budget_tokens": 512,
-    "two_required_groups": [
-      [
-        "u0",
-        "u1",
-        "u2"
-      ],
-      [
-        "u3"
-      ]
-    ],
-    "production_feasible_candidates": [
-      [],
-      [
-        "u0"
-      ],
-      [
-        "u0",
-        "u1"
-      ]
-    ],
-    "deduplicate_choice": [
-      "u0",
-      "u3"
-    ],
-    "any_frontier_covers_both": false
-  },
-  "version_pair_counterexample": {
-    "budget_tokens": 512,
-    "required_version_pair": [
-      "u2",
-      "u3"
-    ],
-    "required_pair_tokens": 512,
-    "production_feasible_candidates": [
-      [],
-      [
-        "u0"
-      ],
-      [
-        "u0",
-        "u1"
-      ]
-    ],
-    "pair_in_any_candidate": false
-  },
-  "mandatory_seed_capacity_counterexample": {
-    "body_budget_tokens": 512,
-    "selected_body_tokens": 1024,
-    "physical_capacity_tokens": 512,
-    "production_cost_fits": false
-  },
-  "single_quote_comparison": {
-    "n": 1024,
-    "documents": 8,
-    "dimension": 512,
-    "actual_cost_function": true,
-    "selected_tokens": 8192,
-    "selected_ids_equal": true,
-    "original_ms": 979.5847619998312,
-    "blocked_ms": 476.0789520000799,
-    "blocked_single_quote_ms": 268.788086999848,
-    "quote_dedup_speedup": 1.7712055519795007,
-    "total_speedup": 3.6444500682070227
-  }
+  ]
 }

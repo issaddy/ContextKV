@@ -1,263 +1,6 @@
 {
   "revision": "8f9fd328458d7df23e63da7f99b01822c2236679",
-  "method": "Production EvidenceCosts plus baseline git-show and patched working-tree ComputeRuntime.admit AST; mocked residency, no GPU execution",
-  "calibration_source": "results/mechanism.json:infoflow.optimized (four MultiDoc training states, C4)",
-  "assumptions": [
-    "Synthetic geometry, not production trace replay",
-    "Native has no prefix hits on revisits; this favors InfoFlow",
-    "Expected decode lengths and phase costs use the recorded calibration; no new latency/quality measurement"
-  ],
-  "recorded_gpu_pair_replay": [
-    {
-      "task_id": "611468ee1567561df83307d715e1abf5_1",
-      "native_ms": 8545.401528477669,
-      "infoflow_ms": 13007.772736251354,
-      "native_including_seed_ms": 9075.620576739311,
-      "infoflow_including_seed_ms": 14171.766344457865,
-      "infoflow_minus_native_f1": -0.9251392428962526,
-      "cache_order_ms": 10212.92046457529,
-      "cache_order_prefill_saved": 4608,
-      "cache_order_output_delta": 116
-    },
-    {
-      "task_id": "611468ee1567561df83307d715e1abf5_5",
-      "native_ms": 4943.190518766642,
-      "infoflow_ms": 5690.589837729931,
-      "native_including_seed_ms": 5208.9864537119865,
-      "infoflow_including_seed_ms": 6343.00485253334,
-      "infoflow_minus_native_f1": 3.2946105503713574,
-      "cache_order_ms": 5404.703009873629,
-      "cache_order_prefill_saved": 2429,
-      "cache_order_output_delta": 37
-    },
-    {
-      "task_id": "611468ee1567561df83307d715e1abf5_7",
-      "native_ms": 4350.356698036194,
-      "infoflow_ms": 6701.818194240332,
-      "native_including_seed_ms": 4617.52725020051,
-      "infoflow_including_seed_ms": 7369.094468653202,
-      "infoflow_minus_native_f1": -1.5055821371610851,
-      "cache_order_ms": 4104.4053845107555,
-      "cache_order_prefill_saved": 2368,
-      "cache_order_output_delta": -1
-    },
-    {
-      "task_id": "611468ee1567561df83307d715e1abf5_9",
-      "native_ms": 4495.612364262342,
-      "infoflow_ms": 4935.055527836084,
-      "native_including_seed_ms": 4787.471033632755,
-      "infoflow_including_seed_ms": 5643.237676471472,
-      "infoflow_minus_native_f1": 0.5986679637805858,
-      "cache_order_ms": 4315.5099004507065,
-      "cache_order_prefill_saved": 2624,
-      "cache_order_output_delta": 3
-    }
-  ],
-  "measured_pair_total": {
-    "native_ms": 22334.561109542847,
-    "infoflow_ms": 30335.2362960577,
-    "native_including_seed_ms": 23689.605314284563,
-    "infoflow_including_seed_ms": 33527.10334211588
-  },
-  "synthetic_counterexample": {
-    "body_tokens": 4096,
-    "prompt_tokens": 256,
-    "output_cap": 1024,
-    "demanded_nonprefix_block_tokens": 3584,
-    "cold_decisions": [
-      {
-        "uses": 0,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "exact",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 0.0,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      },
-      {
-        "uses": 0.25,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "exact",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 358.8700506886252,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      },
-      {
-        "uses": 0.5,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "exact",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 717.7401013772504,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      },
-      {
-        "uses": 1,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "infoflow",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 1435.4802027545009,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      },
-      {
-        "uses": 2,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "infoflow",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 2870.9604055090017,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      },
-      {
-        "uses": 4,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "infoflow",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 5741.920811018003,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      },
-      {
-        "uses": 8,
-        "quote_mode": "exact",
-        "quote_ms": 7656.580143164643,
-        "mode": "infoflow",
-        "exact": 7656.580143164643,
-        "infoflow": 8903.924326620478,
-        "future_credit": 11483.841622036007,
-        "quality_cost": 0.0,
-        "patched_mode": "exact"
-      }
-    ],
-    "warm_decision": {
-      "quote_mode": "exact",
-      "quote_ms": 7656.580143164643,
-      "mode": "exact",
-      "exact": 7656.580143164643,
-      "infoflow": 8101.368648462281,
-      "future_credit": 0,
-      "quality_cost": 0.0
-    },
-    "modeled_revisit_costs": [
-      {
-        "future_revisits": 0,
-        "native_ms": 7656.580143164643,
-        "forced_infoflow_ms": 8903.924326620478,
-        "existing_auto_after_initial_infoflow_ms": 8903.924326620478
-      },
-      {
-        "future_revisits": 1,
-        "native_ms": 15313.160286329286,
-        "forced_infoflow_ms": 17005.29297508276,
-        "existing_auto_after_initial_infoflow_ms": 16560.50446978512
-      },
-      {
-        "future_revisits": 2,
-        "native_ms": 22969.74042949393,
-        "forced_infoflow_ms": 25106.661623545042,
-        "existing_auto_after_initial_infoflow_ms": 24217.084612949766
-      },
-      {
-        "future_revisits": 4,
-        "native_ms": 38282.90071582321,
-        "forced_infoflow_ms": 41309.398920469604,
-        "existing_auto_after_initial_infoflow_ms": 39530.24489927905
-      },
-      {
-        "future_revisits": 8,
-        "native_ms": 68909.22128848179,
-        "forced_infoflow_ms": 73714.87351431872,
-        "existing_auto_after_initial_infoflow_ms": 70156.56547193762
-      }
-    ],
-    "break_even_revisits": null
-  },
-  "synthetic_sweep": {
-    "production_uses_0_to_1": {
-      "existing": {
-        "cases": 360,
-        "infoflow_choices": 203,
-        "quote_worker_disagreements": 53,
-        "slower_current_request": 53,
-        "never_amortizable": 13,
-        "loses_complete_modeled_chain": 29,
-        "maximum_current_penalty_ms": 1404.899816872624
-      },
-      "A_current_request_only": {
-        "cases": 360,
-        "infoflow_choices": 150,
-        "quote_worker_disagreements": 0,
-        "slower_current_request": 0,
-        "never_amortizable": 0,
-        "loses_complete_modeled_chain": 0,
-        "maximum_current_penalty_ms": 0.0
-      },
-      "B_complete_future_credit": {
-        "cases": 360,
-        "infoflow_choices": 174,
-        "quote_worker_disagreements": 24,
-        "slower_current_request": 24,
-        "never_amortizable": 0,
-        "loses_complete_modeled_chain": 0,
-        "maximum_current_penalty_ms": 566.9066918828212
-      }
-    },
-    "including_uses_2_and_4": {
-      "existing": {
-        "cases": 600,
-        "infoflow_choices": 397,
-        "quote_worker_disagreements": 147,
-        "slower_current_request": 147,
-        "never_amortizable": 67,
-        "loses_complete_modeled_chain": 87,
-        "maximum_current_penalty_ms": 1823.8963793675266
-      },
-      "A_current_request_only": {
-        "cases": 600,
-        "infoflow_choices": 250,
-        "quote_worker_disagreements": 0,
-        "slower_current_request": 0,
-        "never_amortizable": 0,
-        "loses_complete_modeled_chain": 0,
-        "maximum_current_penalty_ms": 0.0
-      },
-      "B_complete_future_credit": {
-        "cases": 600,
-        "infoflow_choices": 310,
-        "quote_worker_disagreements": 60,
-        "slower_current_request": 60,
-        "never_amortizable": 0,
-        "loses_complete_modeled_chain": 0,
-        "maximum_current_penalty_ms": 566.9066918828212
-      }
-    }
-  },
-  "alternatives": {
-    "A": "Delete build_value from admission; choose using this request's full cost, matching EvidenceCosts.quote",
-    "B": "Credit uses * max(0, future Native full cost - future warm InfoFlow full cost); future geometry is assumed equal to this request",
-    "scope": "A executes the patched production admission function; B is an optimistic scalar counterfactual, not a production change or observed future requests"
-  },
-  "quality_calibration": {
-    "states": 4,
-    "states_with_loss": 2,
-    "mean_exact_minus_infoflow": -0.003096284119787996,
-    "charged_mean_loss": 0,
-    "note": "This is an expected-quality target, not a per-request guarantee; averaging before clipping is not inherently an implementation bug."
-  },
+  "method": "Baseline git-show versus current production EvidenceCosts; synthetic sources and cache snapshots",
   "constructor": {
     "method": "Actual baseline git-show and patched constructor; 7 repetitions, median CPU wall time",
     "tokenizer": "Deterministic one-character/token fixture, 256-token sources; identical tokenizer calls, no model inference",
@@ -265,23 +8,23 @@
       {
         "sources": 128,
         "units": 128,
-        "baseline_ms": 4.5004009998592664,
-        "patched_ms": 2.032858999882592,
-        "speedup": 2.2138284062589624
+        "baseline_ms": 4.752507999910449,
+        "patched_ms": 2.2428229995057336,
+        "speedup": 2.1189848690502067
       },
       {
         "sources": 512,
         "units": 512,
-        "baseline_ms": 55.61900200018499,
-        "patched_ms": 8.553539999866189,
-        "speedup": 6.502454188681539
+        "baseline_ms": 55.79604000013205,
+        "patched_ms": 8.315250000123342,
+        "speedup": 6.710085685854835
       },
       {
         "sources": 1024,
         "units": 1024,
-        "baseline_ms": 282.8021360001003,
-        "patched_ms": 17.322055000022374,
-        "speedup": 16.3261308199134
+        "baseline_ms": 247.29684100020677,
+        "patched_ms": 16.797627999949327,
+        "speedup": 14.722128683939946
       }
     ],
     "equivalence": {

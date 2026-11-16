@@ -133,7 +133,6 @@ class CooperativeController:
                          coverage_scope="selected_sources", request_arrived=None):
         arrived = request_arrived if request_arrived is not None else time.monotonic()
         async with self._lock(session_id):
-            work_started = time.monotonic()
             snapshot = self.store.read_snapshot(session_id, corpus_snapshot_id)
             totals = execution_totals()
             auxiliary = {"compute_ms": 0.0}
@@ -180,7 +179,7 @@ class CooperativeController:
                     def continuation():
                         summary = state.evidence.summary(state.selected_ids, state.pool.units,
                             tuple(need.need_id for need in state.query.task.needs), state.completed_needs)
-                        return self.stop.choose(summary, self._value_state(state, work_started),
+                        return self.stop.choose(summary, self._value_state(state, arrived),
                                                 self.prices, can_continue=True)
                     if (self.settings.get("continuation_policy", "value") == "value"
                             and await asyncio.to_thread(continuation) == "finish"):
@@ -222,7 +221,7 @@ class CooperativeController:
                   if population else selected_blocks(state))
         selected_keys = {block.key for block in blocks}
         bound = [program for program in state.programs if program.need_id not in reused
-                 and program.operation in {"count", "sum", "mean", "min", "max", "group"}
+                 and program.operation in {"count", "sum", "mean", "min", "max"}
                  and self._population_complete(state.document_index, program)
                  and all(state.document_index.tables[projection.table_id].source.source_key in selected_keys
                          for projection in program.projections)]
@@ -457,7 +456,7 @@ class CooperativeController:
             return costs, ids
         state.costs, state.selected_ids = await asyncio.to_thread(select)
 
-    def _value_state(self, state, work_started):
+    def _value_state(self, state, arrived):
         from adapters.shared_retrieval import SharedEvidenceProvider
         native = state.costs.costs
         quote = state.costs.quote(state.selected_ids)
@@ -472,7 +471,7 @@ class CooperativeController:
                 "unread_row_fraction": (row_count-processed)/max(1, row_count),
                 "context_fraction": selected_tokens/self.policy.max_total_model_tokens,
                 "next_source_tokens": sum(unit.body_tokens for unit in upcoming if unit.unit_id not in encoded),
-                "elapsed_seconds": time.monotonic()-work_started,
+                "elapsed_seconds": time.monotonic()-arrived,
                 "answer_cost_ms": quote["milliseconds"],
                 "gpu_ready_fraction": min(1., quote["gpu_tokens"]/max(1, selected_tokens)),
                 "host_ready_fraction": min(1., quote["host_tokens"]/max(1, selected_tokens)),
