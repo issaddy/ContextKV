@@ -354,6 +354,7 @@ class CooperativeController:
             yield tuple(pack)
 
     async def _read_mixed_population(self, state, snapshot, complete, need_ids):
+        from itertools import chain, pairwise
         from adapters.document_compute import (DocumentIndex, combine_populations,
             literal_population_projection, merge_projections, quantity)
         from adapters.shared_retrieval import SharedEvidenceProvider, need_scope_signature
@@ -379,14 +380,14 @@ class CooperativeController:
                   if header.source_spans[0].source_key == unit.source_spans[0].source_key))))) for unit in primary)
             by_id = {unit.unit_id: unit for unit in (*primary, *headers)}
             population = tuple(unit.unit_id for unit in primary)
-            packs = tuple(self._source_packs(primary, input_limit, lambda unit: unit.text, dependencies=by_id))
-            sources = tuple(SharedEvidenceProvider._closure(units, by_id) for units in packs)
+            packs = self._source_packs(primary, input_limit, lambda unit: unit.text, dependencies=by_id)
+            packets = ((roots, SharedEvidenceProvider._closure(roots, by_id)) for roots in packs)
             reads, examples, processed_primary = [], {}, set()
-            for i, (roots, packet) in enumerate(zip(packs, sources)):
+            # Only the next packet is needed to describe future KV reuse.
+            for i, ((roots, packet), (_, upcoming)) in enumerate(pairwise(chain(packets, (((), ()),)))):
                 projection = literal_population_projection(state.query, packet, state.pool.source_blocks,
                     targets, population, {unit.unit_id for unit in roots}, examples)
-                future = (blocks_for_units(sources[i+1], state.pool.source_blocks)
-                          if i+1 < len(sources) else ())
+                future = blocks_for_units(upcoming, state.pool.source_blocks)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, future_sources=future, instruction=projection.instruction,
                     system_prompt=self.policy.system_prompt or SYSTEM)

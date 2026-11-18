@@ -144,8 +144,13 @@ class ComputeRuntime:
         ratio = float(metadata.get('recompute_ratio', .15))
         request_demand = {(scope, item['source_id']): {**item, 'recompute_ratio': ratio}
                           for item in metadata.get('demand', ())}
+        prefix = []
+        for block in metadata.get('blocks', ()):
+            prefix.append(block['source_id'])
+            item = request_demand.get((scope, block['source_id']))
+            if item is not None and 'native_prefix_end' in item:
+                item['native_prefix'] = req.cache_salt, tuple(prefix)
         self.demands[session] = request_demand if metadata.get('mode') != 'exact' else {}
-        self._refresh_priorities()
         ids = tuple(req.origin_input_ids)
         page = self.cache.page_size
         blocks, warm, cold, host_pages, gpu_nodes = [], 0, 0, set(), set()
@@ -263,7 +268,7 @@ class ComputeRuntime:
             # Source addresses and global positions remain in state.input_ids.
             req.origin_input_ids = array('q', work)
             req.full_untruncated_fill_ids = array('q', work)
-            self._refresh_priorities()
+        self._refresh_priorities()
         return state
 
     def pin(self, state):
@@ -347,9 +352,11 @@ class ComputeRuntime:
 
     def _consumers(self, source_id, mode='infoflow'):
         values = {}
+        prefix = self.source_prefixes.get(source_id)
         for session, scope in self.demands.items():
             item = scope.get(source_id)
-            if item is not None and (mode != 'exact' or 'native_prefix_end' in item):
+            if item is not None and (mode != 'exact' or (prefix is not None
+                    and item.get('native_prefix') == (prefix['namespace'], prefix['sources']))):
                 identities = item.get('consumer_ids', ()) or ('next',)
                 for consumer in identities:
                     values[session, consumer] = (float(item['uses'])/len(identities), item['recompute_ratio'])
@@ -369,9 +376,12 @@ class ComputeRuntime:
             node = self.cache.tree_core._node_arena.get(node_id)
             if node is None:
                 del self.source_nodes[identity]
-                self.source_prefixes.pop(source_id, None)
+                if mode == 'exact':
+                    self.source_prefixes.pop(source_id, None)
             else:
                 consumers = self._consumers(source_id, mode)
+                if not consumers:
+                    continue
                 while node.parent is not None:
                     values = nodes.setdefault(node.id, {})
                     component = node.component_data[0]

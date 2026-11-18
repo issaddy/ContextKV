@@ -137,7 +137,8 @@ def need_requirements(query):
             roles.append((role, identity))
         named_versions = literal_versions(query.text(refs), [{"version": version} for version in versions])
         comparison = (need.operation == "compare" or
-                      (query.task.version_intent.mode == "compare" and len(query.task.needs) == 1))
+                      (query.task.version_intent.mode == "compare"
+                       and (len(query.task.needs) == 1 or not named_versions)))
         required_versions = (versions if comparison or len(versions) == 1
                              else named_versions)
         requirements[need.need_id] = tuple((role, condition, version)
@@ -184,6 +185,10 @@ class EvidenceEncoding:
     def need_support(self, units, need_ids, completed=()):
         """Per-slot support: each required binding must be present in the selected set."""
         by_id = {unit.unit_id: unit for unit in units}
+        sources = {}
+        for i, identity in enumerate(self.unit_ids):
+            for span in by_id[identity].source_spans:
+                sources.setdefault(span.source_key, []).append((i, span.start, span.end))
         positions = {identity: i for i, identity in enumerate(need_ids)}
         slots = [self.requirements.get(identity, (("source", "", ""),)) for identity in need_ids]
         width = max(map(len, slots), default=1)
@@ -197,10 +202,8 @@ class EvidenceEncoding:
                             and (not version or binding.source_span.source_key.version == version)]
                 if not matching:
                     continue
-                for i, identity in enumerate(self.unit_ids):
-                    if any(span.source_key == binding.source_span.source_key
-                           and span.start <= binding.source_span.start and binding.source_span.end <= span.end
-                           for span in by_id[identity].source_spans):
+                for i, start, end in sources.get(binding.source_span.source_key, ()):
+                    if start <= binding.source_span.start and binding.source_span.end <= end:
                         for slot in matching:
                             support[i][j][slot] = max(support[i][j][slot], binding.score)
         return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids), width),

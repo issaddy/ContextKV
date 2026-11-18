@@ -10,7 +10,7 @@ from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
 from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder
-from adapters.version_structure import VersionIndex, catalogue_versions, resolve_versions
+from adapters.version_structure import VersionIndex, catalogue_versions
 from controller.schema import EvidencePool, SourceSpan
 from controller.schema import OnlineContext, QueryContext, history_messages
 from controller.cooperative_request import EvidenceSelection
@@ -186,7 +186,7 @@ class SharedEvidenceProvider:
             history_turns=tuple(dict.fromkeys(ref.turn_id for ref in history_refs)))
         intent = query.task.version_intent
         families = intent.document_families
-        wanted_versions = resolve_versions(intent, catalogue)
+        wanted_versions = intent.resolved_version_ids
         # The catalogue head resolves as_of text to version IDs during the shared
         # query pass; natural-language date spans are not sortable timestamps.
         version_keys = versions.legal_keys(families=families, versions=wanted_versions,
@@ -194,8 +194,7 @@ class SharedEvidenceProvider:
         if intent.mode in {"explicit", "as_of"} and not wanted_versions:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
-        query.task = replace(query.task, effective_source_scope=legal,
-            version_intent=replace(intent, resolved_version_ids=tuple(wanted_versions)))
+        query.task = replace(query.task, effective_source_scope=legal)
         legal_set = set(legal)
         previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
                                if span.source_key in legal_set)

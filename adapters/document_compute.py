@@ -949,78 +949,10 @@ def merge_projections(projections):
                               tuple(programs.values()), projections[0].operations)
 
 
-def _join_partitions(parts):
-    """Union matching relation partitions before executing their declared join."""
-    groups, entries, combined = [], [], []
-    for index, program in parts:
-        if not program.joins:
-            entries.append([(index, program)])
-            continue
-        required = {program.value_field, *program.entity_fields, *program.group_by, *program.distinct,
-                    *(predicate.field for predicate in program.predicates),
-                    *(name for join in program.joins for name in (*join.left_fields, *join.right_fields))}
-        shape = (program.need_id, program.operation, program.joins, program.value_field, program.entity_fields,
-                 program.predicates, program.group_by, program.distinct,
-                 tuple((tuple(sorted({field.name for field in projection.fields}
-                                     | (required & set(index.tables[projection.table_id].headers)))),
-                        projection.predicates) for projection in program.projections))
-        group = next((items for signature, items in groups if signature == shape), None)
-        if group is None:
-            group = []
-            groups.append((shape, group))
-            entries.append(group)
-        group.append((index, program))
-    for group in entries:
-        if len(group) == 1:
-            combined.extend(group)
-            continue
-        template = group[0][1]
-        required = {template.value_field, *template.entity_fields, *template.group_by, *template.distinct,
-                    *(predicate.field for predicate in template.predicates),
-                    *(name for join in template.joins for name in (*join.left_fields, *join.right_fields))}
-        tables, blocks, population, covered, excluded, unresolved = [], {}, set(), set(), [], []
-        for index, program in group:
-            blocks.update(((block.key, block.span), block) for block in index.blocks)
-            population.update(program.population_table_ids)
-            covered.update(projection.table_id for projection in program.projections)
-            covered.update(program.excluded_table_ids)
-            excluded.extend(span for key in program.excluded_table_ids
-                            for span in (index.tables[key].coverage or (index.tables[key].source,)))
-            unresolved.extend(program.unresolved_conditions)
-        projections = []
-        for position, projection in enumerate(template.projections):
-            names = tuple(dict.fromkeys((*[field.name for field in projection.fields],
-                *(name for name in group[0][0].tables[projection.table_id].headers if name in required))))
-            rows, scope, seen = [], [], set()
-            for index, program in group:
-                source_projection = program.projections[position]
-                source = index.tables[source_projection.table_id]
-                for record in index.project(source_projection, required):
-                    row = tuple(record.fields[name] for name in names)
-                    identity = tuple((cell.source.source_key, cell.source.start, cell.source.end,
-                                      cell.text, cell.unit) for cell in row)
-                    if identity not in seen:
-                        rows.append(row)
-                        seen.add(identity)
-                scope.extend(source.coverage or (source.source,))
-            if position == 0:
-                scope.extend(excluded)
-            identity = f"joined:{template.need_id}:{len(combined)}:{position}"
-            lineage = _unique_spans(scope)
-            tables.append(DocumentTable(identity, names, tuple(None for _ in names), tuple(rows),
-                                        lineage[0], coverage=lineage))
-            projections.append(Projection(identity, tuple(Field(name, column) for column, name in enumerate(names))))
-        program = replace(template, projections=tuple(projections),
-            population_table_ids=(*[table.table_id for table in tables], *sorted(population-covered)),
-            excluded_table_ids=(), unresolved_conditions=tuple(dict.fromkeys(unresolved)))
-        combined.append((DocumentIndex(tables, blocks.values()), program))
-    return combined
-
-
 def combine_populations(parts):
     """Normalize table and prose projections, then aggregate each Need once."""
     tables, blocks, grouped = [], {}, {}
-    for part_index, (index, program) in enumerate(_join_partitions(parts)):
+    for part_index, (index, program) in enumerate(parts):
         if program.operation == "lookup":
             program = replace(program, group_by=())
         blocks.update(((block.key, block.span), block) for block in index.blocks)
