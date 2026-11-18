@@ -65,6 +65,7 @@ class QueryEncoding:
     join_needs: frozenset = frozenset()
     distinct_needs: frozenset = frozenset()
     source_titles: tuple = ()
+    scope_need_vectors: object = None
 
     def text(self, refs):
         merged = []
@@ -595,7 +596,7 @@ class SharedQueryEncoder:
                 frozenset(need.need_id for need, vector in zip(needs, need_vectors)
                           if int(self.heads.join(vector).argmax()) == 1),
                 frozenset(need.need_id for need, vector in zip(needs, need_vectors)
-                          if int(self.heads.distinct(vector).argmax()) == 1))
+                          if int(self.heads.distinct(vector).argmax()) == 1), scope_need_vectors=need_vectors)
 
     def close(self):
         self.ready.close()

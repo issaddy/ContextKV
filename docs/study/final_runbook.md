@@ -49,6 +49,7 @@ config = yaml.safe_load(Path("configs/study.yaml").read_text())
 config["shared"]["query"]["asset_path"] = str(run / "query")
 config["shared"]["evidence"]["asset_path"] = str(run / "evidence")
 config["shared"]["runtime"]["kv_quality_asset"] = str(run / "kv.json")
+config["shared"]["runtime"]["stop_asset"] = str(run / "stop.pt")
 (run / "study.yaml").write_text(yaml.safe_dump(config))
 PYCFG
 
@@ -140,12 +141,12 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ```bash
 python3 -m bench.study evaluate \
-  --config configs/study.yaml --matrix configs/study_matrix.yaml \
+  --config "$TRAIN_RUN/study.yaml" --matrix configs/study_matrix.yaml \
   --split test --limit-turns 20 --concurrency 4 \
   --output runs/current/public
 
 python3 -m bench.study evaluate \
-  --config configs/study.yaml --matrix configs/study_system_matrix.yaml \
+  --config "$TRAIN_RUN/study.yaml" --matrix configs/study_system_matrix.yaml \
   --split test --limit-turns 20 --concurrency 4 \
   --output runs/current/actual-history
 ```

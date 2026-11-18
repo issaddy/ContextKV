@@ -408,12 +408,12 @@ def train_coverage(args):
             history_turns=row.get("history_turns", ())) for row in batch])
         for i, (row, item) in enumerate(zip(batch, encoded), start):
             vectors.append(item.coverage_vector.detach())
-            predicted.append(item.need_vectors.detach())
+            predicted.append(item.scope_need_vectors.detach())
             gold = row["task_state"].get("needs", ())
             matched = align_annotations([n.anchor_spans for n in item.task.needs],
                 [[decode(TextRef, span) for span in n["anchor_spans"]] for n in gold])
             for target, guess in matched.items():
-                need_vectors.append(item.need_vectors[guess].detach())
+                need_vectors.append(item.scope_need_vectors[guess].detach())
                 need_targets.append(SCOPES.index(gold[target]["scope"]))
                 need_rows.append(i)
     features = F.layer_norm(torch.stack(vectors), (vectors[0].shape[-1],))
