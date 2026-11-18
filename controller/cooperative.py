@@ -13,6 +13,9 @@ from .schema import EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
 
+AGGREGATES = frozenset({"count", "sum", "mean", "min", "max"})
+
+
 @dataclass
 class AnswerResult:
     session_id: str
@@ -190,8 +193,9 @@ class CooperativeController:
                 request = await self.answer_request(state, snapshot, complete)
                 computations = state.computations
                 final = await complete(request, "answer")
+                final["meta"]["contextkv_compute"]["cache_changed_members"] = state.costs.changed_members
                 reuse["sources"] = {item["source_id"]: state.retained_sources.get(item["source_id"], 0)+1
-                                    for item in request.demand}
+                                    for item in request.blocks}
                 source_keys = {decode(EvidenceKey, span["source_key"]) for item in computations for span in item["sources"]}
                 calculation_sources = tuple(block for block in state.document_index.blocks
                                             if block.key in source_keys)
@@ -209,25 +213,44 @@ class CooperativeController:
         if self.settings.get("document_compute", True) is False:
             return
         previous = state.computations
+        paid_calls = state.totals["calls"]
         await self.read_required(state, snapshot, complete)
-        if state.computations != previous:
+        if state.computations != previous or state.totals["calls"] != paid_calls:
             state.costs = None
             await self._select_evidence(state, snapshot, state.computations)
 
     async def read_required(self, state, snapshot, complete):
+        from adapters.shared_retrieval import need_scope_signature
         reused = {record["need_id"] for record in state.reused_claims}
         population = state.query.task.coverage_scope == "all_supplied_documents"
-        blocks = (blocks_for_units(state.population_units, state.pool.source_blocks)
-                  if population else selected_blocks(state))
-        selected_keys = {block.key for block in blocks}
-        bound = [program for program in state.programs if program.need_id not in reused
-                 and program.operation in {"count", "sum", "mean", "min", "max"}
+        aggregates = {need.need_id for need in state.query.task.needs if need.operation in AGGREGATES} - reused
+        required = aggregates | {program.need_id for program in state.programs
+                                 if program.operation == "group" and program.need_id not in reused}
+        if not required:
+            return
+        if population:
+            outside = state.document_index.outside_tables(state.population_units)
+            if outside:
+                if not {unit.unit_id for unit in state.population_units}.issubset(state.selected_ids):
+                    numeric = aggregates.difference(state.query.join_needs)
+                    if numeric:
+                        await self._read_mixed_population(state, snapshot, complete, sorted(numeric))
+                return
+            selected_keys = {span.source_key for unit in state.population_units for span in unit.source_spans}
+        else:
+            blocks = selected_blocks(state)
+            selected_keys = {block.key for block in blocks}
+        bound = [program for program in state.programs if program.need_id in required
+                 and program.operation in AGGREGATES
                  and self._population_complete(state.document_index, program)
                  and all(state.document_index.tables[projection.table_id].source.source_key in selected_keys
                          for projection in program.projections)]
         records = {record["need_id"]: record for record in state.computations}
         for program in bound:
-            records[program.need_id] = computation_record(program, state.document_index.execute(program))
+            record = computation_record(program, state.document_index.execute(program))
+            if population:
+                record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
+            records[program.need_id] = record
             state.processed_tables.update(projection.table_id for projection in program.projections)
         state.computations = tuple(records.values())
         if population:
@@ -236,16 +259,12 @@ class CooperativeController:
         raw_size = len(self.template.tokenizer.encode(source_body(blocks)[0], add_special_tokens=False))
         if raw_size <= budget:
             return
-        required = {need.need_id for need in state.query.task.needs
-                    if need.operation in {"count", "sum", "mean", "min", "max"}} - reused
-        required.update(program.need_id for program in state.programs if program.operation == "group"
-                        and program.need_id not in reused)
         outside = state.document_index.outside_tables(state.pool.units)
         fresh = any(unit.unit_id not in state.read_units for unit in outside)
-        if required and (not state.table_read or fresh or state.programs != state.prepared_programs):
+        if not state.table_read or fresh or state.programs != state.prepared_programs:
             need_ids = ({need.need_id for need in state.query.task.needs} - reused
                         if not state.table_read else required)
-            results = await self._compute_documents(state, need_ids, snapshot, complete)
+            results = await self._compute_documents(state, need_ids, snapshot, complete, outside)
             state.prepared_programs = state.programs
             merged = {record["need_id"]: record for record in (*state.computations, *results)}
             state.computations = tuple(merged.values())
@@ -265,8 +284,12 @@ class CooperativeController:
             instruction=self._answer_instruction(state))
         # Keep a small next-turn working set; repeated sources take precedence.
         open_ids = {need.need_id for need in state.open_needs}
-        open_keys = {binding.source_span.source_key for binding in state.evidence.bindings if binding.need_id in open_ids}
-        pending = {source_address(block) for block in selected if block.key in open_keys}
+        open_spans = [binding.source_span for binding in state.evidence.bindings if binding.need_id in open_ids]
+        pending = set()
+        for block in selected:
+            start, end = block.span or (0, len(block.text))
+            if any(span.source_key == block.key and start < span.end and span.start < end for span in open_spans):
+                pending.add(source_address(block))
         retained = sorted(request.blocks, key=lambda block: (
             block["source_id"] not in pending, -state.retained_sources.get(block["source_id"], 0)))[
             :max(1, len(state.query.task.needs))]
@@ -275,7 +298,9 @@ class CooperativeController:
             address = block["source_id"]
             visits = state.retained_sources.get(address, 0)
             demand.append({"source_id": address, "uses": 1.0 if address in pending else (visits+1)/(visits+2)})
-        return with_source_demand(request, demand)
+        blocks = tuple({**block, "revisited": block["source_id"] in state.retained_sources}
+                       for block in request.blocks)
+        return with_source_demand(replace(request, blocks=blocks), demand)
 
     def _reading_allowance(self, state, snapshot, request, output_tokens):
         """Every read funds its own output and the reserved terminal context first."""
@@ -306,7 +331,58 @@ class CooperativeController:
         if pack:
             yield tuple(pack)
 
-    async def _compute_documents(self, state, need_ids, snapshot, complete):
+    async def _read_mixed_population(self, state, snapshot, complete, need_ids):
+        from adapters.document_compute import literal_population_projection, merge_projections, quantity
+        from adapters.shared_retrieval import SharedEvidenceProvider, need_scope_signature
+        by_id = {unit.unit_id: unit for unit in state.population_units}
+        population = tuple(by_id)
+        # Include dependencies as context, but attribute observations only to this packet's roots.
+        input_limit = self.settings.get("semantic_input_tokens", 8192)
+        packs = self._source_packs(state.population_units, input_limit, lambda unit: unit.text)
+        reads, examples = [], {}
+        for i, units in enumerate(packs):
+            sources = SharedEvidenceProvider._closure(units, by_id)
+            projection = literal_population_projection(state.query, sources, state.pool.source_blocks,
+                need_ids, population, {unit.unit_id for unit in units}, examples)
+            request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
+                projection.blocks, instruction=projection.instruction, system_prompt=self.policy.system_prompt or SYSTEM)
+            limit = self._reading_allowance(state, snapshot, request, self.settings.get("semantic_output_tokens", 8192))
+            if not limit:
+                state.budget_exhausted = True
+                break
+            result = await complete(request, f"population:{i}", schema=projection.schema, output_tokens=limit)
+            if result["meta"]["finish_reason"]["type"] == "length":
+                state.budget_exhausted = True
+                break
+            reads.append(projection.decode(result["text"]))
+        if reads:
+            merged = merge_projections(reads)
+            records = list(state.computations)
+            for program in merged.programs:
+                try:
+                    result = merged.index.execute(program)
+                except (KeyError, IndexError, ValueError, ArithmeticError):
+                    # Conflicting fields, grouping, or units leave the Need open for the final answer.
+                    continue
+                record = computation_record(program, result)
+                need = next(n for n in state.query.task.needs if n.need_id == program.need_id)
+                record["target"] = state.query.text(need.anchor_spans)
+                if result.complete and not program.group_by and program.operation in {"sum", "count"}:
+                    contributions = {}
+                    for row in merged.index.records(program):
+                        cell = row.fields[program.value_field if program.operation == "sum" else "entity"]
+                        key = cell.source.source_key
+                        unit, amount = quantity(cell) if program.operation == "sum" else ("records", 1)
+                        group = (key.document_id, key.version, unit)
+                        contributions[group] = contributions.get(group, 0) + amount
+                    record["by_source"] = [{"document": doc, "version": version, "unit": unit, "value": str(amount),
+                                            "original_example": examples[program.need_id, doc, version]}
+                                           for (doc, version, unit), amount in contributions.items()]
+                record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
+                records.append(record)
+            state.computations = tuple(records)
+
+    async def _compute_documents(self, state, need_ids, snapshot, complete, outside):
         from adapters.document_compute import (DocumentIndex, combine_populations,
             merge_projections, semantic_binding, semantic_projection)
         from adapters.shared_retrieval import need_scope_signature
@@ -355,11 +431,10 @@ class CooperativeController:
                 state.table_parts = (*state.table_parts, *((subset, program) for program in programs))
         state.table_read = True
         parts.extend(state.table_parts)
-        outside = index.outside_tables(state.pool.units)
         fresh = tuple(unit for unit in outside if unit.unit_id not in state.read_units)
         operations_by_need = {need.need_id: need.operation for need in state.query.task.needs} | resolved_operations
         aggregate_needs = {identity for identity in need_ids
-                       if operations_by_need[identity] in {"count", "sum", "mean", "min", "max"}}
+                       if operations_by_need[identity] in AGGREGATES}
         if fresh and aggregate_needs and not state.budget_exhausted:
             operations = resolved_operations or None
             population = tuple(unit.unit_id for unit in outside)
@@ -401,9 +476,13 @@ class CooperativeController:
 
     def _answer_instruction(self, state):
         instruction = ANSWER_SCOPE
-        if state.budget_exhausted:
-            instruction += ("\nThe source population is only partially examined. Use the established observations; "
-                            "do not present partial counts or sums as complete totals.")
+        if state.budget_exhausted or (
+                state.query.task.coverage_scope == "all_supplied_documents"
+                and any(need.operation in AGGREGATES and need.need_id not in state.completed_needs
+                        for need in state.query.task.needs)
+                and not {unit.unit_id for unit in state.population_units}.issubset(state.selected_ids)):
+            instruction += ("\nFor each target with a complete computed result, report its value. "
+                            "For other targets, describe any gaps in the visible excerpts before giving a total.")
         if state.version_catalogue:
             instruction += "\nAvailable document versions from the source index:\n" + json.dumps(
                 state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
@@ -429,8 +508,6 @@ class CooperativeController:
         units = () if closed else state.pool.units
         blocks = blocks_for_units(units, state.pool.source_blocks)
         available_sources = {source_address(block) for block in (*state.source_headers, *blocks)}
-        state.retained_sources = {address: count for address, count in state.retained_sources.items()
-                                  if address in available_sources}
         native = (state.costs.snapshot if state.costs is not None else
             await self.engine.evidence_state(tuple(available_sources),
                 cache_scope=state.cache_scope, cache_namespace=state.cache_namespace,
@@ -438,12 +515,20 @@ class CooperativeController:
         def select():
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
-                policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers)
+                policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers,
+                previous_sources=state.retained_sources)
             if closed:
                 ids = ()
             elif state.query.task.coverage_scope == "all_supplied_documents":
-                ids = state.evidence.project_population(units, body_tokens=budget,
-                    cost_model=costs, seconds_price=self.prices.seconds)
+                population_ids = tuple(unit.unit_id for unit in state.population_units)
+                if (any(need.operation in AGGREGATES and need.need_id not in computed for need in state.query.task.needs)
+                        and set(population_ids) <= costs.sources.keys()
+                        and sum(unit.body_tokens for unit in state.population_units) <= budget
+                        and costs.fits(population_ids, preserve_order=True)):
+                    ids = population_ids
+                else:
+                    ids = state.evidence.project_population(units, body_tokens=budget,
+                        cost_model=costs, seconds_price=self.prices.seconds)
             elif self.settings.get("evidence_selection", "utility") == "ranked":
                 sizes = {unit.unit_id: unit.body_tokens for unit in units}
                 frontier = state.evidence.frontier(units)

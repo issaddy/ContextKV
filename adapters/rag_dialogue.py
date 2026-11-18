@@ -1,6 +1,8 @@
 """History-aware retrieval, ranked context concatenation, one answer call."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from controller.cooperative_request import DialogueCall
 from controller.evidence import assign_references
 from controller.schema import EvidenceSpan, Message, history_messages
@@ -61,7 +63,8 @@ async def run_dialogue(question, history, *, retrieve_callback, complete_callbac
             pieces.append((block, low))
         break
     final_messages, spans = render(pieces)
-    shown = tuple(block for block, _ in pieces)
+    shown = tuple(replace(block, text=block.text[:size], span=(span.source_start, span.source_end),
+                          token_ids=()) for (block, size), span in zip(pieces, spans))
     reference_map = tuple((references[block.key], block.key) for block in shown)
     call = DialogueCall("rag:answer", final_messages, shown, reference_map, spans)
     await complete_callback(call)

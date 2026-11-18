@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 import json
 from urllib.parse import quote
 
+from engine_patches.kv_cost import exact_cost, infoflow_cost, page_tokens
+
 from .schema import EvidenceBlock, EvidenceKey, EvidenceSpan, Message, QueryContext, history_messages
 
 
@@ -44,10 +46,17 @@ def working_history(query, history):
     # Preserve those visible messages; token-level predictions do not erase history.
     selected = {(ref.turn_id, ref.speaker) for ref in query.token_refs
                 if ref is not None and ref.turn_id != query.task.current_turn_id}
-    return tuple(replace(turn,
-        user_text=turn.user_text if (turn.turn_id, "user") in selected else None,
-        assistant_text=turn.assistant_text if (turn.turn_id, "assistant") in selected else None)
-        for turn in history if any((turn.turn_id, role) in selected for role in ("user", "assistant")))
+    visible = []
+    for turn in history:
+        user = (turn.turn_id, "user") in selected
+        assistant = (turn.turn_id, "assistant") in selected
+        if user and assistant:
+            visible.append(turn)
+        elif user:
+            visible.append(replace(turn, assistant_text=None))
+        elif assistant:
+            visible.append(replace(turn, user_text=None))
+    return tuple(visible)
 
 
 def source_address(block):
@@ -97,8 +106,11 @@ class EvidenceCosts:
     """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
 
     def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
-                 output_tokens, policy, mode="auto", source_headers=()):
+                 output_tokens, policy, mode="auto", source_headers=(), previous_sources=()):
+        self.previous_sources = set(previous_sources)
         self.sources, self.lengths = {}, {}
+        self.dependencies = {unit.unit_id: unit.dependencies for unit in units}
+        self.changed_members = False
         self.headers = tuple(source_address(block) for block in source_headers)
         self.covered_headers = {}
         self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
@@ -118,8 +130,6 @@ class EvidenceCosts:
         self.costs = {**policy["costs"], **snapshot["costs"]}
         self.prompt_tokens = prompt_tokens-sum(self.lengths[address] for address in self.headers)
         self.output_tokens = output_tokens
-        self.expected_output = {mode: min(output_tokens, self.costs.get(mode+"_output_tokens", output_tokens))
-                                for mode in ("exact", "infoflow")}
         self.ratio = policy["recompute_ratio"]
         self.quality_cost = max(0., policy.get("quality_loss", 0)) * policy.get("quality_price_ms", 0)
         self.mode = mode
@@ -129,28 +139,44 @@ class EvidenceCosts:
         return tuple(dict.fromkeys((*(address for address in self.headers if address not in covered),
             *(address for identity in ids for address in self.sources[identity]))))
 
-    def _native(self, addresses):
-        costs = self.costs
-        transfer = costs.get("transfer_token_ms", costs["prefill_token_ms"] * .05)
-        tokens = self.prompt_tokens + sum(self.lengths[address]+20 for address in addresses)
-        saved = 0.0
+    def _native(self, addresses, tokens):
+        best = exact_cost(self.costs, tokens, 0, 0, self.output_tokens)
+        match = None
         for prefix in self.snapshot["prefixes"]:
             chain = tuple(prefix["source_ids"])
             if addresses[:len(chain)] == chain:
-                saved = max(saved, prefix["gpu_tokens"]*costs["prefill_token_ms"] +
-                    prefix["host_tokens"]*(costs["prefill_token_ms"]-transfer))
-        return max(0.0, tokens*costs["prefill_token_ms"]-saved) + self.expected_output["exact"]*costs["exact_decode_token_ms"]
+                price = exact_cost(self.costs, tokens, prefix["gpu_tokens"], prefix["host_tokens"], self.output_tokens)
+                if price < best:
+                    best, match = price, prefix
+        return best, match
+
+    def reusable_units(self):
+        warm = {address for address, state in self.snapshot["sources"].items()
+                if state["gpu_tokens"] + state["host_tokens"] >= self.lengths.get(address, 1)}
+        for prefix in self.snapshot["prefixes"]:
+            warm.update(prefix["source_ids"])
+        return {identity for identity, sources in self.sources.items() if any(source in warm for source in sources)}
 
     def order(self, ids):
         ids = tuple(ids)
-        best, price = ids, self._native(self.addresses(ids))
+        if not self.snapshot["prefixes"]:
+            return ids
+        best = ids
+        price = self.quote(ids, preserve_order=True)["milliseconds"]
+        positions = {identity: i for i, identity in enumerate(ids)}
         owners = {source: identity for identity in ids for source in self.sources[identity]}
         for prefix in self.snapshot["prefixes"]:
             chain = [address for address in prefix["source_ids"] if address not in self.headers]
             if all(source in owners for source in chain):
                 front = tuple(dict.fromkeys(owners[source] for source in chain))
                 ordered = (*front, *(identity for identity in ids if identity not in front))
-                cost = self._native(self.addresses(ordered))
+                if ordered == ids:
+                    continue
+                layout = {identity: i for i, identity in enumerate(ordered)}
+                if any(layout[dep] > layout[identity] for identity in front for dep in self.dependencies[identity]
+                       if dep in positions and positions[dep] < positions[identity]):
+                    continue
+                cost = self.quote(ordered, preserve_order=True)["milliseconds"]
                 if cost < price:
                     best, price = ordered, cost
         return best
@@ -160,14 +186,13 @@ class EvidenceCosts:
 
     def quote(self, ids, *, preserve_order=False):
         addresses = self.addresses(ids if preserve_order else self.order(ids))
-        native = self._native(addresses)
+        body = sum(self.lengths[address] for address in addresses)
+        prompt = self.prompt_tokens + 20*len(addresses)
+        input_tokens = prompt + body
+        native, prefix = self._native(addresses, input_tokens)
         page = self.snapshot["page_size"]
-        rounded = lambda tokens: ((int(tokens)+page-1)//page)*page
-        total = self.prompt_tokens+sum(self.lengths[address]+20 for address in addresses)+self.output_tokens
-        prefix = max((item for item in self.snapshot["prefixes"]
-                      if addresses[:len(item["source_ids"])] == tuple(item["source_ids"])),
-                     key=lambda item: (item["gpu_tokens"], item["host_tokens"]), default=None)
-        native_new = rounded(max(0, total-(prefix["gpu_tokens"] if prefix else 0)))
+        total = input_tokens + self.output_tokens
+        native_new = page_tokens(max(0, total-(prefix["gpu_tokens"] if prefix else 0)), page)
         native_pins = sum(prefix["unpinned_nodes"].values()) if prefix else 0
         exact = {"mode": "exact", "milliseconds": native,
                  "new_tokens": native_new, "pin_tokens": native_pins,
@@ -177,28 +202,33 @@ class EvidenceCosts:
             return exact
         costs, cold, host, gpu = self.costs, 0, 0, 0
         pins, host_nodes, cold_pages = {}, {}, 0
+        prefix_sources = set(prefix["source_ids"]) if prefix else set()
+        nonprefix_opportunity = False
         for address in addresses:
             resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
             length = self.lengths[address]
-            if resident["gpu_tokens"] + resident["host_tokens"] >= length:
+            ready = resident["gpu_tokens"] + resident["host_tokens"] >= length
+            if address not in prefix_sources and (ready or address in self.previous_sources):
+                nonprefix_opportunity = True
+            if ready:
                 gpu += min(length, resident["gpu_tokens"])
                 host += min(length, resident["host_tokens"])
                 pins.update(resident["unpinned_nodes"])
                 host_nodes.update(resident["host_nodes"])
             else:
                 cold += length
-                cold_pages += rounded(length)
-        body = sum(self.lengths[address] for address in addresses)
-        prompt = self.prompt_tokens+20*len(addresses)
-        transfer = costs.get("transfer_token_ms", costs["prefill_token_ms"] * .05)
-        infoflow = (cold*costs["build_token_ms"] + host*transfer +
-            prompt*costs["score_token_ms"] + (prompt+self.ratio*body)*costs["recompute_token_ms"] +
-            self.expected_output["infoflow"]*costs["infoflow_decode_token_ms"] + self.quality_cost)
+                cold_pages += page_tokens(length, page)
+        if self.mode != "infoflow" and not nonprefix_opportunity:
+            return exact
+        infoflow = infoflow_cost(costs, prompt, body, cold, sum(host_nodes.values()), self.ratio,
+                                 self.output_tokens, self.quality_cost)
         approximate = {"mode": "infoflow", "milliseconds": infoflow,
-            "new_tokens": cold_pages+sum(host_nodes.values())+rounded(prompt)+rounded(prompt+self.ratio*body+self.output_tokens),
+            "new_tokens": cold_pages+sum(host_nodes.values())+page_tokens(prompt, page)+page_tokens(prompt+self.ratio*body+self.output_tokens, page),
             "pin_tokens": sum(pins.values()), "gpu_tokens": gpu, "host_tokens": host}
         if self.mode == "infoflow":
             return approximate
+        if approximate["new_tokens"] + approximate["pin_tokens"] > self.snapshot["available_tokens"]:
+            return exact
         return min((exact, approximate), key=lambda item: item["milliseconds"])
 
     def fits(self, ids, *, preserve_order=False):
@@ -226,7 +256,8 @@ def compact_computations(results):
                                  for identity, label, value, unit in fact["fields"]]
             facts.append(row)
         records.append({name: result[name] for name in (
-            "need_id", "operation", "conditions", "complete")} | {"results": facts, "sources": references})
+            "need_id", "operation", "conditions", "complete")} | {"results": facts, "sources": references}
+                       | {key: result[key] for key in ("target", "by_source") if key in result})
     return {"fields": [{"id": reference, "name": key[0], "label": key[1], "unit": key[2]}
                        for key, reference in fields.items()],
             "qualifiers": {reference: text for text, reference in qualifiers.items()},
@@ -242,7 +273,7 @@ def answer_task(question, results):
         return question
     return question + "\nComputed results with original-source addresses:\n" + json.dumps(
         compact_computations(results), ensure_ascii=False, separators=(",", ":")) + (
-        "\nComplete computations contain final results; incomplete computations contain source observations. "
+        "\nA complete computation gives the verified answer for its target over the stated sources. Use that value and unit. Source excerpts can show only part of the total. Incomplete computations contain observations. "
         "Use established observations and explain what remains unresolved.")
 
 

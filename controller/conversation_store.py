@@ -64,18 +64,16 @@ class ConversationStore:
                 (session_id, turn.turn_id, None, dumps(turn), "[]") for turn in history))
         return self.get_snapshot(session_id)
 
-    def register_sources(self, blocks):
-        self.db.executemany("INSERT OR IGNORE INTO qa_sources VALUES(?,?)", (
-            (source_address(block), dumps(block)) for block in blocks))
-
     def register_document_set(self, blocks, *, source_metadata=None):
         blocks = tuple(blocks)
         document_id = uuid.uuid4().hex
+        addresses = [f"{document_id}/{index}" for index in range(len(blocks))]
         metadata = tuple((key, value) for key, value in (source_metadata or {}).items())
         with self.db:
-            self.register_sources(blocks)
+            self.db.executemany("INSERT INTO qa_sources VALUES(?,?)",
+                                ((address, dumps(block)) for address, block in zip(addresses, blocks)))
             self.db.execute("INSERT INTO qa_documents VALUES(?,?,?)", (
-                document_id, dumps([source_address(block) for block in blocks]), dumps(metadata)))
+                document_id, dumps(addresses), dumps(metadata)))
         return RegisteredDocuments(document_id, document_id, blocks, metadata)
 
     def load_document_set(self, document_set_id):

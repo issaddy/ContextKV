@@ -42,7 +42,14 @@ class SGLangEngineClient:
         return await self._post("/context/metrics", {})
 
     async def profile_prepare(self):
-        return await self._post("/context/profile/prepare", {})
+        deadline = time.monotonic() + self._client.timeout.read
+        while True:
+            result = await self._post("/context/profile/prepare", {})
+            if result["flushed"]:
+                return result
+            if time.monotonic() >= deadline:
+                raise TimeoutError("SGLang could not drain the previous workload for a cold start")
+            await asyncio.sleep(.25)
 
     async def close_session(self, session_id):
         return await self._post("/context/session/close", {"session_id": session_id})

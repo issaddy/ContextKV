@@ -254,7 +254,7 @@ def inferred_field_labels(query, row):
     need_ids = {task.needs[gold].need_id: query.task.needs[guess].need_id for gold, guess in needs.items()}
     condition_ids = {task.conditions[gold].condition_id: query.task.conditions[guess].condition_id
                      for gold, guess in conditions.items()}
-    return {**row, "bindings": [{**binding, "need_id": need_ids[binding["need_id"]],
+    return {**row, "annotated_need_ids": tuple(need_ids.values()), "bindings": [{**binding, "need_id": need_ids[binding["need_id"]],
         "condition_id": condition_ids.get(binding.get("condition_id"), "")}
         for binding in row["bindings"] if binding["need_id"] in need_ids]}
 
@@ -267,9 +267,11 @@ def field_loss(encoder, query, units, row):
     source_indices = [i for i, address in enumerate(addresses) if address is not None]
     states = states[source_indices]
     addresses = [addresses[i] for i in source_indices]
-    logits = encoder.heads.field_logits(states, query.need_vectors.to(states.device))
+    positions = {n.need_id: i for i, n in enumerate(query.task.needs)}
+    annotated = row["annotated_need_ids"]
+    logits = encoder.heads.field_logits(states, query.need_vectors[[positions[n] for n in annotated]].to(states.device))
     targets = torch.zeros(logits.shape[:-1], device=states.device, dtype=torch.long)
-    needs = {need.need_id: index for index, need in enumerate(query.task.needs)}
+    needs = {n: index for index, n in enumerate(annotated)}
     bindings, vectors = [], []
     for item in row["bindings"]:
         span = decode(SourceSpan, item["source_span"])
@@ -301,50 +303,70 @@ def field_loss(encoder, query, units, row):
 def train_evidence(args):
     import torch
     torch.manual_seed(args.seed)
-    query_encoder = SharedQueryEncoder(args.query_model, args.query_asset, device=args.device, history_tokens=args.history_tokens)
-    encoder = SharedEvidenceEncoder(args.model, args.init_asset, device=args.device, train=True)
-    encoder.model.requires_grad_(False).eval()
-    optimizer = torch.optim.AdamW(encoder.heads.parameters(), lr=args.learning_rate)
     data = [row for row in rows(args.data)
             if (bool(row["task_state"]["needs"] and row["units"]) if args.field_only else bool(row.get("sets")))]
     training = [row for row in data if row["split"] == "train"]
+    needs_encoding = args.field_only or any("features" not in row["sets"][0] for row in data)
+    if needs_encoding:
+        query_encoder = SharedQueryEncoder(args.query_model, args.query_asset, device=args.device, history_tokens=args.history_tokens)
+        encoder = SharedEvidenceEncoder(args.model, args.init_asset, device=args.device, train=True)
+        encoder.model.requires_grad_(False).eval()
+        heads = encoder.heads
+    else:
+        from adapters.shared_heads import EvidenceHeads
+        weights = torch.load(Path(args.init_asset)/"heads.pt", map_location="cpu", weights_only=True)
+        heads = EvidenceHeads(weights["field.weight"].shape[1], weights["query.1.weight"].shape[1]).to(args.device)
+        heads.load_state_dict(weights)
     steps, total = 0, 0.
     selection = {}
     if not args.field_only:
-        # The set collector uses inferred tasks. Encode that same query view once;
-        # only the lightweight set head changes across fitting epochs.
         encoded = {"train": [], "dev": []}
+        tensor = heads.set_bias.new_tensor
         for row in data:
-            query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
-                catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
-            units = tuple(decode(EvidenceUnit, item) for item in row["units"])
-            with torch.no_grad():
-                evidence = encoder.encode(query, units)
-                embeddings, relevance = evidence.embeddings, evidence.relevance
-                support, completed = evidence.need_support(units,
-                    tuple(need.need_id for need in query.task.needs), row["completed_needs"])
-            masks = embeddings.new_tensor([[unit.unit_id in item["unit_ids"] for unit in units] for item in row["sets"]])
-            qualities = embeddings.new_tensor([item["quality"] for item in row["sets"]])
-            encoded[row["split"]].append((embeddings, relevance, masks, qualities, support, completed))
-        optimizer = torch.optim.AdamW([p for name, p in encoder.heads.named_parameters()
-                                      if name.startswith("set_")], lr=args.learning_rate)
-        best_loss, best = float("inf"), None
-        for epoch in range(args.epochs):
+            choices = row["sets"]
+            if "features" in choices[0]:
+                features = tensor([item["features"] for item in choices])
+                completed = tensor(row["known"])
+            else:
+                query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
+                    catalogue=catalogue(row), history_turns=row.get("history_turns", ()))
+                units = tuple(decode(EvidenceUnit, item) for item in row["units"])
+                with torch.no_grad():
+                    evidence = encoder.encode(query, units)
+                    support, completed = evidence.need_support(units,
+                        tuple(need.need_id for need in query.task.needs), row["completed_needs"])
+                    masks = tensor([[key in item["unit_ids"] for key in evidence.unit_ids] for item in choices])
+                    features = heads.features(evidence.embeddings, evidence.relevance, masks, support, completed)
+            target = tensor([item["quality"] for item in choices])
+            empty = tensor([not item["unit_ids"] for item in choices]).bool()
+            encoded[row["split"]].append((features, completed, target, empty))
+        optimizer = torch.optim.AdamW([heads.set_weights, heads.set_bias], lr=args.learning_rate)
+        def gain_loss(example):
+            features, completed, target, empty = example
+            return heads.gain_loss(heads.utility_from_features(features, completed), target, empty)
+        for _ in range(args.epochs):
             for example in encoded["train"]:
                 optimizer.zero_grad(set_to_none=True)
-                loss = encoder.heads.loss(*example)
+                loss = gain_loss(example)
                 loss.backward()
                 optimizer.step()
                 total += loss.item()
                 steps += 1
-            with torch.no_grad():
-                dev_loss = sum(float(encoder.heads.loss(*example)) for example in encoded["dev"])/len(encoded["dev"])
-                if dev_loss < best_loss:
-                    best_loss = dev_loss
-                    best = {name: value.clone() for name, value in encoder.heads.state_dict().items()}
-                    selection = {"dev_states": len(encoded["dev"]), "dev_loss": dev_loss, "epoch": epoch+1}
-        encoder.heads.load_state_dict(best)
+        with torch.no_grad():
+            observed = []
+            for (features, completed, _, _), row in zip(encoded["dev"], (r for r in data if r["split"]=="dev")):
+                chosen = row["sets"][int(heads.utility_from_features(features, completed).argmax())]
+                if "covered_facts" in chosen:
+                    observed.append((chosen["quality"], sum(chosen["covered_facts"])/len(chosen["covered_facts"])))
+            if observed:
+                selection["dev_chosen_quality"], selection["dev_chosen_fact_recall"] = (
+                    sum(values)/len(values) for values in zip(*observed))
+            if encoded["dev"]:
+                selection["dev_loss"] = sum(float(gain_loss(x)) for x in encoded["dev"])/len(encoded["dev"])
+        selection.update(dev_states=len(encoded["dev"]), epoch=args.epochs,
+                         fact_labelled_states=sum("covered_facts" in r["sets"][0] for r in data))
     else:
+        optimizer = torch.optim.AdamW(heads.parameters(), lr=args.learning_rate)
         for _ in range(args.epochs):
             for row in training:
                 query = query_encoder.encode(conversation(row), row["question"], row["task_id"], row["turn"],
@@ -352,6 +374,8 @@ def train_evidence(args):
                 if not query.task.needs:
                     continue
                 labelled = inferred_field_labels(query, row)
+                if not labelled["annotated_need_ids"]:
+                    continue
                 units = tuple(decode(EvidenceUnit, item) for item in row["units"])
                 optimizer.zero_grad(set_to_none=True)
                 loss = field_loss(encoder, query, units, labelled)
@@ -361,7 +385,7 @@ def train_evidence(args):
                 steps += 1
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    torch.save(encoder.heads.state_dict(), output / "heads.pt")
+    torch.save(heads.state_dict(), output / "heads.pt")
     (output / "training.json").write_text(json.dumps({"model": args.model, "states": len(training),
         "steps": steps, "loss": total/steps, "method": "shared_fields_generator_set_utility",
         "quality_target": "bounded_answer_gain_listwise", "phase": "fields" if args.field_only else "sets",
@@ -375,44 +399,79 @@ def train_coverage(args):
     from adapters.shared_heads import SCOPES
     torch.manual_seed(args.seed)
     encoder = SharedQueryEncoder(args.model, args.init_asset, device=args.device, history_tokens=args.history_tokens)
-    data, vectors = rows(args.data), []
+    data = rows(args.data)
+    vectors, need_vectors, need_targets, need_rows, predicted = [], [], [], [], []
     for start in range(0, len(data), 16):
         batch = data[start:start+16]
         encoded = encoder.encode_many([dict(history=conversation(row), question=row["question"],
             task_id=row["task_id"], current_turn_id=row["turn"], catalogue=catalogue(row),
             history_turns=row.get("history_turns", ())) for row in batch])
-        vectors.extend(item.coverage_vector.detach().clone() for item in encoded)
+        for i, (row, item) in enumerate(zip(batch, encoded), start):
+            vectors.append(item.coverage_vector.detach())
+            predicted.append(item.need_vectors.detach())
+            gold = row["task_state"].get("needs", ())
+            matched = align_annotations([n.anchor_spans for n in item.task.needs],
+                [[decode(TextRef, span) for span in n["anchor_spans"]] for n in gold])
+            for target, guess in matched.items():
+                need_vectors.append(item.need_vectors[guess].detach())
+                need_targets.append(SCOPES.index(gold[target]["scope"]))
+                need_rows.append(i)
     features = F.layer_norm(torch.stack(vectors), (vectors[0].shape[-1],))
     labels = torch.tensor([SCOPES.index(row["task_state"]["coverage_scope"]) for row in data], device=args.device)
     train = torch.tensor([row["split"] == "train" for row in data], device=args.device)
-    head = encoder.heads.coverage
-    with torch.no_grad():
-        before = float((head(features)[~train].argmax(-1) == labels[~train]).float().mean())
-        head.weight.zero_()
-        head.bias.zero_()
-    optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate)
-    best_loss, best_epoch, best = float("inf"), 0, None
-    for epoch in range(args.epochs):
-        loss = F.cross_entropy(head(features[train]), labels[train])
+    head, scope = encoder.heads.coverage, encoder.heads.scope
+    owners = labels.new_tensor([i for i, needs in enumerate(predicted) for _ in needs])
+    all_needs = torch.cat(predicted)
+    def route_margin(question_logits):
+        margins = question_logits[:, 1]-question_logits[:, 0]
+        logits = scope(all_needs)
+        return margins.scatter_reduce(0, owners, logits[:, 1]-logits[:, 0], reduce="amax")
+    has_need_training = False
+    if need_vectors:
+        need_x = torch.stack(need_vectors)
+        need_y = labels.new_tensor(need_targets)
+        need_train = train[need_rows]
+        train_need_x, train_need_y = need_x[need_train], need_y[need_train]
+        has_need_training = len(train_need_y) > 0
+    @torch.no_grad()
+    def evaluate():
+        logits = head(features)
+        question = logits.argmax(-1)
+        full = route_margin(logits) > 0
+        result = {"task_correct": int((question[~train] == labels[~train]).sum()),
+                  "routed_correct": int((full[~train] == labels[~train]).sum()),
+                  "dev": int((~train).sum())}
+        domains = [r.get("dataset", "structured_training") for r in data]
+        result["by_dataset"] = {}
+        for name in sorted(set(domains)):
+            subset = ~train & train.new_tensor([domain == name for domain in domains])
+            result["by_dataset"][name] = {"routed_correct": int((full[subset] == labels[subset]).sum()),
+                                          "dev": int(subset.sum())}
+        if need_vectors:
+            result.update(need_correct=int((scope(need_x[~need_train]).argmax(-1)==need_y[~need_train]).sum()),
+                          matched_needs=int((~need_train).sum()),
+                          annotated_needs=sum(len(r["task_state"].get("needs", ())) for r in data if r["split"]=="dev"))
+        return result
+    before = evaluate()
+    optimizer = torch.optim.AdamW([*head.parameters(), *scope.parameters()], lr=args.learning_rate)
+    for _ in range(args.epochs):
+        logits = head(features)
+        loss = F.cross_entropy(logits[train], labels[train])
+        loss += F.binary_cross_entropy_with_logits(route_margin(logits)[train], labels[train].float())
+        if has_need_training:
+            loss = loss + F.cross_entropy(scope(train_need_x), train_need_y)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        with torch.no_grad():
-            dev_loss = float(F.cross_entropy(head(features[~train]), labels[~train]))
-            if dev_loss < best_loss:
-                best_loss, best_epoch = dev_loss, epoch+1
-                best = {name: value.clone() for name, value in head.state_dict().items()}
-    head.load_state_dict(best)
-    with torch.no_grad():
-        prediction = head(features)[~train].argmax(-1)
-        truth = labels[~train]
-        confusion = [[int(((truth == i) & (prediction == j)).sum()) for j in range(2)] for i in range(2)]
     output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    initial = Path(args.init_asset)
+    if not (output/"adapter").exists():
+        (output/"adapter").symlink_to((initial/"adapter").resolve(), target_is_directory=True)
     torch.save(encoder.heads.state_dict(), output/"heads.pt")
-    metadata = json.loads((output/"training.json").read_text())
-    metadata["coverage"] = {"train": int(train.sum()), "dev": int((~train).sum()),
-        "dev_accuracy_before": before, "dev_accuracy": float((prediction == truth).float().mean()),
-        "dev_confusion": confusion, "dev_loss": best_loss, "epoch": best_epoch}
+    metadata = json.loads((initial/"training.json").read_text())
+    metadata["coverage"] = {"train": int(train.sum()), "before": before, "after": evaluate(),
+                            "epoch": args.epochs}
     (output/"training.json").write_text(json.dumps(metadata, indent=2)+"\n")
     print(json.dumps(metadata["coverage"]))
 

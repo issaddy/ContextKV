@@ -38,6 +38,20 @@ def coverage_states():
         "coverage_only": True, "task_state": {"coverage_scope": scope}}
         for index, pair in enumerate(pairs) for kind, (question, scope) in enumerate(zip(pair,
             ("selected_sources", "all_supplied_documents")))]
+    # Keep each contrast family on one split, including both clause orders.
+    for index, (local, population) in enumerate(pairs):
+        for order, clauses in enumerate(((local, population), (population, local))):
+            needs, start = [], 0
+            for n, clause in enumerate(clauses):
+                end = start+len(clause)
+                needs.append({"need_id": f"n{n}", "anchor_spans": [{"turn_id": 1, "speaker": "user",
+                    "start": start, "end": end}], "scope":
+                    "selected_sources" if clause == local else "all_supplied_documents"})
+                start = end+1
+            result.append({"task_id": f"coverage-{index}-mixed-{order}", "conversation_id": f"coverage-{index}",
+                "split": "dev" if index >= 16 else "train", "turn": 1, "history": [],
+                "question": " ".join(clauses), "coverage_only": True,
+                "task_state": {"coverage_scope": "all_supplied_documents", "needs": needs}})
     domains = (
         ("buffer manager", "retention limit", "缓存管理器", "保留期限"),
         ("message broker", "delivery guarantee", "消息服务", "交付保证"),

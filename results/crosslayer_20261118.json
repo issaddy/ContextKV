@@ -1,0 +1,480 @@
+{
+  "generator": "Qwen3-32B BF16, greedy, 32K, 1024 max output tokens, 8 GiB KV pool",
+  "membership_counterfactual": {
+    "question": "How many days does a member have to request a replacement card? Give the number of days.",
+    "reference": "19 days",
+    "one_section_budget": 362,
+    "relevance": [
+      0.6553579568862915,
+      0.6553579568862915
+    ],
+    "results": [
+      {
+        "warm": "a",
+        "visible": false,
+        "selected": [
+          "a"
+        ],
+        "new_frontier": false,
+        "seed": {
+          "engine_ms": 53.605467081069946,
+          "input_tokens": 447,
+          "output_tokens": 1,
+          "mode": "exact",
+          "device_hit_tokens": 0,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 447
+        },
+        "answer": "A member has 19 days to request a replacement card [S1].",
+        "execution": {
+          "engine_ms": 323.5638216137886,
+          "input_tokens": 500,
+          "output_tokens": 17,
+          "mode": "exact",
+          "device_hit_tokens": 384,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 116
+        }
+      },
+      {
+        "warm": "a",
+        "visible": true,
+        "selected": [
+          "a"
+        ],
+        "new_frontier": false,
+        "seed": {
+          "engine_ms": 52.817825227975845,
+          "input_tokens": 447,
+          "output_tokens": 1,
+          "mode": "exact",
+          "device_hit_tokens": 0,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 447
+        },
+        "answer": "A member has 19 days to request a replacement card [S1].",
+        "execution": {
+          "engine_ms": 322.4628306925297,
+          "input_tokens": 500,
+          "output_tokens": 17,
+          "mode": "exact",
+          "device_hit_tokens": 384,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 116
+        }
+      },
+      {
+        "warm": "b",
+        "visible": false,
+        "selected": [
+          "a"
+        ],
+        "new_frontier": false,
+        "seed": {
+          "engine_ms": 52.04933136701584,
+          "input_tokens": 447,
+          "output_tokens": 1,
+          "mode": "exact",
+          "device_hit_tokens": 0,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 447
+        },
+        "answer": "A member has 19 days to request a replacement card [S1].",
+        "execution": {
+          "engine_ms": 352.3624502122402,
+          "input_tokens": 500,
+          "output_tokens": 17,
+          "mode": "exact",
+          "device_hit_tokens": 0,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 500
+        }
+      },
+      {
+        "warm": "b",
+        "visible": true,
+        "selected": [
+          "b"
+        ],
+        "new_frontier": true,
+        "seed": {
+          "engine_ms": 51.61723494529724,
+          "input_tokens": 447,
+          "output_tokens": 1,
+          "mode": "exact",
+          "device_hit_tokens": 0,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 447
+        },
+        "answer": "A member has 19 days to request a replacement card [S1].",
+        "execution": {
+          "engine_ms": 321.8015655875206,
+          "input_tokens": 500,
+          "output_tokens": 17,
+          "mode": "exact",
+          "device_hit_tokens": 384,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 116
+        }
+      }
+    ]
+  },
+  "forward_ablation": {
+    "task_ids": [
+      "b4614daadceeecb400f7baf0aa48dcb8<::>1",
+      "b4614daadceeecb400f7baf0aa48dcb8<::>2",
+      "747a810abfd6da4a9c37cdb74feec95e<::>1",
+      "747a810abfd6da4a9c37cdb74feec95e<::>2"
+    ],
+    "concurrency": 2,
+    "replay": {
+      "conditions": "Same evidence members, histories and arrival offsets. Each branch starts with cold KV and greedy sampling. same_order_native replays the auto branch's exact evidence order without repeating its price lookup. no_demand keeps the auto layout and lookup but submits no future-source demand.",
+      "branches": [
+        {
+          "mode": "exact",
+          "order": "ranked",
+          "requests": 4,
+          "p95_seconds": 4.657485982961952,
+          "gpu_kv_peak_tokens": 3136,
+          "gpu_kv_active_peak_tokens": 2240,
+          "gpu_kv_peak_gib": 0.765625,
+          "input_tokens": 3222,
+          "output_tokens": 588,
+          "device_hit_tokens": 576,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 2646,
+          "new_compute_kv_pages": 52,
+          "engine_ms": 11331.657081842422,
+          "infoflow_requests": 0,
+          "reference_f1": 0.33597083926031296
+        },
+        {
+          "mode": "auto",
+          "order": "priced",
+          "requests": 4,
+          "p95_seconds": 4.645944755151867,
+          "gpu_kv_peak_tokens": 2240,
+          "gpu_kv_active_peak_tokens": 2240,
+          "gpu_kv_peak_gib": 0.546875,
+          "input_tokens": 3222,
+          "output_tokens": 587,
+          "device_hit_tokens": 576,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 2646,
+          "new_compute_kv_pages": 52,
+          "engine_ms": 11299.394950270653,
+          "infoflow_requests": 0,
+          "reference_f1": 0.3362358101135191
+        }
+      ],
+      "same_order_native": {
+        "mode": "exact",
+        "order": "same_order",
+        "requests": 4,
+        "p95_seconds": 4.667481292411685,
+        "gpu_kv_peak_tokens": 3136,
+        "gpu_kv_active_peak_tokens": 2240,
+        "gpu_kv_peak_gib": 0.765625,
+        "input_tokens": 3222,
+        "output_tokens": 588,
+        "device_hit_tokens": 576,
+        "host_loaded_tokens": 0,
+        "prefill_tokens": 2646,
+        "new_compute_kv_pages": 52,
+        "engine_ms": 11352.692909538746,
+        "infoflow_requests": 0,
+        "reference_f1": 0.33597083926031296
+      },
+      "same_order_no_demand": {
+        "mode": "auto",
+        "order": "no_demand",
+        "requests": 4,
+        "p95_seconds": 4.654625380784273,
+        "gpu_kv_peak_tokens": 2240,
+        "gpu_kv_active_peak_tokens": 2240,
+        "gpu_kv_peak_gib": 0.546875,
+        "input_tokens": 3222,
+        "output_tokens": 587,
+        "device_hit_tokens": 128,
+        "host_loaded_tokens": 448,
+        "prefill_tokens": 2646,
+        "new_compute_kv_pages": 52,
+        "engine_ms": 11311.64075434208,
+        "infoflow_requests": 0,
+        "reference_f1": 0.3362358101135191
+      },
+      "no_demand_identical_answers": 4,
+      "identical_answers": 3,
+      "same_order_identical_answers": 3,
+      "questions": 4
+    }
+  },
+  "registration_same_length": {
+    "inputs": [
+      "14 credits",
+      "23 credits"
+    ],
+    "returned": [
+      "14 credits",
+      "23 credits"
+    ]
+  },
+  "mixed": {
+    "protocol": "Two targeted P1 questions; 150-token body budget, automatic coverage supplemented by caller's all_supplied_documents scope. Ledger Alpha 11 and Beta 37, prose adds Gamma 17 after 55 neutral audit sentences; reference total 65 credits and three distinct records. Both controller versions on the final engine, same receipts and greedy generation protocol.",
+    "final": [
+      {
+        "id": "total",
+        "answer": "The sum of the Amount in credits across every record in the supplied ledger and addendum is **65 credits**. This value is derived from the complete computation, which includes **48 credits** from the ledger (D1) and **17 credits** from the addendum (D2) [C1, C2, C3, C4, C5, C6].",
+        "response": {
+          "output_tokens": 81,
+          "read_count": 1,
+          "reduce_count": 2,
+          "truncated": false
+        },
+        "cost": {
+          "actual_device_hit_tokens": 0,
+          "actual_host_loaded_tokens": 64,
+          "actual_prefill_tokens": 2082,
+          "auxiliary_ms": 2346.834607422352,
+          "complete_ms": 7834.053494036198,
+          "kv_decision": {
+            "agent_cost_ms": 3630.127651137493,
+            "agent_route": "exact",
+            "cache_changed_members": false,
+            "mode": "exact",
+            "route_cost_ms": {
+              "exact": 3584.5629244391803,
+              "infoflow": 4214.844293854113,
+              "nonprefix_opportunity": false
+            }
+          },
+          "new_compute_kv_pages": 37,
+          "online_compute_ms": 7406.18959441781,
+          "total_input_tokens": 2146,
+          "total_output_tokens": 250
+        },
+        "facts": [
+          {
+            "need_id": "n1",
+            "operation": "sum",
+            "complete": true,
+            "target": " sum of Amount in",
+            "by_source": [
+              {
+                "document": "ledger",
+                "original_example": "Alpha | 11",
+                "unit": "credit",
+                "value": "48",
+                "version": "v1"
+              },
+              {
+                "document": "addendum",
+                "original_example": "Gamma was recorded separately and adds 17 credits to the ledger.",
+                "unit": "credit",
+                "value": "17",
+                "version": "v1"
+              }
+            ],
+            "result": [
+              "65"
+            ]
+          },
+          {
+            "need_id": "n2",
+            "operation": "sum",
+            "complete": false,
+            "target": " record",
+            "result": []
+          }
+        ]
+      },
+      {
+        "id": "count",
+        "answer": "The complete computation confirms that there are **3 distinct records** across the complete ledger and the addendum [C1, C2, C3, C4, C5, C6]. Specifically, the ledger contains 2 records (Alpha and Beta), and the addendum contributes 1 additional record (Gamma).",
+        "response": {
+          "output_tokens": 65,
+          "read_count": 1,
+          "reduce_count": 1,
+          "truncated": false
+        },
+        "cost": {
+          "actual_device_hit_tokens": 0,
+          "actual_host_loaded_tokens": 1216,
+          "actual_prefill_tokens": 769,
+          "auxiliary_ms": 256.7889355123043,
+          "complete_ms": 12571.266815066338,
+          "kv_decision": {
+            "agent_cost_ms": 3127.629908295902,
+            "agent_route": "exact",
+            "cache_changed_members": false,
+            "mode": "exact",
+            "route_cost_ms": {
+              "exact": 3118.4786417613923,
+              "infoflow": 3844.248965506429,
+              "nonprefix_opportunity": false
+            }
+          },
+          "new_compute_kv_pages": 17,
+          "online_compute_ms": 4698.189929127693,
+          "total_input_tokens": 1985,
+          "total_output_tokens": 237
+        },
+        "facts": [
+          {
+            "need_id": "n0",
+            "operation": "count",
+            "complete": true,
+            "target": "Count all distinct records",
+            "by_source": [
+              {
+                "document": "ledger",
+                "original_example": "Alpha | 11",
+                "unit": "records",
+                "value": "2",
+                "version": "v1"
+              },
+              {
+                "document": "addendum",
+                "original_example": "Gamma was recorded separately and adds 17 credits to the ledger.",
+                "unit": "records",
+                "value": "1",
+                "version": "v1"
+              }
+            ],
+            "result": [
+              3
+            ]
+          }
+        ]
+      }
+    ],
+    "independent_reference": "North 12.5, South 31.75, East 4.25, West 2 credits; total 50.50, distinct records 4.",
+    "independent": [
+      {
+        "id": "total",
+        "answer": "The sum of the Amount in credits across every record in the supplied ledger and addendum is **50.50 credits**. This value is derived from the complete computation, which includes **44.25 credits** from the ledger (D1) and **6.25 credits** from the addendum (D2) [C1, C2, C3, C4, C5, C6].",
+        "response": {
+          "output_tokens": 89,
+          "read_count": 1,
+          "reduce_count": 2,
+          "truncated": false
+        },
+        "cost": {
+          "actual_device_hit_tokens": 0,
+          "actual_host_loaded_tokens": 64,
+          "actual_prefill_tokens": 2112,
+          "auxiliary_ms": 2372.527342289686,
+          "complete_ms": 8747.716318815947,
+          "kv_decision": {
+            "agent_cost_ms": 4829.133091655829,
+            "agent_route": "exact",
+            "cache_changed_members": false,
+            "mode": "exact",
+            "route_cost_ms": {
+              "exact": 4783.565062478985,
+              "infoflow": 5581.670714961741,
+              "nonprefix_opportunity": false
+            }
+          },
+          "new_compute_kv_pages": 39,
+          "online_compute_ms": 8700.21527260542,
+          "total_input_tokens": 2176,
+          "total_output_tokens": 319
+        },
+        "facts": [
+          {
+            "need_id": "n1",
+            "operation": "sum",
+            "complete": true,
+            "target": " sum of Amount in",
+            "by_source": [
+              {
+                "document": "ledger",
+                "original_example": "North | 12.5",
+                "unit": "credit",
+                "value": "44.25",
+                "version": "v1"
+              },
+              {
+                "document": "addendum",
+                "original_example": "A separate East record adds 4.25 credits.",
+                "unit": "credit",
+                "value": "6.25",
+                "version": "v1"
+              }
+            ],
+            "result": [
+              "50.50"
+            ]
+          },
+          {
+            "need_id": "n2",
+            "operation": "sum",
+            "complete": false,
+            "target": " record",
+            "result": []
+          }
+        ]
+      },
+      {
+        "id": "count",
+        "answer": "The complete computation confirms that there are **4 distinct records** across the complete ledger and the addendum, as verified from the provided sources [S1] and [S2]. Specifically, the ledger contains 2 records (North and South), and the addendum contains 2 additional records (e.g., East with 4.25 credits) [C1, C2, C3, C4, C5, C6].",
+        "response": {
+          "output_tokens": 91,
+          "read_count": 1,
+          "reduce_count": 1,
+          "truncated": false
+        },
+        "cost": {
+          "actual_device_hit_tokens": 0,
+          "actual_host_loaded_tokens": 1216,
+          "actual_prefill_tokens": 786,
+          "auxiliary_ms": 286.57668828964233,
+          "complete_ms": 14995.091386139393,
+          "kv_decision": {
+            "agent_cost_ms": 4075.3763648215668,
+            "agent_route": "exact",
+            "cache_changed_members": false,
+            "mode": "exact",
+            "route_cost_ms": {
+              "exact": 4066.174897639878,
+              "infoflow": 4944.380476968522,
+              "nonprefix_opportunity": false
+            }
+          },
+          "new_compute_kv_pages": 19,
+          "online_compute_ms": 6206.8023681640625,
+          "total_input_tokens": 2002,
+          "total_output_tokens": 308
+        },
+        "facts": [
+          {
+            "need_id": "n0",
+            "operation": "count",
+            "complete": true,
+            "target": "Count all distinct records",
+            "by_source": [
+              {
+                "document": "ledger",
+                "original_example": "North | 12.5",
+                "unit": "records",
+                "value": "2",
+                "version": "v1"
+              },
+              {
+                "document": "addendum",
+                "original_example": "A separate East record adds 4.25 credits.",
+                "unit": "records",
+                "value": "2",
+                "version": "v1"
+              }
+            ],
+            "result": [
+              4
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -62,7 +62,7 @@ class ConventionalEvidenceProvider:
         input_tokens = 0
         sparse, dense, corpus, directory = self.sparse, self.dense, self.corpus, None
         if blocks is not None:
-            key = tuple(block.key for block in blocks)
+            key = snapshot.corpus_snapshot_id, tuple(block.key for block in blocks)
             if key not in self._supplied:
                 import numpy as np
                 corpus = CorpusIndex(blocks, corpus_id=self.corpus.corpus_id,

@@ -19,6 +19,7 @@
     "python/sglang/srt/mem_cache/l2_transfer.py"
   ],
   "modules": [
+    "kv_cost.py",
     "infoflow.py",
     "contextkv_compute.py",
     "infoflow_attention.py"

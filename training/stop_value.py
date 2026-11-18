@@ -90,6 +90,28 @@ def fit(trajectories, *, epochs=40, learning_rate=1e-3, trace_lambda=0.8,
     return model.eval()
 
 
+@torch.inference_mode()
+def evaluate_policy(model, trajectories, prices):
+    """Replay held-out measured branches, starting at the first decision."""
+    totals = {policy: {"quality": 0., "seconds": 0., "extensions": 0}
+              for policy in ("finish_first", "learned", "exhaust")}
+    for trajectory in trajectories:
+        rows = trajectory["states"]
+        features = model.mean.new_tensor([row["features"] for row in rows])
+        values, tails = model(features)
+        utility = prices.utility(values, tails)
+        stop = next((i for i in range(len(rows)-1) if utility[i, 0] >= utility[i, 1]), len(rows)-1)
+        for policy, index in (("finish_first", 0), ("learned", stop), ("exhaust", len(rows)-1)):
+            terminal = rows[index]["stop"]
+            totals[policy]["quality"] += terminal["quality"]
+            totals[policy]["seconds"] += terminal["seconds"] + sum(row["transition"]["seconds"] for row in rows[:index])
+            totals[policy]["extensions"] += index
+    return {"trajectories": len(trajectories), "policies": {
+        name: {"mean_quality": value["quality"]/len(trajectories),
+               "mean_remaining_seconds": value["seconds"]/len(trajectories),
+               "total_extensions": value["extensions"]} for name, value in totals.items()}}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trajectories")
@@ -108,6 +130,9 @@ def main(argv=None):
                 trace_lambda=args.trace_lambda, prices=prices, device=args.device)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     model.save(args.output)
+    dev = [row for row in rows if row["split"] == "dev"]
+    if dev:
+        print(json.dumps({"dev_replay": evaluate_policy(model, dev, prices)}))
 
 
 if __name__ == "__main__":

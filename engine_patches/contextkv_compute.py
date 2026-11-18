@@ -8,6 +8,7 @@ import time
 
 import torch
 
+from sglang.srt.managers.kv_cost import exact_cost, infoflow_cost, page_tokens
 from sglang.srt.managers.infoflow import QwenInfoFlow, RequestState, SourceBlock
 from sglang.srt.mem_cache.base_prefix_cache import InsertParams, MatchPrefixParams
 from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -54,12 +55,11 @@ class ComputeRuntime:
             scope = data.get('cache_scope', 'shared')
             session = data.get('session_id')
             if session is not None:
-                active = bool(self.demands.get(session))
+                previous = self.demands.get(session, {})
                 retained = {(scope, address) for address in data['retained_sources']}
-                self.demands[session] = {key: item for key, item in self.demands.get(session, {}).items()
-                                         if key in retained}
-                self._refresh_priorities()
-                if active:
+                if previous.keys() - retained:
+                    self.demands[session] = {key: item for key, item in previous.items() if key in retained}
+                    self._refresh_priorities()
                     self._demote_unused()
             wanted = set(data['source_ids'])
             sources, prefixes = {}, []
@@ -72,7 +72,7 @@ class ComputeRuntime:
                 if prefix is not None and prefix['namespace'] == data.get('cache_namespace') and set(prefix['sources']) <= wanted:
                     gpu, host = self._resident(source_id, 'exact')
                     gpu, host = min(gpu, prefix['tokens']), min(host, max(0, prefix['tokens']-gpu))
-                    if gpu or host:
+                    if gpu + host and gpu + host >= prefix["tokens"] // self.cache.page_size * self.cache.page_size:
                         prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host,
                                              unpinned_nodes=self._page_nodes(source_id, 'exact')))
             return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs),
@@ -93,6 +93,7 @@ class ComputeRuntime:
         if action == 'profile_prepare':
             flushed = self.scheduler.flush_cache()
             if flushed:
+                self.costs.clear()
                 self.demands.clear()
                 self.source_nodes.clear()
                 self.source_prefixes.clear()
@@ -162,9 +163,6 @@ class ComputeRuntime:
         scope = metadata.get('cache_scope', 'shared')
         self.costs = {**metadata.get('costs', {}), **self.costs}
         ratio = float(metadata.get('recompute_ratio', .15))
-        prefill = self.costs.get('prefill_token_ms', 1.0)
-        replay = self.costs.get('recompute_token_ms', prefill)
-        marginal_value = max(0.0, prefill - ratio * replay)
         request_demand = {(scope, item['source_id']): {**item, 'recompute_ratio': ratio}
                           for item in metadata.get('demand', ())}
         self.demands[session] = request_demand if metadata.get('mode') != 'exact' else {}
@@ -172,6 +170,7 @@ class ComputeRuntime:
         ids = tuple(req.origin_input_ids)
         page = self.cache.page_size
         blocks, warm, cold, host_pages, gpu_nodes = [], 0, 0, set(), set()
+        reuse_ends = []
         new_gpu_pins = 0
         for spec in metadata.get('blocks', ()):
             start = int(spec['start'])
@@ -183,6 +182,8 @@ class ComputeRuntime:
             source_id = scope, spec['source_id']
             match = self._match(source_id, block_ids)
             full = match.device_prefix_len + match.host_hit_length == len(block_ids)
+            if full or spec.get("revisited"):
+                reuse_ends.append(end)
             warm += end - start if full else 0
             cold += 0 if full else end - start
             if full and match.host_hit_length:
@@ -198,50 +199,27 @@ class ComputeRuntime:
                     node = node.parent
             blocks.append((source_id, start, end, match, block_ids))
         costs = self.costs
-        prefill = costs.get('prefill_token_ms', 1.0)
-        build = costs.get('build_token_ms', prefill)
-        score = costs.get('score_token_ms', prefill)
-        replay = costs.get('recompute_token_ms', prefill)
-        transfer = costs.get('transfer_token_ms', prefill * .05)
-        ratio = float(metadata.get('recompute_ratio', .15))
         prompt = len(ids) - warm - cold
-        approximate = cold * build + prompt * score + (prompt + (warm + cold) * ratio) * replay + len(host_pages) * transfer
         native = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
             array('q', ids), req.extra_key, cache_salt=req.cache_salt)))
-        exact = (len(ids) - native.device_prefix_len - native.host_hit_length) * prefill + native.host_hit_length * transfer
-        expected_output = {mode: min(req.sampling_params.max_new_tokens,
-            costs.get(mode+'_output_tokens', req.sampling_params.max_new_tokens))
-            for mode in ('exact', 'infoflow')}
-        exact_decode = costs.get('exact_decode_token_ms', 0.0)
-        approximate += expected_output['infoflow'] * costs.get('infoflow_decode_token_ms', exact_decode)
-        exact += expected_output['exact'] * exact_decode
-        # A future consumer saves each source block's work once. Demand for
-        # another block never finances this block's independent construction.
-        cold_consumers = {}
-        for source_id, start, end, match, block_ids in blocks:
-            item = request_demand.get(source_id)
-            if item is not None and 'native_prefix_end' not in item and match.device_prefix_len+match.host_hit_length < len(block_ids):
-                consumers = cold_consumers.setdefault(tuple(block_ids), (end-start, {}))[1]
-                identities = item.get('consumer_ids', ()) or ('next',)
-                for consumer in identities:
-                    consumers[consumer] = max(consumers.get(consumer, 0), float(item.get('uses', 0))/len(identities))
-        build_value = sum(length * sum(consumers.values()) * marginal_value for length, consumers in cold_consumers.values())
-        # Approximation is charged for quality loss, never credited as evidence gain.
-        quality_loss = max(0.0, float(metadata.get('quality_loss', 0.0)))
-        quality_price_ms = float(metadata.get('quality_price_ms', 0.0))
+        output_limit = req.sampling_params.max_new_tokens
+        exact = exact_cost(costs, len(ids), native.device_prefix_len, native.host_hit_length, output_limit)
+        quality_ms = max(0.0, metadata.get('quality_loss', 0.0)) * metadata.get('quality_price_ms', 0.0)
+        approximate = infoflow_cost(costs, prompt, warm + cold, cold, len(host_pages), ratio, output_limit, quality_ms)
         mode = metadata.get('mode', 'auto')
+        beyond_prefix = any(end // page * page > native.device_prefix_len + native.host_hit_length for end in reuse_ends)
         if mode == 'auto':
-            mode = ('infoflow' if 'prefill_token_ms' in costs and blocks
-                    and approximate + quality_loss * quality_price_ms - build_value < exact
+            mode = ('infoflow' if 'prefill_token_ms' in costs and beyond_prefix
+                    and approximate < exact
                     else 'exact')
             cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
                             if match.device_prefix_len+match.host_hit_length < len(tokens))
-            required = cold_work + math.ceil(prompt/page)*page + prompt + math.ceil((warm + cold)*ratio)
-            if required > min(self.scheduler.max_req_input_len,
-                    self.allocator.available_size() + self.cache.evictable_size()
-                    - req.sampling_params.max_new_tokens - len(host_pages) - new_gpu_pins):
+            work = cold_work + page_tokens(prompt, page) + prompt + math.ceil((warm + cold)*ratio)
+            allocation = page_tokens(work + output_limit, page) + len(host_pages) + new_gpu_pins
+            if work > self.scheduler.max_req_input_len or allocation > self.allocator.available_size() + self.cache.evictable_size():
                 mode = 'exact'
         state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool)
+        state.route_costs = {"exact": exact, "infoflow": approximate, "nonprefix_opportunity": beyond_prefix}
         state.runtime = self
         state.events = []
         state.published = False
@@ -485,7 +463,7 @@ class ComputeRuntime:
         output_count = len(req.output_ids_through_stop)
         # A length-capped prefill/warmup is a censored sample, not a short answer.
         if req.finished_reason.to_json()['type'] == 'stop':
-            name = state.mode + '_output_tokens'
+            name = 'answer_output_tokens'
             self.costs[name] = .8 * self.costs.get(name, output_count) + .2 * output_count
         if output_count > 1:
             name = state.mode + '_decode_token_ms'
@@ -509,7 +487,7 @@ class ComputeRuntime:
         if state.metadata.get('mode') == 'auto':
             self._demote_unused()
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
-        receipt = dict(mode=state.mode, input_tokens=len(state.input_ids),
+        receipt = dict(mode=state.mode, route_cost_ms=state.route_costs, input_tokens=len(state.input_ids),
             output_tokens=output_count, elapsed_ms=elapsed,
             **state.counters, **{name + '_ms': value for name, value in phase_ms.items()},
             gpu_available_tokens=self.allocator.available_size(),

@@ -52,6 +52,7 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
         warm = await asyncio.gather(*(generate(row, "infoflow", 1) for row in source))
         costs = (await engine.metrics())["costs"]
         costs.update(output_lengths)
+        costs["answer_output_tokens"] = output_lengths["exact_output_tokens"]
         receipts = [result["meta"]["contextkv_compute"] for result in warm]
         for phase, tokens in (("score", "score_tokens"), ("recompute", "replay_tokens")):
             costs[phase+"_token_ms"] = sum(row[phase+"_ms"] for row in receipts)/sum(row[tokens] for row in receipts)

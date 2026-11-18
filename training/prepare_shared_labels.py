@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from itertools import cycle
 from pathlib import Path
 import random
 
@@ -15,7 +16,7 @@ from adapters.shared_encoding import query_input
 from controller.schema import Message, from_history_messages
 from controller.serialization import to_jsonable
 from controller.source_windows import numbered_text
-from training.shared_collection import numbered_sources, word_reference_schema, word_offsets, source_bindings
+from training.shared_collection import numbered_sources, word_reference_schema, word_offsets, source_bindings, object_schema
 
 
 TASK_INSTRUCTION = """Label a document-QA request for a shared query encoder. Use only the visible conversation and question.
@@ -93,8 +94,6 @@ def task_annotations(raw, locations):
 
 
 def task_label_schema(locations, catalogue):
-    def obj(properties):
-        return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
     def array(item):
         return {"type": "array", "items": item}
     string, boolean = {"type": "string"}, {"type": "boolean"}
@@ -103,16 +102,16 @@ def task_label_schema(locations, catalogue):
     current_ref = word_reference_schema({current_id: locations[current_id]}, "message_id")
     def ids(values):
         return array({"enum": list(dict.fromkeys(values))}) if values else {"type": "array", "maxItems": 0, "items": string}
-    return obj({"rewritten_query": string, "coverage_scope": {"enum": ["selected_sources", "all_supplied_documents"]}, "needs": array(obj({
+    return object_schema({"rewritten_query": string, "coverage_scope": {"enum": ["selected_sources", "all_supplied_documents"]}, "needs": array(object_schema({
         "need_id": string, "anchor_refs": {**array(current_ref), "minItems": 1, "maxItems": 1},
         "subject_refs": array(ref), "operation": {"enum": "lookup enumerate procedure compare count sum mean min max group infer".split()},
         "scope": {"enum": ["selected_sources", "all_supplied_documents"]}, "condition_ids": array(string),
         "predecessor_need_ids": array(string), "query": string, "join": boolean, "distinct": boolean})),
-        "conditions": array(obj({"condition_id": string, "anchor_ref": ref, "value_refs": array(ref),
+        "conditions": array(object_schema({"condition_id": string, "anchor_ref": ref, "value_refs": array(ref),
             "relation_type": {"enum": "PREDICATE TIME VERSION PLATFORM LOCATION SUBJECT".split()},
             "update": {"enum": ["ADD", "REPLACE", "REMOVE", "COMPARE"]},
             "filter_operator": {"enum": "eq ne lt le gt ge in contains".split()}})),
-        "history_refs": array(ref), "version_intent": obj({
+        "history_refs": array(ref), "version_intent": object_schema({
             "mode": {"enum": ["current", "explicit", "as_of", "compare"]},
             "document_families": ids([row["family"] for row in catalogue]),
             "version_ids": ids([row["version"] for row in catalogue]), "time_refs": array(ref),
@@ -126,19 +125,18 @@ def field_label_schema(row, locations):
             "role": {"enum": "source measure entity period group filter unit version".split()},
             "source": word_reference_schema(locations, "source_id"),
             "condition_id": {"enum": ["", *need["condition_ids"]]}, "relation_group": {"type": "string"}}
-        variants.append({"type": "object", "properties": properties,
-                         "required": list(properties), "additionalProperties": False})
+        variants.append(object_schema(properties))
     bindings = {"type": "array", "items": {"oneOf": variants}} if variants else {"type": "array", "maxItems": 0}
-    return {"type": "object", "properties": {"bindings": bindings}, "required": ["bindings"], "additionalProperties": False}
+    return object_schema({"bindings": bindings})
 
 
-def prepare_states(args, tokenizer):
+def prepare_states(args, tokenizer, excluded=()):
     source = Path(args.source)
     documents = json.loads((source/"multidoc2dial_doc.json").read_text())
     records, supervision, _ = convert(documents,
         json.loads((source/"multidoc2dial_dial_train.json").read_text()), dataset_version="archive-f0c034c24966",
         source_uri="https://doc2dial.github.io/multidoc2dial/", split="train", source_format="multidoc2dial")
-    if not args.task_only:
+    if not (args.task_only or args.values_only):
         corpus = CorpusIndex.from_records(structural_corpus(documents, records),
             corpus_id="multidoc2dial", snapshot_id="multidoc2dial-train")
         directory = SourceDirectory(corpus, tokenizer)
@@ -151,13 +149,14 @@ def prepare_states(args, tokenizer):
     dev_sessions = set(sessions[:max(1, len(sessions)//5)])
     chosen, counts = [], {"train": 0, "dev": 0}
     limits = {"train": args.train_states, "dev": args.dev_states}
-    session_order = {identity: index for index, identity in enumerate(sessions)}
-    tasks.sort(key=lambda row: (session_order[row["conversation_id"]], row["turn"]))
-    grouped = {identity: [] for identity in sessions}
-    for row in tasks:
-        grouped[row["conversation_id"]].append(row)
-    tasks = [row for start in range(0, max(map(len, grouped.values())), 2)
-             for identity in sessions for row in grouped[identity][start:start+2]]
+    grouped = {sid: [] for sid in sessions if sid not in excluded}
+    for row in sorted(tasks, key=lambda r: r["turn"]):
+        if row["conversation_id"] in grouped:
+            grouped[row["conversation_id"]].append(row)
+    # Round-robin across conversations, rotating the first turn sampled. A small
+    # label budget then includes follow-ups with their actual preceding history.
+    tasks = [turns[(i+offset) % len(turns)] for offset in range(max(map(len, grouped.values()), default=0))
+             for i, turns in enumerate(grouped.values()) if offset < len(turns)]
     for row in tasks:
         split = "dev" if row["conversation_id"] in dev_sessions else "train"
         if counts[split] >= limits[split]:
@@ -180,6 +179,9 @@ def prepare_states(args, tokenizer):
         counts[split] += 1
         if args.task_only:
             continue
+        if args.values_only:
+            state["reference_answer"] = row["targets"][0]["text"]
+            continue
         positives = [unit.unit_id for unit in by_id.values() if any(
             span.source_key.document_id == label["passage_id"] and span.start < label["end"] and label["start"] < span.end
             for span in unit.source_spans for label in row["grounding"])]
@@ -198,17 +200,19 @@ def prepare_states(args, tokenizer):
 
 async def prepare_labels(args):
     import httpx
-    from itertools import cycle
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.query_model)
     label_tokenizer = (None if args.task_only or args.values_only
                        else AutoTokenizer.from_pretrained(args.teacher_model))
-    states = prepare_states(args, tokenizer)
+    excluded = {row["conversation_id"] for path in args.exclude_labelled_sessions
+                for row in map(json.loads, Path(path).read_text().splitlines())}
+    states = prepare_states(args, tokenizer, excluded)
     from training.controlled_tasks import controlled_states
-    states.extend(controlled_states(tokenizer, train_families=args.controlled_train_families,
-        dev_families=args.controlled_dev_families, seed=args.seed))
+    extras = controlled_states(tokenizer, train_families=args.controlled_train_families,
+        dev_families=args.controlled_dev_families, seed=args.seed)
     for path in args.states:
-        states.extend(json.loads(line) for line in Path(path).read_text().splitlines() if line.strip())
+        extras.extend(json.loads(line) for line in Path(path).read_text().splitlines() if line.strip())
+    states.extend(r for r in extras if r["conversation_id"] not in excluded)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     completed = {row["task_id"] for row in (json.loads(line) for line in output.read_text().splitlines() if line.strip())} if output.exists() else set()
@@ -290,45 +294,54 @@ async def refresh_coverage(args):
     from training.controlled_tasks import coverage_states
     datasets = {path: [json.loads(line) for line in Path(path).read_text().splitlines() if line]
                 for path in args.refresh_coverage}
-    states = {row["task_id"]: row for rows in datasets.values() for row in rows if not row.get("coverage_only")}
-    values, semaphore = list(states.values()), asyncio.Semaphore(args.concurrency)
-    instruction = ("Classify the evidence coverage required by each question using its conversation. "
-        "selected_sources means relevant evidence can support the answer: explanations, procedures, specific "
-        "lookups or comparisons. all_supplied_documents means the declared population must be examined: "
-        "complete enumeration of qualifying members, aggregate over every record, absence/universal claims, "
-        "or a global relationship/property. This distinction is independent of numeric arithmetic. "
-        "Using only provided documents does NOT imply examining every document. Listing all steps/types "
-        "from one explanatory passage is selected_sources. Return each id and coverage_scope.")
-    schema = {"type": "object", "properties": {"labels": {"type": "array", "items": {
-        "type": "object", "properties": {"id": {"type": "string"}, "coverage_scope": {
-            "enum": ["selected_sources", "all_supplied_documents"]}}, "required": ["id", "coverage_scope"],
-        "additionalProperties": False}}}, "required": ["labels"], "additionalProperties": False}
-    async with httpx.AsyncClient(timeout=180) as client:
-        async def classify(batch):
-            async with semaphore:
-                response = await client.post(args.endpoint[0].rstrip("/")+"/v1/chat/completions", json={
-                    "model": args.teacher_model, "temperature": 0, "max_tokens": 1024,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                    "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps([
-                        {"id": row["task_id"], "question": row["question"], "history": row["history"]} for row in batch])}],
-                    "response_format": {"type": "json_schema", "json_schema": {"name": "coverage", "schema": schema}}})
-                response.raise_for_status()
-                return json.loads(response.json()["choices"][0]["message"]["content"])["labels"]
-        labels = {item["id"]: item["coverage_scope"] for batch in await asyncio.gather(
-            *(classify(values[start:start+8]) for start in range(0, len(values), 8))) for item in batch}
-    for path, rows in datasets.items():
-        for row in rows:
+    scopes = {"enum": ["selected_sources", "all_supplied_documents"]}
+    instruction = ("Classify the evidence scope of the entire question and each named subquestion "
+        "individually using the dialogue. selected_sources covers specific lookups, explanations, "
+        "or steps in one procedure. all_supplied_documents requires inspecting the declared population, "
+        "e.g. exhaustive enumeration, absence, an aggregate over records, or a global relationship. "
+        "Using supplied documents alone does not imply full coverage. A local lookup can coexist "
+        "with a population-wide subquestion. Classify the subquestion described by its anchor in context.")
+    groups = {}
+    for dataset in datasets.values():
+        for row in dataset:
             if row.get("coverage_only"):
                 continue
-            scope = labels[row["task_id"]]
-            row["task_state"]["coverage_scope"] = scope
-            for need in row["task_state"]["needs"]:
-                need["scope"] = scope
-        Path(path).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in rows))
-    queries = [row for row in datasets[args.refresh_coverage[0]] if not row.get("coverage_only")]
+            texts = {(m["turn_id"], m["speaker"]): m["text"] for m in row["history"]}
+            texts[row["turn"], "user"] = row["question"]
+            def excerpt(refs):
+                return " ".join(texts[r["turn_id"], r["speaker"]][r["start"]:r["end"]] for r in refs)
+            needs = {n["need_id"]: {"anchor": excerpt(n["anchor_spans"]), "subject": excerpt(n["subject_refs"]),
+                                    "operation": n["operation"]} for n in row["task_state"]["needs"]}
+            payload = json.dumps({"question": row["question"], "history": row["history"], "needs": needs},
+                                 ensure_ascii=False, sort_keys=True)
+            groups.setdefault(payload, []).append(row)
+    endpoints = cycle(args.endpoint)
+    slots = asyncio.Semaphore(args.concurrency)
+    async with httpx.AsyncClient(timeout=180) as client:
+        async def classify(payload, rows):
+            ids = [n["need_id"] for n in rows[0]["task_state"]["needs"]]
+            schema = object_schema({"coverage_scope": scopes, "needs": object_schema(dict.fromkeys(ids, scopes))})
+            async with slots:
+                response = await client.post(next(endpoints).rstrip("/")+"/v1/chat/completions", json={
+                    "model": args.teacher_model, "temperature": 0, "max_tokens": 1024,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": payload}],
+                    "response_format": {"type": "json_schema", "json_schema": {"name": "coverage", "schema": schema}}})
+                response.raise_for_status()
+                labels = json.loads(response.json()["choices"][0]["message"]["content"])
+            for row in rows:
+                row["task_state"]["coverage_scope"] = labels["coverage_scope"]
+                for need in row["task_state"]["needs"]:
+                    need["scope"] = labels["needs"][need["need_id"]]
+        await asyncio.gather(*(classify(payload, rows) for payload, rows in groups.items()))
+    for path, dataset in datasets.items():
+        Path(path).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in dataset))
+    # Regenerate the controlled contrasts and retain externally grounded scope annotations.
+    queries = [row for row in datasets[args.refresh_coverage[0]]
+               if not row.get("coverage_only") or row.get("source")]
     queries.extend(coverage_states())
     Path(args.output).write_text("".join(json.dumps(row, ensure_ascii=False)+"\n" for row in queries))
-    return {"relabelled": len(labels), "query_states": len(queries), "output": args.output}
+    return {"relabelled": len(groups), "query_states": len(queries), "output": args.output}
 
 
 def main():
@@ -340,6 +353,8 @@ def main():
     parser.add_argument("--teacher-model", default="/data/models/qwen3-32b")
     parser.add_argument("--label-context-tokens", type=int, default=32768)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--exclude-labelled-sessions", nargs="*", default=[],
+                        help="Exclude prior labelled conversations when collecting additional training states")
     parser.add_argument("--task-only", action="store_true", help="Label diverse conversation pairs without evidence retrieval or field annotation")
     parser.add_argument("--values-only", action="store_true", help="Prepare task/source states for set and stop collection with the existing field head")
     parser.add_argument("--refresh-coverage", nargs="+", help="Existing task/field/set labels to correct with the fixed teacher")

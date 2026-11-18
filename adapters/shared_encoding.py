@@ -163,10 +163,12 @@ class EvidenceEncoding:
         return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids)),
                 self.embeddings.new_tensor([identity in completed for identity in need_ids]))
 
-    def frontier(self, units):
+    def frontier(self, units, preferred=()):
         """Nested relevance-ranked sets, each containing its source dependencies."""
         by_id = {unit.unit_id: unit for unit in units}
         order = self.relevance.argsort(descending=True).tolist()
+        if preferred:
+            order.sort(key=lambda i: self.unit_ids[i] not in preferred)
         active, seen, sets = [], set(), [()]
         def add(identity):
             if identity in seen:
@@ -188,21 +190,47 @@ class EvidenceEncoding:
         if not self.unit_ids or body_tokens <= 0:
             return ()
         sizes = {unit.unit_id: unit.body_tokens for unit in units}
-        candidates = [ids for ids in self.frontier(units) if sum(sizes[i] for i in ids) <= body_tokens]
+        frontier = self.frontier(units)
+        candidates = [ids for ids in frontier if sum(sizes[i] for i in ids) <= body_tokens]
+        ordinary_count = len(candidates)
+        warm = cost_model.reusable_units() if cost_model else ()
+        if warm:
+            semantic_order = frontier[-1]
+            seen = {frozenset(ids) for ids in candidates}
+            for ids in self.frontier(units, preferred=warm):
+                members = frozenset(ids)
+                if members not in seen and sum(sizes[i] for i in ids) <= body_tokens:
+                    candidates.append(tuple(i for i in semantic_order if i in members))
+                    seen.add(members)
         masks = torch.tensor([[identity in ids for identity in self.unit_ids] for ids in candidates],
                              device=self.embeddings.device, dtype=torch.bool)
         support, known = self.need_support(units, need_ids, completed)
         with torch.no_grad():
             values = self.heads.utility(self.embeddings, self.relevance, masks, support, known)
-            costs = values.new_tensor([cost_model.estimate(ids) if cost_model else 0. for ids in candidates])
-            best = int((values-seconds_price*costs/1000).argmax())
+            utility = values
+            if cost_model:
+                quotes = [cost_model.quote(ids) for ids in candidates]
+                costs = values.new_tensor([q["milliseconds"] for q in quotes])
+                utility = values - seconds_price * costs / 1000
+                # A transiently busy pool can queue a request. Only discard an oversized
+                # plan when another nonempty plan can actually run from this snapshot.
+                fits = [q["new_tokens"] + q["pin_tokens"] <= cost_model.snapshot["available_tokens"] for q in quotes]
+                if any(fits[1:]):
+                    utility.masked_fill_(~torch.tensor(fits, device=values.device), -torch.inf)
+            best = int(utility[:ordinary_count].argmax())
+            if len(candidates) > ordinary_count:
+                rivals = utility[ordinary_count:].masked_fill(values[ordinary_count:] < values[best], -torch.inf)
+                alternative = int(rivals.argmax())
+                if rivals[alternative] > utility[best]:
+                    best = ordinary_count + alternative
+                    cost_model.changed_members = True
         selected = candidates[best]
         return cost_model.order(selected) if cost_model else selected
 
     def project_population(self, units, *, body_tokens, cost_model=None, seconds_price=0.0):
         """Cover each source, then add query-weighted representative spans within it."""
         import torch
-        if not units:
+        if not units or body_tokens <= 0:
             return ()
         by_id = {unit.unit_id: i for i, unit in enumerate(units)}
         groups = {}
@@ -218,11 +246,24 @@ class EvidenceEncoding:
                     found.add(i)
                     pending.extend(by_id[identity] for identity in units[i].dependencies)
             closures.append(found)
-        selected = set()
+        def identities(indices):
+            return tuple(units[i].unit_id for i in sorted(indices))
+
         sizes = [unit.body_tokens for unit in units]
-        for members in groups.values():
-            best = max(members, key=lambda i: float(self.relevance[i]))
-            selected.update(closures[best])
+        ranked_groups = [sorted(members, key=lambda i: float(self.relevance[i]), reverse=True)
+                         for members in groups.values()]
+        selected = set().union(*(closures[members[0]] for members in ranked_groups))
+        def fits(indices):
+            return sum(sizes[i] for i in indices) <= body_tokens and (
+                cost_model is None or cost_model.fits(identities(indices), preserve_order=True))
+        if not fits(selected):
+            selected.clear()
+            for members in sorted(ranked_groups, key=lambda group: float(self.relevance[group[0]]), reverse=True):
+                for i in members:
+                    candidate = selected | closures[i]
+                    if fits(candidate):
+                        selected = candidate
+                        break
         used = sum(sizes[i] for i in selected)
         similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
         same_source = torch.zeros_like(similarity)
@@ -231,9 +272,7 @@ class EvidenceEncoding:
         relevance = self.relevance.clamp_min(0)
         affinity = similarity*same_source*relevance[None, :]
         weights = relevance.square()
-        represented = affinity[:, sorted(selected)].amax(1)
-        def identities(indices):
-            return tuple(units[i].unit_id for i in sorted(indices))
+        represented = affinity[:, sorted(selected)].amax(1) if selected else torch.zeros_like(relevance)
         while True:
             price = cost_model.estimate(identities(selected), preserve_order=True) if cost_model else 0.
             best, best_score = None, 0.
@@ -336,9 +375,11 @@ def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max
     add(question, (current_turn_id, "user"))
     if catalogue:
         add("\n")
-    if catalogue and not literal_versions(question, catalogue):
+    explicit = literal_versions(question, catalogue)
+    candidates = [row for row in catalogue if not explicit or row["version"] in explicit]
+    if candidates and (not explicit or len({row["family"] for row in candidates}) > 1):
         add("Available source versions:\n")
-        for row in catalogue:
+        for row in candidates:
             start, end = add(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
             catalog_spans.append((start, end, row))
             add("\n")
@@ -532,7 +573,11 @@ class SharedQueryEncoder:
             explicit_versions = literal_versions(question, catalogue)
             if explicit_versions:
                 selected_versions = list(explicit_versions)
-                selected_families = [row["family"] for row in catalogue if row["version"] in explicit_versions]
+                predicted_families = set(selected_families)
+                selected_families = []
+                for version in explicit_versions:
+                    families = [row["family"] for row in catalogue if row["version"] == version]
+                    selected_families.extend([name for name in families if name in predicted_families] or families)
                 if mode == "current":
                     mode = "explicit"
             intent = VersionIntent(mode,

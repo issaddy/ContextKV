@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from decimal import Decimal
+import json
 import operator
 import re
 from typing import Any
 
 from adapters.table_relations import extract_table_relations
-from controller.schema import EvidenceClaim, EvidenceUnit, SourceSpan
+from controller.schema import EvidenceBlock, EvidenceClaim, EvidenceUnit, SourceSpan
+from controller.source_windows import numbered_text
 
 
 # Factors use canonical SI units, with time quantities canonicalized to seconds.
@@ -128,7 +130,8 @@ class _Record:
 
 _COMPARISONS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt,
                 "le": operator.le, "gt": operator.gt, "ge": operator.ge}
-_NUMERIC_AGGREGATES = frozenset({"sum", "mean", "min", "max"})
+_NUMERIC_AGGREGATES = ("sum", "mean", "min", "max")
+_PROGRAM_OPERATIONS = ("lookup", "group", "count", *_NUMERIC_AGGREGATES)
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 
@@ -137,11 +140,16 @@ def quantity(cell):
     text = cell.text.strip()
     negative = text.startswith("(") and text.endswith(")")
     literal = text[1:-1].strip() if negative else text
-    if cell.unit and literal.endswith(cell.unit):
-        literal = literal[:-len(cell.unit)].strip()
+    declared = cell.unit
+    if declared and literal.endswith(declared):
+        literal = literal[:-len(declared)].strip()
+    elif not declared and (match := _NUMBER.match(literal)):
+        suffix = literal[match.end():].strip()
+        if suffix in UNIT_FACTORS:
+            declared, literal = suffix, match.group()
     if not _NUMBER.fullmatch(literal):
         raise ValueError(f"cell is not a numeric value: {cell.text!r}")
-    unit, value = canonical_quantity(literal, cell.unit)
+    unit, value = canonical_quantity(literal, declared)
     return unit, -value if negative else value
 
 
@@ -594,7 +602,6 @@ def _query_description(query, need_ids):
 
 
 def _word_source(unit, address):
-    from controller.source_windows import numbered_text
     _, offsets = numbered_text(unit.text)
     first, last = sorted(address[1:])
     start, cursor = offsets[first][0], offsets[last][1]
@@ -605,7 +612,6 @@ def _word_source(unit, address):
 
 
 def _word_address_schema(units):
-    from controller.source_windows import numbered_text
     return {"oneOf": [{"type": "array", "prefixItems": [{"const": f"S{i+1}"},
         *[{"type": "integer", "minimum": 0, "maximum": len(offsets)-1} for _ in range(2)]],
         "minItems": 3, "items": False}
@@ -613,9 +619,6 @@ def _word_address_schema(units):
 
 
 def _word_blocks(units):
-    from dataclasses import replace
-    from controller.schema import EvidenceBlock
-    from controller.source_windows import numbered_text
     return tuple(EvidenceBlock(replace(unit.source_spans[0].source_key,
         passage_id=f"{unit.source_spans[0].source_key.passage_id}:indexed-words:{unit.source_spans[0].start}:{unit.source_spans[0].end}"),
         "", unit.heading, numbered_text(unit.text)[0]) for unit in units)
@@ -628,22 +631,23 @@ def semantic_binding_schema(index, need_ids, operations=None):
         return {"type": "object", "properties": properties,
                 "required": list(properties), "additionalProperties": False}
     string = {"type": "string"}
-    predicate = obj({"field": string, "operation": {"enum": [*list(_COMPARISONS), "in", "contains"]},
+    predicate = obj({"field": string, "operation": {"enum": [*_COMPARISONS, "in", "contains"]},
         "value": {"anyOf": [string, {"type": "number"}, array(string)]}, "unit": string})
     table_ids = [f"T{i+1}" for i in range(len(index.tables))]
     projections = []
+    unit_address = _word_address_schema(index.binding_units())
     for identity, table in zip(table_ids, index.tables.values()):
         column = {"type": "integer", "minimum": 0, "maximum": len(table.headers)-1}
         local_predicate = obj({"column": column, **{name: value for name, value in predicate["properties"].items()
                                                   if name != "field"}})
         projections.append(obj({"table_id": {"const": identity}, "fields": array(obj({
             "name": string, "column": column,
-            "unit_span": {"anyOf": [{"type": "null"}, _word_address_schema(index.binding_units())]}})),
+            "unit_span": {"anyOf": [{"type": "null"}, unit_address]}})),
             "predicates": array(local_predicate)}))
     projection = {"oneOf": projections}
     programs = {identity: obj({
         "operation": ({"const": operations[identity]} if operations and identity in operations else
-                      {"enum": ["lookup", "group", "count", "sum", "mean", "min", "max"]}),
+                      {"enum": list(_PROGRAM_OPERATIONS)}),
         "projections": array(projection), "value_field": string, "entity_fields": array(string),
         "predicates": array(predicate), "joins": array(obj({
             "right_index": {"type": "integer", "minimum": 1},
@@ -654,7 +658,6 @@ def semantic_binding_schema(index, need_ids, operations=None):
 
 
 def decode_programs(text, query, index):
-    import json
     needs = {need.need_id: need for need in query.task.needs}
     result = []
     fragments = {f"S{i+1}": unit for i, unit in enumerate(index.binding_units())}
@@ -689,7 +692,6 @@ def decode_programs(text, query, index):
 
 def semantic_binding(query, index, need_ids, *, operations=None):
     """Bind a document program from schema and examples, without reading all rows."""
-    import json
     units = index.binding_units()
     blocks = _word_blocks(units)
     table_ids = {identity: f"T{i+1}" for i, identity in enumerate(index.tables)}
@@ -738,7 +740,7 @@ def semantic_projection_schema(units, need_ids, operations=None):
                                  "minItems": 1, "items": False}]}
     optional_address = {"anyOf": [address, {"type": "null"}]}
     return obj({"operations": obj({identity: ({"const": operations[identity]} if operations and identity in operations else
-                                  {"enum": ["lookup", "group", "count", "sum", "mean", "min", "max"]})
+                                  {"enum": list(_PROGRAM_OPERATIONS)})
                                   for identity in need_ids}),
         "unresolved_need_ids": array({"enum": list(need_ids)}),
         "records": array(obj({"need_ids": array({"enum": list(need_ids)}), "entity": entity,
@@ -747,8 +749,6 @@ def semantic_projection_schema(units, need_ids, operations=None):
 
 
 def decode_projection(text, query, units, need_ids, population_unit_ids):
-    import json
-    from controller.schema import EvidenceBlock
     data = json.loads(text)
     units_by_id = {f"S{index+1}": unit for index, unit in enumerate(units)}
 
@@ -792,7 +792,8 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
             projections.append(Projection(table_id, tuple(Field(name, column) for column, name in enumerate(headers))))
         programs.append(DocumentProgram(need_id, tuple(projections),
             tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
-            operation=operation, value_field="measure" if any(record["measure"] is not None for record in records) else "",
+            operation=operation, value_field="measure" if operation in _NUMERIC_AGGREGATES or any(
+                record["measure"] is not None for record in records) else "",
             entity_fields=("entity",), group_by=tuple(headers[2:]),
             distinct=("entity",) if need_id in query.distinct_needs else (),
             condition_ids=need.condition_ids,
@@ -804,7 +805,6 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
 
 def semantic_projection(query, units, need_ids, *, population_unit_ids=None, operations=None):
     """Read only requested fields and eligibility once; use CPU aggregation afterwards."""
-    import json
     units, need_ids = tuple(units), tuple(need_ids)
     population = tuple(population_unit_ids) if population_unit_ids is not None else tuple(unit.unit_id for unit in units)
     blocks = _word_blocks(units)
@@ -834,9 +834,98 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
+def literal_population_projection(query, units, source_blocks, need_ids, population_ids, primary_ids, examples):
+    """Read stable source KV and bind quoted records back to their original word spans."""
+    from controller.cooperative_request import blocks_for_units
+    from controller.evidence import assign_references
+
+    blocks = blocks_for_units(units, source_blocks)
+    refs = dict((key, ref) for ref, key in assign_references(block.key for block in blocks))
+    strings = {"type": "array", "items": {"type": "string"}}
+    ids = {"type": "array", "items": {"enum": list(need_ids)}}
+    fields = {"needs": ids, "source": {"enum": list(refs.values())}, "quote": {"type": "string"},
+              "entity": {"type": "string"}, "measure": {"type": "string"}, "unit": {"type": "string"},
+              "group": strings}
+    record = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
+    schema = {"type": "object", "properties": {"records": {"type": "array", "items": record},
+              "unresolved": ids, "empty": ids}, "required": ["records", "unresolved", "empty"], "additionalProperties": False}
+    operations = {n.need_id: n.operation for n in query.task.needs if n.need_id in need_ids}
+    instruction = ("Read the original sources in full for the current question. Extract each qualifying record once. "
+        "A document or window is a record only when the question counts documents. Skip boilerplate. "
+        "For each record quote its exact original row or sentence and give the source citation ID. "
+        "Copy its identifying entity and numeric measure verbatim from the quote. For counts leave measure empty. "
+        "Copy the unit alone from the text or table header. Leave unit empty when unstated. "
+        "Give group values only if the question requests separate group results. "
+        "Use the same records for overlapping Needs. Apply all conditions. "
+        "Use empty only for a requested quantity with explicitly no matching records in this packet. Mark spurious or ambiguous Need fragments unresolved. The CPU computes the final result.\n"
+        + json.dumps({"needs": operations, "task": _query_description(query, need_ids)}, ensure_ascii=False))
+
+    offsets = [numbered_text(unit.text)[1] for unit in units]
+
+    def address(i, literal, start=0, end=None):
+        if not literal:
+            return None
+        pos = units[i].text.find(literal, start, end)
+        if pos < 0:
+            return None
+        words = offsets[i]
+        first = next((j for j, (left, _) in enumerate(words) if left == pos), None)
+        last = next((j for j, (_, right) in enumerate(words) if right == pos + len(literal)), None)
+        return [f"S{i+1}", first, last] if first is not None and last is not None else None
+
+    def decode_literals(text):
+        data = json.loads(text)
+        unresolved = set(data["unresolved"])
+        rows, seen = [], set()
+        for row in data["records"]:
+            quote = row["quote"]
+            matches = [(i, u.text.find(quote)) for i, u in enumerate(units)
+                       if refs[u.source_spans[0].source_key] == row["source"] and quote and quote in u.text]
+            if len(matches) != 1:
+                unresolved.update(row["needs"])
+                continue
+            i, start = matches[0]
+            if units[i].unit_id not in primary_ids:
+                continue
+            end = start + len(quote)
+            entity = address(i, row["entity"], start, end)
+            measure = address(i, row["measure"], start, end)
+            group = [address(i, v, start, end) for v in row["group"]]
+            unit = address(i, row["unit"], start, end)
+            if row["unit"] and unit is None:
+                unit = next((a for j, other in enumerate(units)
+                             if other.source_spans[0].source_key == units[i].source_spans[0].source_key
+                             and (a := address(j, row["unit"])) is not None), None)
+            for need in row["needs"]:
+                key = (need, i, start, end, row["entity"], row["measure"], tuple(row["group"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if (not entity or None in group or (row["unit"] and not unit)
+                        or (operations[need] != "count" and not measure)
+                        or units[i].text.find(quote, start+1) >= 0):
+                    unresolved.add(need)
+                    continue
+                key = units[i].source_spans[0].source_key
+                examples.setdefault((need, key.document_id, key.version), quote)
+                rows.append({"need_ids": [need], "entity": entity,
+                             "measure": measure if operations[need] != "count" else None,
+                             "unit": unit, "group": group, "qualifiers": []})
+        assigned = {n for row in rows for n in row["need_ids"]}
+        unresolved.update(set(need_ids) - assigned - set(data["empty"]))
+        payload = {"operations": operations, "unresolved_need_ids": sorted(unresolved), "records": rows}
+        projection = decode_projection(json.dumps(payload), query, units, need_ids, population_ids)
+        # A dependency can be visible before its own rows have actually been read.
+        programs = tuple(replace(p, projections=tuple(item for item, unit in zip(p.projections, units)
+            if unit.unit_id in primary_ids)) for p in projection.programs)
+        kept_tables = {item.table_id for p in programs for item in p.projections}
+        index = DocumentIndex((projection.index.tables[key] for key in kept_tables), projection.index.blocks)
+        return replace(projection, index=index, programs=programs)
+    return SemanticBinding(blocks, instruction, schema, decode_literals)
+
+
 def merge_projections(projections):
     """Combine independently read source partitions before the single CPU aggregation."""
-    from dataclasses import replace
     tables, blocks, programs = {}, {}, {}
     for projection in projections:
         tables.update(projection.index.tables)

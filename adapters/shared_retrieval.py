@@ -25,7 +25,8 @@ def computation_signature(program):
 def need_scope_signature(query, need_id, index):
     need = next(item for item in query.task.needs if item.need_id == need_id)
     conditions = [item for item in query.task.conditions if item.condition_id in need.condition_ids]
-    return {"operation": need.operation, "request": query.task.raw_question.strip().casefold(),
+    return {"operation": need.operation, "coverage": query.task.coverage_scope,
+        "request": query.task.raw_question.strip().casefold(), "need": query.text(need.anchor_spans),
         "subjects": [query.text((ref,)).strip().casefold() for ref in need.subject_refs],
         "conditions": [{"type": item.relation_type, "key": query.text((item.key_span,)) if item.key_span else "",
             "values": [query.text((ref,)) for ref in item.value_spans],
@@ -113,6 +114,11 @@ class SharedEvidenceProvider:
     async def retrieve(self, snapshot, query, request_id, *, facts=()):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, facts=facts)
 
+    async def retrieve_candidates(self, snapshot, query, request_id, *, initial_only=False):
+        """Return serving candidates, optionally restricted to the first encoded batch."""
+        return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
+                                          candidate_view="initial" if initial_only else "all")
+
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
                                 coverage_scope="selected_sources", facts=()):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
@@ -131,7 +137,7 @@ class SharedEvidenceProvider:
         return tuple(row for row in catalogue if counts[row["family"]] > 1)
 
     def _retrieve(self, snapshot, question, request_id, *, supplied_blocks=None, source_metadata=None,
-                  coverage_scope="selected_sources", facts=()):
+                  coverage_scope="selected_sources", facts=(), candidate_view=None):
         import torch
         started = time.perf_counter()
         document_tokens = 0
@@ -142,7 +148,7 @@ class SharedEvidenceProvider:
             supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + (block.title or next(
                 (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")))
                 for index, block in enumerate(supplied_blocks))
-            key = tuple(block.key for block in supplied_blocks)
+            key = snapshot.corpus_snapshot_id, tuple(block.key for block in supplied_blocks)
             if key not in self._supplied:
                 supplied_corpus = CorpusIndex(supplied_blocks, corpus_id=self.corpus.corpus_id,
                     snapshot_id=self.corpus_snapshot_id, source_metadata=source_metadata)
@@ -278,6 +284,8 @@ class SharedEvidenceProvider:
                     pending_dependencies.append(identity)
         initial = tuple(unit for unit in units if unit.unit_id in initial_ids)
         pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
+        if candidate_view:
+            return query, initial if candidate_view == "initial" else (*initial, *pending)
         evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
         selected = ()
@@ -358,6 +366,7 @@ class SharedEvidenceProvider:
     def _reuse_computations(state, history):
         from controller.serialization import decode
         legal = set(state.query.task.effective_source_scope)
+        programs = () if state.query.task.coverage_scope == "all_supplied_documents" else state.programs
         reused = []
         for past in history:
             for computation in past["computations"]:
@@ -366,7 +375,7 @@ class SharedEvidenceProvider:
                 sources = tuple(decode(SourceSpan, source) for source in computation["sources"])
                 if any(source.source_key not in legal for source in sources):
                     continue
-                for program in state.programs:
+                for program in programs:
                     if computation["input"] != computation_signature(program):
                         continue
                     # Identical source-addressed input fields and predicates identify a reusable calculation.

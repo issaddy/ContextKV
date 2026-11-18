@@ -1,6 +1,6 @@
 # ContextKV 运行手册
 
-当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，复用查询 LoRA 和 Jina 骨干；任务、字段、集合和停止头按当前协议训练。快速对照使用每个 benchmark、每种方法相同的 20 题。
+当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，复用查询 LoRA 和 Jina 骨干；任务、字段、集合和停止头按当前协议训练。
 
 当前总体任务使用完整来源编码和按文档覆盖的证据投影，普通任务使用学习到的集合效用和停止决策。固定生成模型只接收预算内原文与计算结果。总体上下文使用新增 KV 页预算；跨轮来源需求和稳定引用头连接原生缓存保留。当前效果见[实测报告](results.md)。
 
@@ -36,6 +36,21 @@
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
+mkdir -p runs
+TRAIN_RUN=$(mktemp -d runs/train-XXXXXX)
+export TRAIN_RUN
+python3 - <<'PYCFG'
+from pathlib import Path
+import os
+import yaml
+
+run = Path(os.environ["TRAIN_RUN"])
+config = yaml.safe_load(Path("configs/study.yaml").read_text())
+config["shared"]["query"]["asset_path"] = str(run / "query")
+config["shared"]["evidence"]["asset_path"] = str(run / "evidence")
+config["shared"]["runtime"]["kv_quality_asset"] = str(run / "kv.json")
+(run / "study.yaml").write_text(yaml.safe_dump(config))
+PYCFG
 
 python3 -m training.prepare_shared_labels \
   --task-only --source data/multidoc2dial/source \
@@ -54,7 +69,7 @@ python3 -m training.prepare_shared_labels \
 python3 -m training.shared_training query \
   --model models/qwen3-embedding-0.6b --init-asset models/shared-query \
   --data data/training/shared/query_labels.jsonl \
-  --output models/shared-query --device cuda:2 --heads-only --epochs 20 --learning-rate 0.0002
+  --output "$TRAIN_RUN/query" --device cuda:2 --heads-only --epochs 20 --learning-rate 0.0002
 
 python3 -m training.prepare_shared_labels \
   --query-model models/qwen3-embedding-0.6b \
@@ -62,9 +77,9 @@ python3 -m training.prepare_shared_labels \
   --output data/training/shared/query_labels.jsonl --concurrency 4
 
 python3 -m training.shared_training coverage \
-  --model models/qwen3-embedding-0.6b --init-asset models/shared-query \
+  --model models/qwen3-embedding-0.6b --init-asset "$TRAIN_RUN/query" \
   --data data/training/shared/query_labels.jsonl \
-  --output models/shared-query --device cuda:2 --epochs 200 --learning-rate 0.001
+  --output "$TRAIN_RUN/query" --device cuda:2 --epochs 200 --learning-rate 0.001
 
 python3 -m training.shared_index \
   --corpus data/multidoc2dial/test/passages.jsonl \
@@ -74,45 +89,50 @@ python3 -m training.shared_index \
 
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
-  --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
+  --query-model models/qwen3-embedding-0.6b --query-asset "$TRAIN_RUN/query" \
   --init-asset models/shared-evidence --data data/training/shared/labels.jsonl \
-  --output models/shared-evidence-sections --device cuda:3 --field-only --epochs 1
+  --output "$TRAIN_RUN/evidence" --device cuda:3 --field-only --epochs 1
 
 python3 -m training.prepare_shared_labels \
   --values-only --source data/multidoc2dial/source \
   --query-model models/qwen3-embedding-0.6b \
   --endpoint http://127.0.0.1:30000 \
   --output data/training/shared/value_states.jsonl \
-  --train-states 24 --dev-states 8 --candidates 50 --concurrency 4
+  --train-states 24 --dev-states 8 --concurrency 4
+
+python3 -m training.calibrate_kv --config "$TRAIN_RUN/study.yaml" \
+  --data data/training/shared/labels.jsonl --output "$TRAIN_RUN/kv.json" --concurrency 4
 
 python3 -m training.collect_shared_values sets \
-  --config configs/study.yaml --data data/training/shared/value_states.jsonl \
+  --config "$TRAIN_RUN/study.yaml" --data data/training/shared/value_states.jsonl \
   --output data/training/shared/sets.jsonl --train-states 24 --dev-states 6 --concurrency 4
 
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
-  --query-model models/qwen3-embedding-0.6b --query-asset models/shared-query \
-  --init-asset models/shared-evidence-sections --data data/training/shared/sets.jsonl \
-  --output models/shared-evidence-sections --device cuda:3 --epochs 80 --learning-rate 0.001
+  --query-model models/qwen3-embedding-0.6b --query-asset "$TRAIN_RUN/query" \
+  --init-asset "$TRAIN_RUN/evidence" --data data/training/shared/sets.jsonl \
+  --output "$TRAIN_RUN/evidence" --device cuda:3 --epochs 80 --learning-rate 0.001
 
 python3 -m training.collect_shared_values stop \
-  --config configs/study.yaml --data data/training/shared/value_states.jsonl \
+  --config "$TRAIN_RUN/study.yaml" --data data/training/shared/value_states.jsonl \
   --output data/training/shared/stop.jsonl --train-states 12 --dev-states 4 --concurrency 4
 
 python3 -m training.stop_value data/training/shared/stop.jsonl \
-  --output models/shared-stop-sections.pt --device cuda:2 \
+  --output "$TRAIN_RUN/stop.pt" --device cuda:2 \
   --seconds-price 0.001 --tail-price 0.001
 ```
 
-停止轨迹采集前，用 `python3 -m training.calibrate_kv --config configs/study.yaml --data data/training/shared/labels.jsonl --output models/infoflow-quality.json --concurrency 4` 完成默认 4 状态的贪心质量配对。Native 和 InfoFlow 分批执行；随后每状态一次单 token 重访测量可复用阶段费用，首次编译与冷建的已付时间保留。重算比例、质量差和实测成本系数一起由控制器读取，训练采集使用相同政策。服务重启后沿用这些系数，后续请求的实测费用继续更新它们。
+训练产生的查询头、集合头、停止头和成本系数写入本次实验目录。Native 和 InfoFlow 分批执行；随后每状态一次单 token 重访测量可复用阶段费用，首次编译与冷建的已付时间保留。重算比例、质量差和实测成本系数一起由控制器读取，训练采集使用相同政策。服务重启后沿用这些系数，后续请求的实测费用继续更新它们。
 
-本轮实际训练数据为 `data/training/shared/section_states.jsonl`、`section_sets.jsonl` 和 `section_stop.jsonl`。新建数据时使用上面的标准入口；已有状态可直接采集新答案。代码 `4d9fdd5` 的最终 20 题队列位于 `runs/mechanism/sections/`，成本校准位于 `models/infoflow-quality.json`。比较结果见[实测报告](results.md)。
+范围标签按整题与各子需求分别生成。补采自然样本时，用 `--exclude-labelled-sessions` 指定已有标注文件，保留官方训练对话的原划分，并轮转采样不同深度的轮次。WikiSQL 范围样本保留原问题、表 ID、SQL 和匹配行数；同一百科页面只进入一个划分。容器中范围与集合监督位于 `data/training/shared/aux_supervision/{scope,sets}.jsonl`。单独重训现有范围头时，使用 `training.shared_training coverage --init-asset models/shared-query --data data/training/shared/aux_supervision/scope.jsonl`，其余参数沿用上面的命令，输出到新的训练目录。
 
-只更新集合／停止监督时，`prepare_shared_labels --values-only` 保留任务和来源，省去未使用的字段标注。完整字段标注使用 `--label-context-tokens`（默认 32768）按真实提示分包，并预留 4096 token 输出；不按候选数量猜测提示长度。采样按会话轮转，集合与停止采集分别沿用线上回答预算和依赖闭包。
+跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
+
+集合采集使用线上首批可见证据，比较当前选择、相邻集合与空集合。固定教师先根据参考答案拆分必要事实，再匿名评判各答案。每个集合保存官方质量、逐事实覆盖标记、输出长度和当时的选择特征。集合拟合使用答案质量，开发报告分别给出所选集合的质量与事实覆盖。字段损失只使用与标注对齐的子需求。范围头的开发指标使用与服务一致的整题和子需求联合路由。
 
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 
-标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督按每个会话两轮轮转采样；仅更新任务头时仍训练 Need 与冻结检索空间的对齐。字段监督按原消息坐标将标注对应到预测 Need。集合头单独拟合，冻结骨干只编码一次，后续轮次复用表示。集合/停止采集共用线上读取、状态准备、回答编译和预算执行器；最终质量来自实际结论与原文组成的回答，扩展费用包含新增编码、读取和计算。集合样本保存相对无证据回答的质量增益；停止样本保存紧凑表示与多步回报费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
+标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督轮转覆盖早期和后续轮次。仅更新任务头时仍训练 Need 与冻结检索空间的对齐。集合拟合直接读取采集时保存的特征。集合/停止采集共用线上读取、状态准备、回答编译和预算执行器；最终质量来自实际结论与原文组成的回答，扩展费用包含新增编码、读取和计算。集合拟合以同题空集合的答案质量为基准；停止样本保存紧凑表示与多步回报费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
 ## 少量端到端评测
 
@@ -130,9 +150,9 @@ python3 -m bench.study evaluate \
   --output runs/current/actual-history
 ```
 
-`--methods ordinary_rag contextkv llamaindex` 和 `--datasets multidoc2dial mtrag versionqa loong` 可指定本次范围。公开评测使用参考历史；实际历史评测在会话内顺序执行，失败轮次结束后，后续轮次使用此前已提交历史。
+`--methods ordinary_rag contextkv llamaindex` 和 `--datasets multidoc2dial mtrag versionqa loong` 可指定本次范围。公开评测使用参考历史；实际历史评测在会话内顺序提交导出的可评分轮次，失败轮次结束后，后续轮次使用此前已提交历史。
 
-连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次；当前清单保存在 `results/cooperation_optimization.json` 的 `cohorts`。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、已生成历史与到达偏移一致，分别使用语义排序 Native 和缓存成本排列，均从冷缓存开始，使用贪心生成并保留答案一致数。请求只在内存中暂存，输出 `cache_pair.json`；该配对的 P95 从输入就绪计时，完整队列的 P95 包含检索与辅助编码，质量按各 benchmark 原协议评分。
+连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次；当前清单保存在 `results/cooperation_optimization.json` 的 `cohorts`。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、已生成历史与到达偏移一致，先执行语义排序 Native 和缓存成本排列的 auto，再以 Native 重放 auto 使用的相同来源顺序，并在相同顺序下以 auto 省略未来来源需求。各路分别从冷 KV 开始，使用贪心生成并保留答案一致数。第三路直接读取已选顺序，省去在线报价时间。请求只在内存中暂存，输出 `cache_pair.json`；该配对的 P95 从输入就绪计时，完整队列的 P95 包含检索与辅助编码，质量按各 benchmark 原协议评分。
 
 KV 峰值直接读取页池，同时报告总驻留和不可淘汰的活动页峰值。`new_compute_kv_pages` 累计实际计算跨过的页边界，不包含 Host 搬运页；共享驻留容量按物理页计算一次。归还页会增加预分配池的可用容量，不会自动缩小该池。物理 GPU 占用按在线设备采样，评分设备不计入在线阶段。缓存配对同时给出参考 token F1；MT-RAG 的该指标与主队列官方综合分分别报告。
 

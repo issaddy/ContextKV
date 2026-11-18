@@ -130,10 +130,13 @@ class EvidenceHeads(nn.Module):
     def utility(self, embeddings, relevance, selected, support, completed):
         """Calibrated information gain: duplicates add no positive information."""
         features = self.features(embeddings, relevance, selected, support, completed)
+        return self.utility_from_features(features, completed)
+
+    def utility_from_features(self, features, completed):
         positive = features[:, [0, 3, 6, 7]].clamp_min(0)
         negative = features[:, [4, 5]]
-        weights = F.softplus(self.set_weights.to(embeddings.device))
-        bias = self.set_bias.to(embeddings.device)
+        weights = F.softplus(self.set_weights.to(features.device))
+        bias = self.set_bias.to(features.device)
         values = (bias + positive@weights[:4] - negative@weights[4:]).sigmoid()
         prior = (completed.mean()*weights[2] + completed.min()*weights[3]
                  if len(completed) else weights.new_zeros(()))
@@ -142,6 +145,10 @@ class EvidenceHeads(nn.Module):
     def loss(self, embeddings, relevance, masks, qualities, support, completed):
         predictions = self.utility(embeddings, relevance, masks, support, completed)
         empty = (masks == 0).all(dim=-1)
+        return self.gain_loss(predictions, qualities, empty)
+
+    @staticmethod
+    def gain_loss(predictions, qualities, empty):
         gains = qualities-qualities[empty].mean()
         loss = F.mse_loss(predictions, gains)
         return loss + F.kl_div(predictions.log_softmax(-1), gains.softmax(-1), reduction="sum")

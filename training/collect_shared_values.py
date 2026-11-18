@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 from urllib.parse import urlparse
 
+import httpx
 import yaml
 
 from controller.config import create_model_template, load_config, apply_study_config
@@ -17,8 +18,8 @@ from controller.cooperative import CooperativeController, execution_totals
 from controller.cooperative_request import compile_request, working_history
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceBlock, EvidencePool, EvidenceUnit, SessionSnapshot, TurnRecord
-from controller.serialization import decode
-from training.shared_collection import candidate_sets
+from controller.serialization import decode, to_jsonable
+from training.shared_collection import candidate_sets, reference_coverage
 from training.shared_training import conversation
 
 
@@ -29,6 +30,8 @@ def source_blocks(units):
 
 
 def history(row):
+    if "actual_history" in row:
+        return tuple(decode(TurnRecord, item) for item in row["actual_history"])
     grouped = {}
     for turn, role, text in conversation(row):
         grouped.setdefault(turn, {})[role] = text
@@ -38,7 +41,6 @@ def history(row):
 
 async def score_answers(rows, endpoint, *, model, concurrency):
     """Use the public F1 for MultiDoc; structured training uses reference correctness."""
-    import httpx
     from bench.official import reference_overlap
     semaphore = asyncio.Semaphore(concurrency)
     async with httpx.AsyncClient(timeout=180) as client:
@@ -87,11 +89,13 @@ async def collect(args):
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
     from adapters.shared_retrieval import SharedEvidenceState, SharedEvidenceProvider
     from adapters.document_compute import DocumentIndex
-    query_encoder = SharedQueryEncoder(**config["shared"]["query"])
-    # Set collection needs the existing field head, not a previously fitted set head.
-    evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"], train=args.stage == "sets")
-    evidence_encoder.model.eval()
-    evidence_encoder.heads.eval()
+    provider = (SharedEvidenceProvider(config, template)
+                if any(row["dataset"] == config["retrieval"]["corpus_id"] for row in source) else None)
+    if provider:
+        query_encoder, evidence_encoder = provider.query_encoder, provider.evidence_encoder
+    else:
+        query_encoder = SharedQueryEncoder(**config["shared"]["query"])
+        evidence_encoder = SharedEvidenceEncoder(**config["shared"]["evidence"])
     from controller.value_policy import StopValueHead
     controller = CooperativeController(None, engine, template, settings=run.cooperative,
         policy=run.context, stop_model=StopValueHead())
@@ -102,24 +106,25 @@ async def collect(args):
         roots = (os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)))
         sampler = StudyResourceSampler(tuple(args.gpu_devices), roots)
         await sampler.start()
-    outputs, answers, windows = [], [], {}
+    outputs, windows = [], {}
     limit = asyncio.Semaphore(args.concurrency)
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("")
-    records = []
+    record_count = answer_count = 0
 
     def save_record(record):
-        records.append(record)
+        nonlocal record_count, answer_count
         with path.open("a") as output:
             output.write(json.dumps(record, ensure_ascii=False)+"\n")
+        record_count += 1
+        answer_count += len(record["sets"] if args.stage == "sets" else record["states"])
 
     def state_for(query, encoded, observed, all_units, identity, totals, catalogue):
         from adapters.version_structure import catalogue_versions
         blocks = source_blocks(observed)
-        state = SharedEvidenceState(replace(query), encoded, EvidencePool(tuple(observed), blocks), (),
+        state = SharedEvidenceState(query, encoded, EvidencePool(tuple(observed), blocks), (),
             DocumentIndex.from_blocks(source_blocks(all_units)), body_tokens=config["selection"]["body_tokens"],
-            population_units=tuple(observed) if query.task.coverage_scope == "all_supplied_documents" else (),
             cache_scope=identity, cache_namespace=identity, totals=totals)
         SharedEvidenceProvider._finish_state(state)
         state.version_catalogue = catalogue_versions(catalogue, query.task.version_intent.document_families)
@@ -135,23 +140,28 @@ async def collect(args):
             await controller.read_required(state, snapshot, complete)
         request = await controller.answer_request(state, snapshot, complete)
         result = await complete(request, "answer")
-        item = {"source": row, "answer": result["text"]}
+        item = {"source": row, "answer": result["text"], "output_tokens": result["meta"]["completion_tokens"]}
         if args.stage == "stop":
             windows[identity] = started, time.monotonic()
             item.update(call_id=identity, costs={"seconds": windows[identity][1]-started})
-        answers.append(item)
         await engine.close_session(identity)
         return item
 
     async def collect_state(row, index):
         async with limit:
-            units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
             started = time.monotonic()
-            query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
-                row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
-            if query.task.coverage_scope == "all_supplied_documents":
+            snapshot = SessionSnapshot(row["task_id"], raw_history=history(row))
+            if row["dataset"] == config["retrieval"]["corpus_id"]:
+                query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"],
+                                                                  initial_only=args.stage == "sets")
+                row = {**row, "units": to_jsonable(units), "candidate_origin": "online_scope_hybrid"}
+            else:
+                units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
+                query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
+                    row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
+            if query.task.coverage_scope == "all_supplied_documents" or not units:
                 return
-            snapshot = SessionSnapshot(row["task_id"], raw_history=working_history(query, history(row)))
+            snapshot = replace(snapshot, raw_history=working_history(query, snapshot.raw_history))
             totals = execution_totals()
             if args.stage == "sets":
                 encoded = await asyncio.to_thread(evidence_encoder.encode, query, units)
@@ -161,7 +171,19 @@ async def collect(args):
                 sizes = {unit.unit_id: unit.body_tokens for unit in units}
                 frontier = tuple(ids for ids in encoded.frontier(units)
                                  if sum(sizes[identity] for identity in ids) <= budget)
-                for number, chosen in enumerate(candidate_sets(frontier)):
+                await controller._select_evidence(state, snapshot, state.computations)
+                choices = candidate_sets(frontier, state.selected_ids)
+                if row.get("paired_sets"):
+                    by_id = {unit.unit_id: unit for unit in units}
+                    for ids in row["paired_sets"]:
+                        blocks = SharedEvidenceProvider._closure((by_id[key] for key in ids), by_id)
+                        choice = tuple(block.unit_id for block in blocks)
+                        if choice not in choices and sum(sizes[key] for key in choice) <= budget:
+                            choices += (choice,)
+                support, known = encoded.need_support(units, tuple(n.need_id for n in query.task.needs), state.completed_needs)
+                masks = encoded.embeddings.new_tensor([[k in choice for k in encoded.unit_ids] for choice in choices])
+                features = encoded.heads.features(encoded.embeddings, encoded.relevance, masks, support, known).tolist()
+                for number, chosen in enumerate(choices):
                     identity = f"sets:{row['task_id']}:{number}"
                     branch = replace(state, query=replace(state.query), selected_ids=chosen,
                         read_units=set(state.read_units), processed_tables=set(state.processed_tables),
@@ -171,8 +193,14 @@ async def collect(args):
                     observations.append((chosen, item))
                 await score_answers([item for _, item in observations], run.engine.base_url,
                     model=run.model.name, concurrency=args.concurrency)
+                async with httpx.AsyncClient(timeout=180) as client:
+                    facts, marks = await reference_coverage(client, run.engine.base_url, run.model.name,
+                        row["question"], row["reference_answer"], [item["answer"] for _, item in observations])
                 save_record({**row, "completed_needs": sorted(state.completed_needs),
-                    "sets": [{"unit_ids": chosen, "quality": item["quality"]} for chosen, item in observations]})
+                    "selected_ids": state.selected_ids, "reference_facts": facts, "known": known.tolist(),
+                    "sets": [{"unit_ids": chosen, "quality": item["quality"], "covered_facts": flags,
+                              "output_tokens": item["output_tokens"], "features": vector}
+                             for (chosen, item), flags, vector in zip(observations, marks, features)]})
                 return
             paid_seconds = time.monotonic()-started
             warm = index % 2 == 1
@@ -235,10 +263,10 @@ async def collect(args):
             await sampler.stop()
         await engine.aclose()
         query_encoder.close()
-        if evidence_encoder:
-            evidence_encoder.close()
+        evidence_encoder.close()
     if args.stage == "stop":
         attributed = attribute_physical(sampler.samples, windows)
+        answers = [state["answer"] for _, states in outputs for state in states]
         for item in answers:
             item["costs"].update(attributed[item["call_id"]])
         await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
@@ -253,8 +281,8 @@ async def collect(args):
                 value["transition"] = {"seconds": windows[identity][1]-windows[identity][0], **attributed[identity]}
             states.append(value)
         save_record({"task_id": row["task_id"], "conversation_id": row["conversation_id"],
-                     "split": row["split"], "states": states})
-    return {"states": len(records), "answers": len(answers), "output": str(path)}
+                     "split": row["split"], "candidate_origin": row.get("candidate_origin", "supplied"), "states": states})
+    return {"states": record_count, "answers": answer_count, "output": str(path)}
 
 
 def main():

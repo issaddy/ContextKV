@@ -27,8 +27,10 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
     policy = load_kv_policy(run.cooperative)
     first = min(item["arrived"] for item in trace)
     branches, answers = [], []
+    priced_evidence = [None] * len(trace)
     try:
-        for mode in ("exact", "auto"):
+        for layout, mode in (("ranked", "exact"), ("priced", "auto"), ("same_order", "exact"),
+                             ("no_demand", "auto")):
             await engine.profile_prepare()
             start = time.monotonic()
             slots, sessions = asyncio.Semaphore(concurrency), {}
@@ -42,7 +44,8 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 lock = sessions.setdefault(session, asyncio.Lock())
                 async with lock, slots:
                     original = item["request"]
-                    evidence = item["ranked_evidence"]
+                    revisited = {block["source_id"] for block in original.blocks if block.get("revisited")}
+                    evidence = priced_evidence[index] if layout == "same_order" else item["ranked_evidence"]
                     if mode == "auto":
                         from controller.schema import SourceSpan
                         units = tuple(EvidenceUnit(source_address(block),
@@ -54,14 +57,19 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                         empty = compile_request(template, original.messages[-1].content, item["history"], (),
                                                 system_prompt=original.messages[0].content)
                         costs = EvidenceCosts(units, evidence, template.tokenizer, snapshot,
-                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy)
+                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy, previous_sources=revisited)
                         by_id = {source_address(block): block for block in evidence}
                         evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
+                        if layout == "priced":
+                            priced_evidence[index] = evidence
+                        else:
+                            evidence = priced_evidence[index]
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
                         system_prompt=original.messages[0].content)
                     shift = len(request.input_ids)-len(original.input_ids)
-                    request = replace(request, query_span=tuple(position+shift for position in original.query_span))
-                    if mode == "auto":
+                    request = replace(request, query_span=tuple(position+shift for position in original.query_span),
+                        blocks=tuple({**block, "revisited": block["source_id"] in revisited} for block in request.blocks))
+                    if layout == "priced":
                         from controller.cooperative_request import with_source_demand
                         request = with_source_demand(request, original.demand)
                     result = await engine.compute(request, **options)
@@ -71,14 +79,14 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 texts[index] = result["text"]
             await asyncio.gather(*(execute(i, item) for i, item in enumerate(trace)))
             kv = await engine.metrics()
-            branches.append({"mode": mode, "requests": len(records),
+            branches.append({"mode": mode, "order": layout, "requests": len(records),
                 "p95_seconds": _quantile([row["complete_ms"]/1000 for row in records], .95),
                 "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
                 "gpu_kv_active_peak_tokens": kv["gpu_active_peak_tokens"],
                 "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
                 **{name: sum(row[name] for row in records) for name in (
                     "input_tokens", "output_tokens", "device_hit_tokens", "host_loaded_tokens",
-                    "prefill_tokens", "new_compute_kv_pages")},
+                    "prefill_tokens", "new_compute_kv_pages", "engine_ms")},
                 "infoflow_requests": sum(row["mode"] == "infoflow" for row in records)})
             answers.append(texts)
             if metric in ("f1", "mtrageval_harmonic"):
@@ -90,8 +98,11 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 await engine.close_session(session)
     finally:
         await engine.aclose()
-    value = {"conditions": "Identical actual evidence members, questions, histories and arrival offsets; semantic Native order versus cache-priced order. Cold start per branch, greedy generation, all construction costs included.",
-             "branches": branches, "identical_answers": sum(a == b for a,b in zip(*answers)),
+    value = {"conditions": "Same evidence members, histories and arrival offsets. Each branch starts with cold KV and greedy sampling. same_order_native replays the auto branch's exact evidence order without repeating its price lookup. no_demand keeps the auto layout and lookup but submits no future-source demand.",
+             "branches": branches[:2], "same_order_native": branches[2], "same_order_no_demand": branches[3],
+             "no_demand_identical_answers": sum(a == b for a,b in zip(answers[1], answers[3])),
+             "identical_answers": sum(a == b for a,b in zip(answers[0], answers[1])),
+             "same_order_identical_answers": sum(a == b for a,b in zip(answers[1], answers[2])),
              "questions": len(trace)}
     Path(output).write_text(json.dumps(value, ensure_ascii=False, indent=2)+"\n")
     return value
