@@ -10,7 +10,7 @@ from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
 from adapters.shared_encoding import SharedEvidenceEncoder, SharedQueryEncoder
-from adapters.version_structure import VersionIndex, catalogue_versions
+from adapters.version_structure import VersionIndex, catalogue_versions, resolve_versions
 from controller.schema import EvidencePool, SourceSpan
 from controller.schema import OnlineContext, QueryContext, history_messages
 from controller.cooperative_request import EvidenceSelection
@@ -72,12 +72,21 @@ class SharedEvidenceState:
         return {record["need_id"] for record in self.computations if record["complete"]}
 
     @property
+    def needs_complete(self):
+        completed = self.completed_needs
+        return bool(self.query.task.needs) and all(
+            need.need_id in completed for need in self.query.task.needs)
+
+    @property
     def open_needs(self):
-        selected = [unit for unit in self.pool.units if unit.unit_id in self.selected_ids]
-        supported = {binding.need_id for binding in self.evidence.bindings if binding.role == "source" and any(
-            span.source_key == binding.source_span.source_key and span.start <= binding.source_span.start
-            and binding.source_span.end <= span.end for unit in selected for span in unit.source_spans)}
-        return tuple(need for need in self.query.task.needs if need.need_id not in self.completed_needs
+        if self.needs_complete:
+            return ()
+        needs = self.query.task.needs
+        completed = self.completed_needs
+        coverage = self.evidence.coverage(self.selected_ids, self.pool.units,
+            tuple(need.need_id for need in needs), completed)
+        supported = {need.need_id for need, value in zip(needs, coverage) if float(value) > 0}
+        return tuple(need for need in self.query.task.needs if need.need_id not in completed
                      and (need.operation in {"count", "sum", "mean", "min", "max", "group"}
                           or need.need_id not in supported))
 
@@ -177,12 +186,7 @@ class SharedEvidenceProvider:
             history_turns=tuple(dict.fromkeys(ref.turn_id for ref in history_refs)))
         intent = query.task.version_intent
         families = intent.document_families
-        wanted_versions = intent.version_ids
-        if intent.temporal_relation in {"before", "after"}:
-            related = tuple(versions.adjacent(family, version, intent.temporal_relation)
-                for family, version in versions.versions if (not families or family in families)
-                and version in wanted_versions)
-            wanted_versions = tuple(dict.fromkeys((*wanted_versions, *filter(None, related)))) if intent.mode == "compare" else tuple(filter(None, related))
+        wanted_versions = resolve_versions(intent, catalogue)
         # The catalogue head resolves as_of text to version IDs during the shared
         # query pass; natural-language date spans are not sortable timestamps.
         version_keys = versions.legal_keys(families=families, versions=wanted_versions,
@@ -190,7 +194,8 @@ class SharedEvidenceProvider:
         if intent.mode in {"explicit", "as_of"} and not wanted_versions:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
-        query.task = replace(query.task, effective_source_scope=legal)
+        query.task = replace(query.task, effective_source_scope=legal,
+            version_intent=replace(intent, resolved_version_ids=tuple(wanted_versions)))
         legal_set = set(legal)
         previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
                                if span.source_key in legal_set)
@@ -199,10 +204,30 @@ class SharedEvidenceProvider:
         if complete_population:
             query.task = replace(query.task, coverage_scope="all_supplied_documents")
         full = complete_population and (supplied_blocks is not None or bool(families))
+        usage = dict(query.usage)
+        available = self._body_budget(snapshot, query)
+        def finish(state):
+            state.version_catalogue = catalogue_versions(catalogue, families)
+            if supplied_blocks is not None:
+                from controller.cooperative_request import document_headers
+                state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
+            context = QueryContext(question, "shared", task_state=query.task,
+                history_turns=tuple(dict.fromkeys(ref.turn_id for ref in query.task.working_history)))
+            usage["compute_ms"] = (time.perf_counter()-started)*1000
+            return EvidenceSelection(state.pool.source_blocks, context, auxiliary_usage=usage, shared_state=state)
+        fixed_claims = ()
         population_units = ()
         historical_ids = ()
         if full:
-            document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
+            blocks = corpus.resolve(legal)
+            if facts and not candidate_view:
+                state = SharedEvidenceState(query, None, EvidencePool((), blocks), (), DocumentIndex((), blocks),
+                    body_tokens=available, evidence_batch=self.evidence_batch)
+                fixed_claims = self._reuse_computations(state, facts)
+                state.reused_claims = state.computations = fixed_claims
+                if state.needs_complete:
+                    return finish(state)
+            document_index = DocumentIndex.from_blocks(blocks)
             pool = directory.full_scope(legal)
             population_units = pool.units
             query.source_titles = tuple(block.title for block in pool.source_blocks)
@@ -271,8 +296,6 @@ class SharedEvidenceProvider:
             document_index = DocumentIndex.from_blocks(pool.source_blocks)
             query.task = replace(query.task, effective_source_scope=tuple(block.key for block in pool.source_blocks))
         units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in units)
-        usage = dict(query.usage)
-        available = self._body_budget(snapshot, query)
         by_id = {unit.unit_id: unit for unit in units}
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
         initial_ids.update(historical_ids)
@@ -329,17 +352,10 @@ class SharedEvidenceProvider:
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units,
             evidence_batch=self.evidence_batch)
-        state.version_catalogue = catalogue_versions(catalogue, families)
-        if supplied_blocks is not None:
-            from controller.cooperative_request import document_headers
-            state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
         self._finish_state(state)
-        state.reused_claims = self._reuse_computations(state, facts)
+        state.reused_claims = fixed_claims if full else self._reuse_computations(state, facts)
         state.computations = state.reused_claims
-        context = QueryContext(question, "shared", task_state=query.task,
-            history_turns=tuple(dict.fromkeys(ref.turn_id for ref in query.task.working_history)))
-        usage["compute_ms"] = (time.perf_counter()-started)*1000
-        return EvidenceSelection(pool.source_blocks, context, auxiliary_usage=usage, shared_state=state)
+        return finish(state)
 
     def _body_budget(self, snapshot, query):
         from controller.schema import Message

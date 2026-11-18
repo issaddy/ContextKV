@@ -8,7 +8,8 @@ import time
 
 import torch
 
-from sglang.srt.managers.kv_cost import exact_cost, infoflow_cost, page_tokens
+from sglang.srt.managers.kv_cost import (exact_cost, infoflow_cost, infoflow_work,
+                                      page_tokens, retention_value, select_route)
 from sglang.srt.managers.infoflow import QwenInfoFlow, RequestState, SourceBlock
 from sglang.srt.mem_cache.base_prefix_cache import InsertParams, MatchPrefixParams
 from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -53,37 +54,27 @@ class ComputeRuntime:
     def control(self, action, data):
         if action == 'evidence_state':
             scope = data.get('cache_scope', 'shared')
-            session = data.get('session_id')
-            if session is not None:
-                previous = self.demands.get(session, {})
-                retained = {(scope, address) for address in data['retained_sources']}
-                if previous.keys() - retained:
-                    self.demands[session] = {key: item for key, item in previous.items() if key in retained}
-                    self._refresh_priorities()
-                    self._demote_unused()
             wanted = set(data['source_ids'])
             sources, prefixes = {}, []
             for address in wanted:
                 source_id = scope, address
-                sources[address] = dict(zip(('gpu_tokens', 'host_tokens'), self._resident(source_id, 'infoflow')))
-                sources[address]['unpinned_nodes'] = self._page_nodes(source_id, 'infoflow')
-                sources[address]['host_nodes'] = self._page_nodes(source_id, 'infoflow', host=True)
+                sources[address] = self._source_state(source_id, 'infoflow')
                 prefix = self.source_prefixes.get(source_id)
                 if prefix is not None and prefix['namespace'] == data.get('cache_namespace') and set(prefix['sources']) <= wanted:
-                    gpu, host = self._resident(source_id, 'exact')
+                    resident = self._source_state(source_id, 'exact')
+                    gpu, host = resident['gpu_tokens'], resident['host_tokens']
                     gpu, host = min(gpu, prefix['tokens']), min(host, max(0, prefix['tokens']-gpu))
                     if gpu + host and gpu + host >= prefix["tokens"] // self.cache.page_size * self.cache.page_size:
                         prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host,
-                                             unpinned_nodes=self._page_nodes(source_id, 'exact')))
+                                             gpu_nodes=resident['gpu_nodes'], unpinned_nodes=resident['unpinned_nodes']))
             return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs),
                         queue_depth=len(self.scheduler.waiting_queue),
                         page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
+                        max_input_tokens=self.scheduler.max_req_input_len,
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':
-            retired = self.demands.pop(data['session_id'], None)
+            self.demands.pop(data['session_id'], None)
             self._refresh_priorities()
-            if retired:
-                self._demote_unused()
             return {'closed': True}
         if action == 'info':
             host = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
@@ -117,35 +108,23 @@ class ComputeRuntime:
     def _key(self, source_id, ids):
         return RadixKey(array('q', ids), cache_salt='contextkv:independent-block:' + source_id[0])
 
-    def _resident(self, source_id, mode):
-        node_id = self.source_nodes.get((source_id, mode))
-        if node_id is None:
-            return 0, 0
-        node = self.cache.tree_core._node_arena.get(node_id)
-        gpu = host = 0
+    def _source_state(self, source_id, mode):
+        node = self.cache.tree_core._node_arena.get(self.source_nodes.get((source_id, mode)))
+        gpu, host, unpinned = {}, {}, {}
         while node is not None and node.parent is not None:
             component = node.component_data[0]
             if component.value is not None:
-                gpu += len(component.value)
+                gpu[node.id] = len(component.value)
+                if component.lock_ref == 0:
+                    unpinned[node.id] = len(component.value)
             elif component.host_value is not None and node.write_through_pending_id is None:
-                host += len(component.host_value)
+                host[node.id] = len(component.host_value)
             node = node.parent
-        return gpu, host
+        return dict(gpu_tokens=sum(gpu.values()), host_tokens=sum(host.values()),
+                    gpu_nodes=gpu, host_nodes=host, unpinned_nodes=unpinned)
 
     def _match(self, source_id, ids):
         return self.cache.match_prefix(MatchPrefixParams(key=self._key(source_id, ids)))
-
-    def _page_nodes(self, source_id, mode, *, host=False):
-        node = self.cache.tree_core._node_arena.get(self.source_nodes.get((source_id, mode)))
-        nodes = {}
-        while node is not None and node.parent is not None:
-            component = node.component_data[0]
-            if host and component.value is None and component.host_value is not None and node.write_through_pending_id is None:
-                nodes[node.id] = len(component.host_value)
-            elif not host and component.value is not None and component.lock_ref == 0:
-                nodes[node.id] = len(component.value)
-            node = node.parent
-        return nodes
 
     def _indices(self, match):
         return self.cache.path_device_indices(match.last_device_node)[:match.device_prefix_len]
@@ -171,7 +150,7 @@ class ComputeRuntime:
         page = self.cache.page_size
         blocks, warm, cold, host_pages, gpu_nodes = [], 0, 0, set(), set()
         reuse_ends = []
-        new_gpu_pins = 0
+        new_gpu_pins = resident_gpu = 0
         for spec in metadata.get('blocks', ()):
             start = int(spec['start'])
             end = int(spec['end'])
@@ -194,8 +173,10 @@ class ComputeRuntime:
                 while node.parent is not None and node.id not in gpu_nodes:
                     gpu_nodes.add(node.id)
                     component = node.component_data[0]
-                    if component.value is not None and component.lock_ref == 0:
-                        new_gpu_pins += len(component.value)
+                    if component.value is not None:
+                        resident_gpu += len(component.value)
+                        if component.lock_ref == 0:
+                            new_gpu_pins += len(component.value)
                     node = node.parent
             blocks.append((source_id, start, end, match, block_ids))
         costs = self.costs
@@ -208,16 +189,29 @@ class ComputeRuntime:
         approximate = infoflow_cost(costs, prompt, warm + cold, cold, len(host_pages), ratio, output_limit, quality_ms)
         mode = metadata.get('mode', 'auto')
         beyond_prefix = any(end // page * page > native.device_prefix_len + native.host_hit_length for end in reuse_ends)
-        if mode == 'auto':
-            mode = ('infoflow' if 'prefill_token_ms' in costs and beyond_prefix
-                    and approximate < exact
-                    else 'exact')
-            cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
-                            if match.device_prefix_len+match.host_hit_length < len(tokens))
-            work = cold_work + page_tokens(prompt, page) + prompt + math.ceil((warm + cold)*ratio)
-            allocation = page_tokens(work + output_limit, page) + len(host_pages) + new_gpu_pins
-            if work > self.scheduler.max_req_input_len or allocation > self.allocator.available_size() + self.cache.evictable_size():
-                mode = 'exact'
+        native_pins = native_resident = 0
+        node = self.cache.tree_core.node_by_id(native.last_device_node)
+        while node.parent is not None:
+            component = node.component_data[0]
+            if component.value is not None:
+                native_resident += len(component.value)
+                if component.lock_ref == 0:
+                    native_pins += len(component.value)
+            node = node.parent
+        cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
+                        if match.device_prefix_len+match.host_hit_length < len(tokens))
+        work = infoflow_work(cold_work, prompt, warm+cold, ratio, page)
+        exact_route = {"mode": "exact", "milliseconds": exact, "work_tokens": len(ids),
+                       "new_tokens": page_tokens(max(0, len(ids)+output_limit-native.device_prefix_len), page),
+                       "pin_tokens": native_pins, "resident_tokens": native_resident}
+        approximate_route = {"mode": "infoflow", "milliseconds": approximate, "work_tokens": work,
+                             "new_tokens": page_tokens(work+output_limit, page)+len(host_pages),
+                             "pin_tokens": new_gpu_pins, "resident_tokens": resident_gpu}
+        route = select_route(exact_route,
+            approximate_route if mode == 'infoflow' or beyond_prefix else None,
+            mode=mode, available_tokens=self.allocator.available_size()+self.cache.evictable_size(),
+            capacity_tokens=self.allocator.size, max_input_tokens=self.scheduler.max_req_input_len)
+        mode = route['mode']
         state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool)
         state.route_costs = {"exact": exact, "infoflow": approximate, "nonprefix_opportunity": beyond_prefix}
         state.runtime = self
@@ -358,12 +352,11 @@ class ComputeRuntime:
             if item is not None and (mode != 'exact' or 'native_prefix_end' in item):
                 identities = item.get('consumer_ids', ()) or ('next',)
                 for consumer in identities:
-                    replay = item['recompute_ratio'] * self.costs.get('recompute_token_ms', 0.0) if mode == 'infoflow' else 0.0
-                    values[session, consumer] = (max(0.0, self.costs.get('prefill_token_ms', 0.0) - replay)
-                                                * float(item.get('uses', 0))/len(identities))
+                    values[session, consumer] = (float(item['uses'])/len(identities), item['recompute_ratio'])
         return values
 
     def _refresh_priorities(self):
+        started = time.perf_counter()
         self.demands = {session: scope for session, scope in self.demands.items() if scope}
         for node_id in self.prioritized_nodes:
             node = self.cache.tree_core._node_arena.get(node_id)
@@ -381,7 +374,14 @@ class ComputeRuntime:
                 consumers = self._consumers(source_id, mode)
                 while node.parent is not None:
                     values = nodes.setdefault(node.id, {})
-                    for consumer, value in consumers.items():
+                    component = node.component_data[0]
+                    on_gpu = component.value is not None
+                    host_copy = component.host_value is not None and node.write_through_pending_id is None
+                    # Priorities retain existing pages. New construction and transfers
+                    # are priced at admission, rather than charged again here.
+                    for consumer, (uses, ratio) in consumers.items():
+                        value = uses * retention_value(self.costs, mode=mode,
+                            on_gpu=on_gpu, host_copy=host_copy, ratio=ratio)
                         key = consumer, mode
                         values[key] = max(values.get(key, 0.0), value)
                     node = node.parent
@@ -398,12 +398,16 @@ class ComputeRuntime:
             if previous is None or value > benefits[consumer, previous] or (
                     value == benefits[consumer, previous] and mode == 'exact'):
                 chosen[consumer] = mode
+        benefit = sum(benefits[consumer, mode] for consumer, mode in chosen.items())
+        net = max(0.0, benefit-self.costs.get('retention_control_ms', 0.0)) / benefit if benefit else 0.0
         for node_id, consumers in nodes.items():
-            priority = int(1000 * sum(value for (consumer, mode), value in consumers.items()
+            priority = int(1000 * net * sum(value for (consumer, mode), value in consumers.items()
                                       if chosen[consumer] == mode))
             self.cache.tree_core.node_by_id(node_id).priority = priority
             if priority:
                 self.prioritized_nodes.add(node_id)
+        elapsed = (time.perf_counter()-started)*1000
+        self.costs['retention_control_ms'] = .8*self.costs.get('retention_control_ms', elapsed)+.2*elapsed
 
     def ready_tokens(self, state):
         from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
@@ -425,22 +429,6 @@ class ComputeRuntime:
                          and node.write_through_pending_id is None else 0)
                 node = node.parent
         return gpu, host
-
-    def _demote_unused(self):
-        """Keep backed-up evidence on Host when no current demand values its GPU pages."""
-        tree = self.cache.tree_core
-        pending = list(tree.evictable_device_leaves)
-        tracker = {component: 0 for component in self.cache.tree_components}
-        started = time.perf_counter()
-        while pending:
-            node = pending.pop()
-            if (node.priority == 0 and node in tree.evictable_device_leaves
-                    and node.backuped and node.write_through_pending_id is None):
-                self.cache._demote(node.id, tracker)
-                if node.parent in tree.evictable_device_leaves:
-                    pending.append(node.parent)
-        if tracker[0]:
-            self.cache.update_eviction_metrics(tracker[0], time.perf_counter()-started)
 
     def finish(self, req):
         state = req.contextkv_compute_state
@@ -484,8 +472,6 @@ class ComputeRuntime:
                     self.source_nodes[source_id, 'exact'] = match.best_match_node
                     self.source_prefixes[source_id] = dict(sources=tuple(prefix), tokens=item['end'], namespace=req.cache_salt)
         self._refresh_priorities()
-        if state.metadata.get('mode') == 'auto':
-            self._demote_unused()
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, route_cost_ms=state.route_costs, input_tokens=len(state.input_ids),
             output_tokens=output_count, elapsed_ms=elapsed,

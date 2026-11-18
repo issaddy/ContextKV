@@ -95,6 +95,11 @@ class EvidenceHeads(nn.Module):
         return logits.view(len(queries), len(states), len(FIELD_ROLES), 3)
 
     @staticmethod
+    def coverage(support, selected, completed):
+        covered = (selected[:, :, None, None] * support[None]).amax(1).amin(-1)
+        return torch.maximum(covered, completed[None])
+
+    @staticmethod
     def features(embeddings, relevance, selected, support, completed):
         """Bounded information state shared by selection and stopping."""
         selected = selected.bool()
@@ -114,9 +119,9 @@ class EvidenceHeads(nn.Module):
         pairs = mask[:, :, None]*mask[:, None, :]*(1-torch.eye(len(relevance), device=mask.device))
         redundancy = (pairs*similarity).amax((1, 2))[:, None]
         if support.shape[1]:
-            grounded = support*relevance.clamp_min(0)[:, None]
-            need_coverage = torch.maximum((mask[:, :, None]*grounded[None]).amax(1), completed[None])
-            all_coverage = torch.maximum(grounded.amax(0), completed)
+            grounded = support*relevance.clamp_min(0)[:, None, None]
+            need_coverage = EvidenceHeads.coverage(grounded, mask, completed)
+            all_coverage = EvidenceHeads.coverage(grounded, torch.ones_like(mask[:1]), completed)[0]
             need_mean = need_coverage.mean(-1, keepdim=True)
             need_min = need_coverage.amin(-1, keepdim=True)
             gap = (all_coverage[None]-need_coverage).mean(-1, keepdim=True)

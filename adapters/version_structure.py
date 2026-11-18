@@ -17,6 +17,35 @@ def catalogue_versions(catalogue, families=()):
     return result
 
 
+def resolve_versions(intent, catalogue):
+    """Resolve temporal references on the same declared axis in serving and training."""
+    wanted = intent.version_ids
+    if intent.temporal_relation not in {"before", "after"}:
+        return wanted
+    families = {}
+    for row in catalogue:
+        if not intent.document_families or row["family"] in intent.document_families:
+            families.setdefault(row["family"], {})[row["version"]] = row
+    related = []
+    for members in families.values():
+        for version in wanted:
+            if version not in members:
+                continue
+            anchor = members[version]
+            axis = "version_order" if anchor.get("version_order") else "valid_from"
+            value = tuple(anchor[axis]) if axis == "version_order" else anchor.get(axis)
+            if value is None:
+                continue
+            candidates = []
+            for name, row in members.items():
+                position = tuple(row.get(axis, ())) if axis == "version_order" else row.get(axis)
+                if position is not None and (position < value if intent.temporal_relation == "before" else position > value):
+                    candidates.append((position, name))
+            if candidates:
+                related.append((max(candidates) if intent.temporal_relation == "before" else min(candidates))[1])
+    return tuple(dict.fromkeys((*(wanted if intent.mode == "compare" else ()), *related)))
+
+
 @dataclass(frozen=True)
 class VersionPart:
     address: tuple[str, ...]
@@ -107,17 +136,6 @@ class VersionIndex:
                         continue
             selected.extend(info["keys"])
         return tuple(selected)
-
-    def adjacent(self, family, version, direction):
-        """Resolve a predecessor/successor on the source-declared version axis."""
-        members = {key[1]: info for key, info in self.versions.items() if key[0] == family}
-        axis = "order" if members[version]["order"] else "valid_from"
-        anchor = members[version][axis]
-        if anchor is None:
-            return None
-        values = [(info[axis], name) for name, info in members.items() if info[axis] is not None
-                  and (info[axis] < anchor if direction == "before" else info[axis] > anchor)]
-        return (max(values) if direction == "before" else min(values))[1] if values else None
 
     def paired_units(self, family, before_version, after_version, selected_spans=()):
         """Retrieve both sides of matching sections/fields, including unchanged content."""

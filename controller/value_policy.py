@@ -10,7 +10,8 @@ from torch import nn
 STATE_FIELDS = (
     "remaining_source_fraction", "open_need_fraction", "unread_row_fraction",
     "context_fraction", "next_source_tokens", "elapsed_seconds", "queue_depth",
-    "gpu_ready_fraction", "host_ready_fraction", "prefill_token_ms", "transfer_token_ms", "answer_cost_ms",
+    "next_gpu_hit_delta", "next_host_load_delta", "prefill_token_ms", "transfer_token_ms", "answer_cost_ms",
+    "next_encoding_ms", "next_context_cost_ms",
 )
 SUMMARY_SIZE = 16
 VALUE_FIELDS = ("quality", "seconds", "gpu_gib_seconds", "host_gib_seconds")

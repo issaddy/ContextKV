@@ -27,3 +27,33 @@ def infoflow_cost(costs, prompt, body, cold, host, ratio, output_limit, quality_
             + prompt * costs.get("score_token_ms", prefill)
             + (prompt + ratio * body) * costs.get("recompute_token_ms", prefill)
             + decode_cost(costs, "infoflow", output_limit) + quality_ms)
+
+
+def infoflow_work(cold_pages, prompt, body, ratio, page):
+    return cold_pages + page_tokens(prompt, page) + prompt + math.ceil(body * ratio)
+
+
+def select_route(exact, approximate, *, mode, available_tokens, capacity_tokens, max_input_tokens):
+    """Prefer executable routes; keep a feasible queued route when the pool is busy."""
+    routes = ([exact] if mode == "exact" or approximate is None else
+              [approximate] if mode == "infoflow" else [exact, approximate])
+    feasible = [route for route in routes
+                if route["work_tokens"] <= max_input_tokens
+                and route["new_tokens"] + route["resident_tokens"] <= capacity_tokens]
+    ready = [route for route in feasible
+             if route["new_tokens"] + route["pin_tokens"] <= available_tokens]
+    chosen = min(ready or feasible or routes, key=lambda route: route["milliseconds"])
+    return {**chosen, "feasible": chosen in feasible, "fits": chosen in ready}
+
+
+def retention_value(costs, *, mode, on_gpu, host_copy, ratio):
+    """Marginal milliseconds saved per retained token relative to its next tier."""
+    prefill = costs.get("prefill_token_ms", 1.0)
+    transfer = costs.get("transfer_token_ms", prefill * .05)
+    rebuild = prefill
+    if mode == "infoflow":
+        replay = ratio * costs.get("recompute_token_ms", prefill)
+        rebuild = min(costs.get("build_token_ms", prefill), max(0.0, prefill - replay))
+    if on_gpu and host_copy:
+        return min(transfer, rebuild)
+    return max(0.0, rebuild - (0.0 if on_gpu else transfer))

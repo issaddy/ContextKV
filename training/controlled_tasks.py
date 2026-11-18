@@ -152,6 +152,28 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
                 "current": version == "2025", "valid_from": version+"-01-01",
                 "valid_to": "2025-01-01" if version == "2021" else None,
                 "title": f"Filing policy {version}", "text": policy})
+        assets = {"2023": randomizer.randrange(30, 70), "2024": randomizer.randrange(80, 120)}
+        total_assets = assets["2024"] + randomizer.randrange(100, 200)
+        asset_ids = []
+        for suffix, version, entity, field_name, amount in (
+                ("current-2023", "2023", names[0], "Current assets", assets["2023"]),
+                ("current-2024", "2024", names[0], "Current assets", assets["2024"]),
+                ("total-2024", "2024", names[0], "Total assets", total_assets),
+                ("other-2024", "2024", names[1], "Current assets", assets["2024"] + 19)):
+            passage = f"{family}:assets:{suffix}"
+            asset_ids.append(passage)
+            documents.append({"passage_id": passage, "document_id": family+":assets",
+                "document_family": family+":assets", "version": version,
+                "version_order": [int(version)], "current": version == "2024",
+                "valid_from": version+"-01-01", "valid_to": "2024-01-01" if version == "2023" else None,
+                "title": f"{entity} statement {version}",
+                "text": f"{entity}, statement {version}. {field_name}: {amount} credits."})
+        mixed_amount = randomizer.randrange(10, 30)
+        for kind, footer in (("contribution", f"Outside the table, {names[2]} contributed {mixed_amount} credits."),
+                             ("metadata", "Prepared on 2024-06-30. This date is publication metadata.")):
+            documents.append({"passage_id": f"{family}:mixed:{kind}", "document_id": f"{family}:mixed:{kind}",
+                "version": "2024", "title": "Mixed contributions",
+                "text": f"| Account | Amount (credits) |\n|---|---|\n| {names[0]} | 10 |\n| {names[1]} | 20 |\n\n{footer}\n"})
         for document in documents:
             document["source_uri"] = "training://"+document["passage_id"]
         corpus = CorpusIndex.from_records(documents, corpus_id="shared_training", snapshot_id=family)
@@ -185,6 +207,16 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
             ("Compare the Linux filing allowances in versions 2021 and 2025.",
                 f"2021: {values['2021', 'Linux']} credits; 2025: {values['2025', 'Linux']} credits", policy_ids),
             ("For Windows, which allowance applied on 2022-06-01?", f"{values['2021', 'Windows']} credits", policy_ids),
+            (f"What are the current assets of {names[0]} in statement version 2024?",
+                f"{assets['2024']} credits", asset_ids),
+            (f"Compare the current assets of {names[0]} in statement versions 2023 and 2024.",
+                f"2023: {assets['2023']} credits; 2024: {assets['2024']} credits", asset_ids),
+            (f"For {names[0]} in version 2024, give current assets and total assets separately.",
+                f"Current assets: {assets['2024']} credits; total assets: {total_assets} credits", asset_ids),
+            ("Sum all contributions in the complete supplied document, including contributions outside the table.",
+                f"{30+mixed_amount} credits", [family+":mixed:contribution"]),
+            ("Sum all contributions in this complete document. Publication dates are not contributions.",
+                "30 credits", [family+":mixed:metadata"]),
         ]
         history = []
         for turn, (question, answer, passages) in enumerate(cases, 1):
@@ -192,12 +224,19 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
             catalogue = [{"family": family+":policy", "version": version, "valid_from": version+"-01-01",
                 "valid_to": "2025-01-01" if version == "2021" else None, "current": version == "2025"}
                 for version in ("2021", "2025")] if passages == policy_ids else []
+            paired_sets = []
+            if passages == asset_ids:
+                catalogue = [{"family": family+":assets", "version": version,
+                    "valid_from": version+"-01-01", "valid_to": "2024-01-01" if version == "2023" else None,
+                    "current": version == "2024"} for version in ("2023", "2024")]
+                groups = [[passage] for passage in asset_ids] + [asset_ids[:2], asset_ids[1:3], asset_ids]
+                paired_sets = [[unit.unit_id for passage in group for unit in by_passage[passage]] for group in groups]
             grounding = [{"passage_id": passage, "start": 0, "end": len(next(document["text"]
                 for document in documents if document["passage_id"] == passage))} for passage in passages]
             result.append({"task_id": f"{family}:{turn}", "conversation_id": family, "turn": turn,
                 "split": split, "dataset": "structured_training", "question": question, "history": list(history),
                 "catalogue": catalogue, "reference_answer": answer, "grounding": grounding,
-                "units": to_jsonable(units)})
+                "units": to_jsonable(units), **({"paired_sets": paired_sets} if paired_sets else {})})
             history.extend(({"turn_id": turn, "speaker": "user", "text": question},
                             {"turn_id": turn, "speaker": "assistant", "text": answer}))
     return result

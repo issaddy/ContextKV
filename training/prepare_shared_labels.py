@@ -53,6 +53,7 @@ The two zero-based boundary indices select an inclusive span, in either order.
 role: source/measure/entity/period/group/filter/unit/version.
 source marks a passage span that supports a Need. The other roles mark original column names, field names,
 entity identifiers, periods, units and constraints required to compute the requested result.
+For lookup and comparison Needs, also label the entity, period and filter bindings needed to qualify their supporting evidence.
 Use condition_id to link filter/period columns to a declared query condition.
 relation_group identifies matching join keys across tables; leave it empty for non-join fields.
 Reuse the relation_group in known_join_keys when the same semantic join field occurs in another source batch.

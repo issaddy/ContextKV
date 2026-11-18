@@ -282,15 +282,12 @@ class DocumentIndex:
                 records.append(record)
         return tuple(records)
 
-    def outside_tables(self, units):
+    def outside_tables(self, units, table_ids=None):
         output, replacements = [], {}
         table_ranges = {}
-        for table in self.tables.values():
+        tables = self.tables.values() if table_ids is None else (self.tables[key] for key in table_ids)
+        for table in tables:
             table_ranges.setdefault(table.source.source_key, set()).add((table.source.start, table.source.end))
-            for row in table.rows:
-                for cell in row:
-                    for source in cell.qualifiers:
-                        table_ranges.setdefault(source.source_key, set()).add((source.start, source.end))
         for unit in units:
             source = unit.source_spans[0]
             parts = [(source.start, source.end)]
@@ -841,24 +838,35 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
 
     blocks = blocks_for_units(units, source_blocks)
     refs = dict((key, ref) for ref, key in assign_references(block.key for block in blocks))
+    primary = tuple(unit for unit in units if unit.unit_id in primary_ids)
+    primary_refs = list(dict.fromkeys(refs[unit.source_spans[0].source_key] for unit in primary))
     strings = {"type": "array", "items": {"type": "string"}}
     ids = {"type": "array", "items": {"enum": list(need_ids)}}
-    fields = {"needs": ids, "source": {"enum": list(refs.values())}, "quote": {"type": "string"},
+    fields = {"needs": ids, "source": {"enum": primary_refs}, "quote": {"type": "string"},
               "entity": {"type": "string"}, "measure": {"type": "string"}, "unit": {"type": "string"},
               "group": strings}
     record = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
     schema = {"type": "object", "properties": {"records": {"type": "array", "items": record},
               "unresolved": ids, "empty": ids}, "required": ["records", "unresolved", "empty"], "additionalProperties": False}
     operations = {n.need_id: n.operation for n in query.task.needs if n.need_id in need_ids}
-    instruction = ("Read the original sources in full for the current question. Extract each qualifying record once. "
+    instruction = ("Read the primary source windows in full for the current question. "
+        "The primary_windows below give source citation IDs, original character spans [start,end), "
+        "and literal beginning/end anchors identifying each primary window in the source text. "
+        "Other source windows are dependencies for interpreting fields, units and conditions; "
+        "do not extract their records in this packet. Extract each qualifying primary record once. "
         "A document or window is a record only when the question counts documents. Skip boilerplate. "
         "For each record quote its exact original row or sentence and give the source citation ID. "
         "Copy its identifying entity and numeric measure verbatim from the quote. For counts leave measure empty. "
         "Copy the unit alone from the text or table header. Leave unit empty when unstated. "
         "Give group values only if the question requests separate group results. "
         "Use the same records for overlapping Needs. Apply all conditions. "
-        "Use empty only for a requested quantity with explicitly no matching records in this packet. Mark spurious or ambiguous Need fragments unresolved. The CPU computes the final result.\n"
-        + json.dumps({"needs": operations, "task": _query_description(query, need_ids)}, ensure_ascii=False))
+        "Use empty for a requested quantity with no matching records in the primary windows, even when a "
+        "dependency contains matching records. Mark ambiguous primary values or applicability unresolved. "
+        "The CPU computes the final result.\n"
+        + json.dumps({"needs": operations, "task": _query_description(query, need_ids),
+            "primary_windows": [{"source": refs[span.source_key], "span": [span.start, span.end],
+                                 "begin": unit.text[:48], "end": unit.text[-48:]}
+                                for unit in primary for span in unit.source_spans]}, ensure_ascii=False))
 
     offsets = [numbered_text(unit.text)[1] for unit in units]
 
@@ -880,13 +888,12 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
         for row in data["records"]:
             quote = row["quote"]
             matches = [(i, u.text.find(quote)) for i, u in enumerate(units)
-                       if refs[u.source_spans[0].source_key] == row["source"] and quote and quote in u.text]
+                       if u.unit_id in primary_ids and refs[u.source_spans[0].source_key] == row["source"]
+                       and quote and quote in u.text]
             if len(matches) != 1:
                 unresolved.update(row["needs"])
                 continue
             i, start = matches[0]
-            if units[i].unit_id not in primary_ids:
-                continue
             end = start + len(quote)
             entity = address(i, row["entity"], start, end)
             measure = address(i, row["measure"], start, end)
@@ -942,10 +949,78 @@ def merge_projections(projections):
                               tuple(programs.values()), projections[0].operations)
 
 
+def _join_partitions(parts):
+    """Union matching relation partitions before executing their declared join."""
+    groups, entries, combined = [], [], []
+    for index, program in parts:
+        if not program.joins:
+            entries.append([(index, program)])
+            continue
+        required = {program.value_field, *program.entity_fields, *program.group_by, *program.distinct,
+                    *(predicate.field for predicate in program.predicates),
+                    *(name for join in program.joins for name in (*join.left_fields, *join.right_fields))}
+        shape = (program.need_id, program.operation, program.joins, program.value_field, program.entity_fields,
+                 program.predicates, program.group_by, program.distinct,
+                 tuple((tuple(sorted({field.name for field in projection.fields}
+                                     | (required & set(index.tables[projection.table_id].headers)))),
+                        projection.predicates) for projection in program.projections))
+        group = next((items for signature, items in groups if signature == shape), None)
+        if group is None:
+            group = []
+            groups.append((shape, group))
+            entries.append(group)
+        group.append((index, program))
+    for group in entries:
+        if len(group) == 1:
+            combined.extend(group)
+            continue
+        template = group[0][1]
+        required = {template.value_field, *template.entity_fields, *template.group_by, *template.distinct,
+                    *(predicate.field for predicate in template.predicates),
+                    *(name for join in template.joins for name in (*join.left_fields, *join.right_fields))}
+        tables, blocks, population, covered, excluded, unresolved = [], {}, set(), set(), [], []
+        for index, program in group:
+            blocks.update(((block.key, block.span), block) for block in index.blocks)
+            population.update(program.population_table_ids)
+            covered.update(projection.table_id for projection in program.projections)
+            covered.update(program.excluded_table_ids)
+            excluded.extend(span for key in program.excluded_table_ids
+                            for span in (index.tables[key].coverage or (index.tables[key].source,)))
+            unresolved.extend(program.unresolved_conditions)
+        projections = []
+        for position, projection in enumerate(template.projections):
+            names = tuple(dict.fromkeys((*[field.name for field in projection.fields],
+                *(name for name in group[0][0].tables[projection.table_id].headers if name in required))))
+            rows, scope, seen = [], [], set()
+            for index, program in group:
+                source_projection = program.projections[position]
+                source = index.tables[source_projection.table_id]
+                for record in index.project(source_projection, required):
+                    row = tuple(record.fields[name] for name in names)
+                    identity = tuple((cell.source.source_key, cell.source.start, cell.source.end,
+                                      cell.text, cell.unit) for cell in row)
+                    if identity not in seen:
+                        rows.append(row)
+                        seen.add(identity)
+                scope.extend(source.coverage or (source.source,))
+            if position == 0:
+                scope.extend(excluded)
+            identity = f"joined:{template.need_id}:{len(combined)}:{position}"
+            lineage = _unique_spans(scope)
+            tables.append(DocumentTable(identity, names, tuple(None for _ in names), tuple(rows),
+                                        lineage[0], coverage=lineage))
+            projections.append(Projection(identity, tuple(Field(name, column) for column, name in enumerate(names))))
+        program = replace(template, projections=tuple(projections),
+            population_table_ids=(*[table.table_id for table in tables], *sorted(population-covered)),
+            excluded_table_ids=(), unresolved_conditions=tuple(dict.fromkeys(unresolved)))
+        combined.append((DocumentIndex(tables, blocks.values()), program))
+    return combined
+
+
 def combine_populations(parts):
     """Normalize table and prose projections, then aggregate each Need once."""
     tables, blocks, grouped = [], {}, {}
-    for part_index, (index, program) in enumerate(parts):
+    for part_index, (index, program) in enumerate(_join_partitions(parts)):
         if program.operation == "lookup":
             program = replace(program, group_by=())
         blocks.update(((block.key, block.span), block) for block in index.blocks)

@@ -114,6 +114,37 @@ class FieldBinding:
     table_id: str = ""
 
 
+def need_requirements(query):
+    """Required bindings share the Need's conditions and resolved source versions."""
+    conditions = {item.condition_id: item for item in query.task.conditions}
+    versions = query.task.version_intent.resolved_version_ids or query.task.version_intent.version_ids
+    requirements = {}
+    for need in query.task.needs:
+        roles = [("source", "")]
+        if need.subject_refs:
+            roles.append(("entity", ""))
+        if need.operation in {"sum", "mean", "min", "max"}:
+            roles.append(("measure", ""))
+        if need.operation == "group":
+            roles.append(("group", ""))
+        refs = [*need.anchor_spans, *need.subject_refs]
+        for identity in need.condition_ids:
+            condition = conditions[identity]
+            refs.extend(condition.value_spans)
+            if condition.relation_type == "VERSION":
+                continue
+            role = "period" if condition.relation_type == "TIME" else "filter"
+            roles.append((role, identity))
+        named_versions = literal_versions(query.text(refs), [{"version": version} for version in versions])
+        comparison = (need.operation == "compare" or
+                      (query.task.version_intent.mode == "compare" and len(query.task.needs) == 1))
+        required_versions = (versions if comparison or len(versions) == 1
+                             else named_versions)
+        requirements[need.need_id] = tuple((role, condition, version)
+            for version in (required_versions or ("",)) for role, condition in dict.fromkeys(roles))
+    return requirements
+
+
 @dataclass
 class EvidenceEncoding:
     unit_ids: tuple[str, ...]
@@ -123,6 +154,7 @@ class EvidenceEncoding:
     heads: object
     usage: dict = field(default_factory=dict)
     query_sum: object = None
+    requirements: dict = field(default_factory=dict)
 
     def merge(self, other):
         """Extend a shared list using the author's weighted cross-batch query vector."""
@@ -131,7 +163,8 @@ class EvidenceEncoding:
         query_sum = self.query_sum+other.query_sum
         relevance = torch.nn.functional.cosine_similarity(embeddings, query_sum[None, :], dim=-1)
         return EvidenceEncoding((*self.unit_ids, *other.unit_ids), embeddings, relevance,
-            (*self.bindings, *other.bindings), self.heads, usage=other.usage, query_sum=query_sum)
+            (*self.bindings, *other.bindings), self.heads, usage=other.usage, query_sum=query_sum,
+            requirements=self.requirements)
 
     def summary(self, selected_ids, units, need_ids, completed=()):
         import torch
@@ -149,20 +182,68 @@ class EvidenceEncoding:
         return torch.cat((features, remaining))
 
     def need_support(self, units, need_ids, completed=()):
-        """Use the shared field bindings as soft support, with computed Needs already known."""
+        """Per-slot support: each required binding must be present in the selected set."""
         by_id = {unit.unit_id: unit for unit in units}
         positions = {identity: i for i, identity in enumerate(need_ids)}
-        support = [[0.] * len(need_ids) for _ in self.unit_ids]
+        slots = [self.requirements.get(identity, (("source", "", ""),)) for identity in need_ids]
+        width = max(map(len, slots), default=1)
+        support = [[[0.] * len(required) + [1.] * (width-len(required))
+                    for required in slots] for _ in self.unit_ids]
         for binding in self.bindings:
-            if binding.role == "source" and binding.need_id in positions:
+            if binding.need_id in positions:
+                j = positions[binding.need_id]
+                matching = [slot for slot, (role, condition, version) in enumerate(slots[j])
+                            if binding.role == role and (not condition or binding.condition_id == condition)
+                            and (not version or binding.source_span.source_key.version == version)]
+                if not matching:
+                    continue
                 for i, identity in enumerate(self.unit_ids):
                     if any(span.source_key == binding.source_span.source_key
                            and span.start <= binding.source_span.start and binding.source_span.end <= span.end
                            for span in by_id[identity].source_spans):
-                        j = positions[binding.need_id]
-                        support[i][j] = max(support[i][j], binding.score)
-        return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids)),
+                        for slot in matching:
+                            support[i][j][slot] = max(support[i][j][slot], binding.score)
+        return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids), width),
                 self.embeddings.new_tensor([identity in completed for identity in need_ids]))
+
+    def coverage(self, selected_ids, units, need_ids, completed=()):
+        support, known = self.need_support(units, need_ids, completed)
+        selected = self.embeddings.new_tensor([identity in selected_ids for identity in self.unit_ids])
+        if not self.unit_ids:
+            return known
+        grounded = support * self.relevance.clamp_min(0)[:, None, None]
+        return self.heads.coverage(grounded, selected[None], known)[0]
+
+    def complementary_sets(self, units, need_ids, completed=(), *, eligible=None):
+        """Add one dependency-closed support combination per unfinished Need."""
+        support, _ = self.need_support(units, need_ids, completed)
+        by_id = {unit.unit_id: unit for unit in units}
+        permitted = set(self.unit_ids if eligible is None else eligible)
+        weights = self.relevance.clamp_min(0) * self.relevance.new_tensor([
+            identity in permitted for identity in self.unit_ids])
+        combinations, combined = [], []
+        for j, identity in enumerate(need_ids):
+            if identity in completed:
+                continue
+            count = len(self.requirements.get(identity, (("source", "", ""),)))
+            scores = support[:, j, :count] * weights[:, None]
+            roots = [self.unit_ids[int(scores[:, slot].argmax())]
+                     for slot in range(count) if bool((scores[:, slot] > 0).any())]
+            selected, ordered = set(), []
+            def add(source):
+                if source not in selected:
+                    selected.add(source)
+                    for dependency in by_id[source].dependencies:
+                        add(dependency)
+                    ordered.append(source)
+            for source in roots:
+                add(source)
+            if selected:
+                combinations.append(tuple(ordered))
+                combined.extend(ordered)
+        if combined:
+            combinations.append(tuple(dict.fromkeys(combined)))
+        return tuple(dict.fromkeys(combinations))
 
     def frontier(self, units, preferred=()):
         """Nested relevance-ranked sets, each containing its source dependencies."""
@@ -193,11 +274,16 @@ class EvidenceEncoding:
         sizes = {unit.unit_id: unit.body_tokens for unit in units}
         frontier = self.frontier(units)
         candidates = [ids for ids in frontier if sum(sizes[i] for i in ids) <= body_tokens]
+        seen = {frozenset(ids) for ids in candidates}
+        for ids in self.complementary_sets(units, need_ids, completed):
+            members = frozenset(ids)
+            if members not in seen and sum(sizes[i] for i in ids) <= body_tokens:
+                candidates.append(ids)
+                seen.add(members)
         ordinary_count = len(candidates)
         warm = cost_model.reusable_units() if cost_model else ()
         if warm:
             semantic_order = frontier[-1]
-            seen = {frozenset(ids) for ids in candidates}
             for ids in self.frontier(units, preferred=warm):
                 members = frozenset(ids)
                 if members not in seen and sum(sizes[i] for i in ids) <= body_tokens:
@@ -215,7 +301,9 @@ class EvidenceEncoding:
                 utility = values - seconds_price * costs / 1000
                 # A transiently busy pool can queue a request. Only discard an oversized
                 # plan when another nonempty plan can actually run from this snapshot.
-                fits = [q["new_tokens"] + q["pin_tokens"] <= cost_model.snapshot["available_tokens"] for q in quotes]
+                feasible = torch.tensor([q["feasible"] for q in quotes], device=values.device)
+                utility.masked_fill_(~feasible, -torch.inf)
+                fits = [q["fits"] for q in quotes]
                 if any(fits[1:]):
                     utility.masked_fill_(~torch.tensor(fits, device=values.device), -torch.inf)
             best = int(utility[:ordinary_count].argmax())
@@ -284,7 +372,7 @@ class EvidenceEncoding:
                     continue
                 candidate = identities(selected | extra)
                 quote = cost_model.quote(candidate, preserve_order=True) if cost_model else None
-                if quote and quote["new_tokens"]+quote["pin_tokens"] > cost_model.snapshot["available_tokens"]:
+                if quote and not quote["fits"]:
                     continue
                 coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
                 gain = float(((coverage-represented)*weights).sum())
@@ -586,6 +674,8 @@ class SharedQueryEncoder:
                 version_ids=tuple(dict.fromkeys(selected_versions)) if mode != "current" else (),
                 time_refs=tuple(reference(span) for span in spans["time"]),
                 temporal_relation=TEMPORAL_RELATIONS[int(logits["temporal_relation"].argmax())])
+            from adapters.version_structure import resolve_versions
+            intent = replace(intent, resolved_version_ids=resolve_versions(intent, catalogue))
             task = TaskState(task_id, question, tuple(history_refs), tuple(conditions), needs, intent,
                              tuple(source_scope), current_turn_id, question,
                              coverage_scope=SCOPES[int(coverage.argmax())])
@@ -751,6 +841,7 @@ class SharedEvidenceEncoder:
         needs = [(i, need) for i, need in enumerate(query.task.needs)
                  if query.task.coverage_scope != "all_supplied_documents"
                  or need.operation in {"count", "sum", "mean", "min", "max", "group"}]
+        requirements = need_requirements(query)
         with torch.no_grad():
             for states, documents, scores, addresses, count, query_vector in outputs.values():
                 token_count += count
@@ -765,7 +856,8 @@ class SharedEvidenceEncoder:
                 confidence, labels = probabilities.max(-1)
                 confidence, labels = confidence.cpu(), labels.cpu()
                 for need_index, (_, need) in enumerate(needs):
-                    roles = FIELD_ROLES if need.operation in {"count", "sum", "mean", "min", "max", "group"} else ("source",)
+                    roles = (FIELD_ROLES if need.operation in {"count", "sum", "mean", "min", "max", "group"}
+                             else tuple(dict.fromkeys(role for role, _, _ in requirements[need.need_id])))
                     for role in roles:
                         role_index = FIELD_ROLES.index(role)
                         for first, last in _spans(labels[need_index, :, role_index].tolist(), sources):
@@ -816,7 +908,7 @@ class SharedEvidenceEncoder:
         return EvidenceEncoding(tuple(unit.unit_id for unit in units), documents.cpu(), relevance.cpu(),
             tuple(bindings), self.heads,
             {"input_tokens": token_count, "compute_ms": (time.perf_counter()-started)*1000, "calls": len(outputs)},
-            query_sum.cpu())
+            query_sum.cpu(), requirements)
 
     def close(self):
         self.ready.close()

@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 import json
 from urllib.parse import quote
 
-from engine_patches.kv_cost import exact_cost, infoflow_cost, page_tokens
+from engine_patches.kv_cost import exact_cost, infoflow_cost, infoflow_work, page_tokens, select_route
 
 from .schema import EvidenceBlock, EvidenceKey, EvidenceSpan, Message, QueryContext, history_messages
 
@@ -162,7 +162,8 @@ class EvidenceCosts:
         if not self.snapshot["prefixes"]:
             return ids
         best = ids
-        price = self.quote(ids, preserve_order=True)["milliseconds"]
+        quote = self.quote(ids, preserve_order=True)
+        price = (not quote["fits"], quote["milliseconds"])
         positions = {identity: i for i, identity in enumerate(ids)}
         owners = {source: identity for identity in ids for source in self.sources[identity]}
         for prefix in self.snapshot["prefixes"]:
@@ -176,7 +177,8 @@ class EvidenceCosts:
                 if any(layout[dep] > layout[identity] for identity in front for dep in self.dependencies[identity]
                        if dep in positions and positions[dep] < positions[identity]):
                     continue
-                cost = self.quote(ordered, preserve_order=True)["milliseconds"]
+                quote = self.quote(ordered, preserve_order=True)
+                cost = (not quote["fits"], quote["milliseconds"])
                 if cost < price:
                     best, price = ordered, cost
         return best
@@ -196,12 +198,19 @@ class EvidenceCosts:
         native_pins = sum(prefix["unpinned_nodes"].values()) if prefix else 0
         exact = {"mode": "exact", "milliseconds": native,
                  "new_tokens": native_new, "pin_tokens": native_pins,
+                 "resident_tokens": sum(prefix["gpu_nodes"].values()) if prefix else 0,
+                 "work_tokens": input_tokens,
                  "gpu_tokens": prefix["gpu_tokens"] if prefix else 0,
                  "host_tokens": prefix["host_tokens"] if prefix else 0}
+        def choose(approximate=None):
+            return select_route(exact, approximate, mode=self.mode,
+                available_tokens=self.snapshot["available_tokens"],
+                capacity_tokens=self.snapshot["gpu_capacity_tokens"],
+                max_input_tokens=self.snapshot["max_input_tokens"])
         if self.mode == "exact" or (self.mode == "auto" and not addresses):
-            return exact
+            return choose()
         costs, cold, host, gpu = self.costs, 0, 0, 0
-        pins, host_nodes, cold_pages = {}, {}, 0
+        pins, gpu_nodes, host_nodes, cold_pages = {}, {}, {}, 0
         prefix_sources = set(prefix["source_ids"]) if prefix else set()
         nonprefix_opportunity = False
         for address in addresses:
@@ -214,26 +223,25 @@ class EvidenceCosts:
                 gpu += min(length, resident["gpu_tokens"])
                 host += min(length, resident["host_tokens"])
                 pins.update(resident["unpinned_nodes"])
+                gpu_nodes.update(resident["gpu_nodes"])
                 host_nodes.update(resident["host_nodes"])
             else:
                 cold += length
                 cold_pages += page_tokens(length, page)
         if self.mode != "infoflow" and not nonprefix_opportunity:
-            return exact
+            return choose()
         infoflow = infoflow_cost(costs, prompt, body, cold, sum(host_nodes.values()), self.ratio,
                                  self.output_tokens, self.quality_cost)
+        work = infoflow_work(cold_pages, prompt, body, self.ratio, page)
         approximate = {"mode": "infoflow", "milliseconds": infoflow,
-            "new_tokens": cold_pages+sum(host_nodes.values())+page_tokens(prompt, page)+page_tokens(prompt+self.ratio*body+self.output_tokens, page),
-            "pin_tokens": sum(pins.values()), "gpu_tokens": gpu, "host_tokens": host}
-        if self.mode == "infoflow":
-            return approximate
-        if approximate["new_tokens"] + approximate["pin_tokens"] > self.snapshot["available_tokens"]:
-            return exact
-        return min((exact, approximate), key=lambda item: item["milliseconds"])
+            "new_tokens": page_tokens(work+self.output_tokens, page)+sum(host_nodes.values()),
+            "pin_tokens": sum(pins.values()), "resident_tokens": sum(gpu_nodes.values()), "work_tokens": work,
+            "gpu_tokens": gpu, "host_tokens": host}
+        return choose(approximate)
 
     def fits(self, ids, *, preserve_order=False):
         quote = self.quote(ids, preserve_order=preserve_order)
-        return quote["new_tokens"]+quote["pin_tokens"] <= self.snapshot["available_tokens"]
+        return quote["fits"]
 
 
 def compact_computations(results):
@@ -290,17 +298,15 @@ class CompiledRequest:
 
 
 def with_source_demand(request, demand):
-    """Bind future Native reuse to the complete retained prefix in this layout."""
+    """Price a demanded source's Native alternative as its complete prefix."""
     wanted = {item['source_id']: item for item in demand}
-    prefix, aligned = set(), []
-    for block in request.blocks:
-        identity = block['source_id']
-        prefix.add(identity)
-        if identity in wanted:
-            item = {key: value for key, value in wanted[identity].items() if key != 'native_prefix_end'}
-            if prefix <= wanted.keys():
-                item['native_prefix_end'] = block['end']
-            aligned.append(item)
+    ends = {block['source_id']: block['end'] for block in request.blocks}
+    aligned = []
+    for identity, original in wanted.items():
+        item = {key: value for key, value in original.items() if key != 'native_prefix_end'}
+        if identity in ends:
+            item['native_prefix_end'] = ends[identity]
+        aligned.append(item)
     return replace(request, demand=tuple(aligned))
 
 

@@ -148,8 +148,8 @@ async def collect(args):
         return item
 
     async def collect_state(row, index):
+        arrived = time.monotonic()
         async with limit:
-            started = time.monotonic()
             snapshot = SessionSnapshot(row["task_id"], raw_history=history(row))
             if row["dataset"] == config["retrieval"]["corpus_id"]:
                 query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"],
@@ -173,6 +173,10 @@ async def collect(args):
                                  if sum(sizes[identity] for identity in ids) <= budget)
                 await controller._select_evidence(state, snapshot, state.computations)
                 choices = candidate_sets(frontier, state.selected_ids)
+                for chosen in encoded.complementary_sets(units,
+                        tuple(need.need_id for need in query.task.needs), state.completed_needs):
+                    if chosen not in choices and sum(sizes[identity] for identity in chosen) <= budget:
+                        choices += (chosen,)
                 if row.get("paired_sets"):
                     by_id = {unit.unit_id: unit for unit in units}
                     for ids in row["paired_sets"]:
@@ -202,7 +206,9 @@ async def collect(args):
                               "output_tokens": item["output_tokens"], "features": vector}
                              for (chosen, item), flags, vector in zip(observations, marks, features)]})
                 return
-            paid_seconds = time.monotonic()-started
+            # A trajectory includes its initial queue and online work. The
+            # counterfactual STOP probes and warmup fixtures are not that work.
+            paid_seconds = time.monotonic()-arrived
             warm = index % 2 == 1
             state, encoded, states = None, None, []
             batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
@@ -213,7 +219,10 @@ async def collect(args):
                 if warm:
                     seed = []
                     request = compile_request(template, row["question"], snapshot.raw_history, ())
-                    for unit in units[:batch_size]:
+                    current = {unit.unit_id for unit in SharedEvidenceProvider._closure(pending[:batch_size], by_id)}
+                    following = tuple(unit for unit in pending if unit.unit_id not in current)
+                    upcoming = SharedEvidenceProvider._closure(following[:batch_size], by_id)
+                    for unit in upcoming:
                         blocks = source_blocks((*seed, unit))
                         candidate = compile_request(template, row["question"], snapshot.raw_history,
                             blocks, future_sources=blocks)
@@ -221,9 +230,10 @@ async def collect(args):
                             break
                         seed.append(unit)
                         request = candidate
-                    await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
-                        max_new_tokens=1, mode=config["shared"]["runtime"]["kv_mode"],
-                        cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
+                    if seed:
+                        await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
+                            max_new_tokens=1, mode=config["shared"]["runtime"]["kv_mode"],
+                            cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
                 first = time.monotonic()
                 seen = {unit.unit_id for unit in observed}
                 fresh = tuple(unit for unit in SharedEvidenceProvider._closure(pending[:batch_size], by_id)
@@ -254,6 +264,8 @@ async def collect(args):
                     controller._value_state(state, time.monotonic()-paid_seconds)).cpu().tolist()
                 item = await answer(row, state, snapshot, branch_id, totals)
                 states.append({"features": features, "answer": item})
+                if state.needs_complete:
+                    break
             outputs.append((row, states))
 
     try:

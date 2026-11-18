@@ -15,7 +15,7 @@
 
 训练顺序、模型目录与运行命令见[运行手册](docs/study/final_runbook.md)。机制和复用边界见[架构](docs/architecture.md)、[方法依据](docs/references.md)，GPU 部署见[部署](docs/deployment.md)。
 
-共享编码辅助模型已完成训练，Native 与 InfoFlow 执行路径已跑通。[当前结果](docs/study/results.md)分别报告公开参考历史与连续真实会话的质量、响应时间、资源占用及缓存配对。
+本版联合覆盖与下一批成本特征需要按运行手册重新采集监督并训练辅助头。[已有实验结果](docs/study/results.md)分别报告对应版本的质量、响应时间、资源占用及缓存配对。
 
 ```bash
 python3 -m bench.study evaluate --split test --limit-turns 20 --concurrency 4
