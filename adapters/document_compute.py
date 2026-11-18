@@ -957,7 +957,8 @@ def combine_populations(parts):
             program = replace(program, group_by=())
         blocks.update(((block.key, block.span), block) for block in index.blocks)
         rows = []
-        names = ("entity", "measure", *(f"group:{i}" for i in range(len(program.group_by))))
+        names = ("entity", "measure", *(f"group:{i}" for i in range(len(program.group_by))),
+                 *(f"distinct:{i}" for i in range(len(program.distinct))))
         for position, record in enumerate(index.records(program)):
             sources = record.sources
             entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(position)
@@ -973,6 +974,7 @@ def combine_populations(parts):
             else:
                 row.append(Cell("", sources[0], qualifiers=sources[1:]))
             row.extend(record.fields[name] for name in program.group_by)
+            row.extend(record.fields[name] for name in program.distinct)
             rows.append(tuple(row))
         used = (0, *(join.right_index for join in program.joins)) if program.joins else range(len(program.projections))
         processed = tuple(dict.fromkeys((*(program.projections[i].table_id for i in used),
@@ -995,6 +997,6 @@ def combine_populations(parts):
         programs.append(DocumentProgram(need_id, tuple(entry["projections"]), tuple(entry["population"]),
             operation=source.operation, value_field="measure" if source.value_field else "",
             entity_fields=("entity",), group_by=tuple(f"group:{i}" for i in range(len(source.group_by))),
-            distinct=("entity",) if source.distinct else (), condition_ids=source.condition_ids,
+            distinct=tuple(f"distinct:{i}" for i in range(len(source.distinct))), condition_ids=source.condition_ids,
             unresolved_conditions=tuple(sorted(entry["unresolved"]))))
     return DocumentIndex(tables, blocks.values()), tuple(programs)

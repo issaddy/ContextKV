@@ -140,15 +140,11 @@ class EvidenceCosts:
             *(address for identity in ids for address in self.sources[identity]))))
 
     def _native(self, addresses, tokens):
-        best = exact_cost(self.costs, tokens, 0, 0, self.output_tokens)
-        match = None
-        for prefix in self.snapshot["prefixes"]:
-            chain = tuple(prefix["source_ids"])
-            if addresses[:len(chain)] == chain:
-                price = exact_cost(self.costs, tokens, prefix["gpu_tokens"], prefix["host_tokens"], self.output_tokens)
-                if price < best:
-                    best, match = price, prefix
-        return best, match
+        match = max((prefix for prefix in self.snapshot["prefixes"]
+            if addresses[:len(prefix["source_ids"])] == tuple(prefix["source_ids"])),
+            key=lambda prefix: prefix["gpu_tokens"] + prefix["host_tokens"], default=None)
+        return (exact_cost(self.costs, tokens, match["gpu_tokens"] if match else 0,
+                           match["host_tokens"] if match else 0, self.output_tokens), match)
 
     def reusable_units(self):
         warm = {address for address, state in self.snapshot["sources"].items()

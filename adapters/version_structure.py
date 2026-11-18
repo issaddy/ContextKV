@@ -38,7 +38,9 @@ def resolve_versions(intent, catalogue):
                 continue
             candidates = []
             for name, row in members.items():
-                position = tuple(row.get(axis, ())) if axis == "version_order" else row.get(axis)
+                position = row.get(axis)
+                if axis == "version_order":
+                    position = tuple(position) if position else None
                 if position is not None and (position < value if intent.temporal_relation == "before" else position > value):
                     candidates.append((position, name))
             if candidates:
