@@ -9,7 +9,7 @@ import time
 import torch
 
 from sglang.srt.managers.kv_cost import (exact_cost, infoflow_cost, infoflow_work,
-                                      page_tokens, retention_value, select_route)
+                                      page_tokens, retention_value, route_cost, select_route)
 from sglang.srt.managers.infoflow import QwenInfoFlow, RequestState, SourceBlock
 from sglang.srt.mem_cache.base_prefix_cache import InsertParams, MatchPrefixParams
 from sglang.srt.mem_cache.radix_cache import RadixKey
@@ -212,13 +212,19 @@ class ComputeRuntime:
         approximate_route = {"mode": "infoflow", "milliseconds": approximate, "work_tokens": work,
                              "new_tokens": page_tokens(work+output_limit, page)+len(host_pages),
                              "pin_tokens": new_gpu_pins, "resident_tokens": resident_gpu}
+        available = self.allocator.available_size()+self.cache.evictable_size()
+        wait_ms = costs.get('admission_wait_ms', 0.0)
         route = select_route(exact_route,
             approximate_route if mode == 'infoflow' or beyond_prefix else None,
-            mode=mode, available_tokens=self.allocator.available_size()+self.cache.evictable_size(),
-            capacity_tokens=self.allocator.size, max_input_tokens=self.scheduler.max_req_input_len)
+            mode=mode, available_tokens=available,
+            capacity_tokens=self.allocator.size, max_input_tokens=self.scheduler.max_req_input_len,
+            admission_wait_ms=wait_ms)
+        req.contextkv_capacity_wait |= route['feasible'] and not route['fits']
         mode = route['mode']
         state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool)
-        state.route_costs = {"exact": exact, "infoflow": approximate, "nonprefix_opportunity": beyond_prefix}
+        state.route_costs = {"exact": route_cost(exact_route, available, wait_ms),
+                            "infoflow": route_cost(approximate_route, available, wait_ms),
+                            "nonprefix_opportunity": beyond_prefix}
         state.runtime = self
         state.events = []
         state.published = False
@@ -458,9 +464,13 @@ class ComputeRuntime:
         state.events.clear()
         stats = req.time_stats
         elapsed = (stats.completion_time - stats.scheduler_recv_time) * 1000
+        finish_type = req.finished_reason.to_json()['type']
+        if req.contextkv_capacity_wait and finish_type in ('stop', 'length'):
+            measured = stats.get_queueing_time()*1000
+            self.costs['admission_wait_ms'] = .8*self.costs.get('admission_wait_ms', measured)+.2*measured
         output_count = len(req.output_ids_through_stop)
         # A length-capped prefill/warmup is a censored sample, not a short answer.
-        if req.finished_reason.to_json()['type'] == 'stop':
+        if finish_type == 'stop':
             name = 'answer_output_tokens'
             self.costs[name] = .8 * self.costs.get(name, output_count) + .2 * output_count
         if output_count > 1:
@@ -514,6 +524,7 @@ def get_compute_runtime(scheduler):
 def admit_compute(scheduler, recv, req):
     req.contextkv_compute_metadata = recv.contextkv_compute
     req.contextkv_native_cache_salt = req.cache_salt
+    req.contextkv_capacity_wait = False
 
 
 def prepare_compute_request(scheduler, req):

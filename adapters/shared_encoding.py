@@ -121,8 +121,8 @@ def need_requirements(query):
     requirements = {}
     for need in query.task.needs:
         roles = [("source", "")]
-        if need.subject_refs:
-            roles.append(("entity", ""))
+        subjects = tuple(dict.fromkeys(" ".join(query.text((ref,)).casefold().split())
+                                       for ref in need.subject_refs))
         if need.operation in {"sum", "mean", "min", "max"}:
             roles.append(("measure", ""))
         if need.operation == "group":
@@ -141,8 +141,9 @@ def need_requirements(query):
                        and (len(query.task.needs) == 1 or not named_versions)))
         required_versions = (versions if comparison or len(versions) == 1
                              else named_versions)
-        requirements[need.need_id] = tuple((role, condition, version)
-            for version in (required_versions or ("",)) for role, condition in dict.fromkeys(roles))
+        requirements[need.need_id] = tuple(slot for version in (required_versions or ("",))
+            for slot in (*((role, condition, version, "") for role, condition in dict.fromkeys(roles)),
+                         *(("entity", "", version, subject) for subject in subjects)))
     return requirements
 
 
@@ -190,22 +191,56 @@ class EvidenceEncoding:
             for span in by_id[identity].source_spans:
                 sources.setdefault(span.source_key, []).append((i, span.start, span.end))
         positions = {identity: i for i, identity in enumerate(need_ids)}
-        slots = [self.requirements.get(identity, (("source", "", ""),)) for identity in need_ids]
+        slots = [self.requirements.get(identity, (("source", "", "", ""),)) for identity in need_ids]
         width = max(map(len, slots), default=1)
         support = [[[0.] * len(required) + [1.] * (width-len(required))
                     for required in slots] for _ in self.unit_ids]
+        entities = {}
         for binding in self.bindings:
             if binding.need_id in positions:
                 j = positions[binding.need_id]
-                matching = [slot for slot, (role, condition, version) in enumerate(slots[j])
+                entity = " ".join(binding.text.casefold().split()) if binding.role == "entity" else ""
+                matching = [slot for slot, (role, condition, version, subject) in enumerate(slots[j])
                             if binding.role == role and (not condition or binding.condition_id == condition)
-                            and (not version or binding.source_span.source_key.version == version)]
-                if not matching:
+                            and (not version or binding.source_span.source_key.version == version)
+                            and (not subject or entity == subject)]
+                if not matching and binding.role != "entity":
                     continue
                 for i, start, end in sources.get(binding.source_span.source_key, ()):
                     if start <= binding.source_span.start and binding.source_span.end <= end:
+                        if binding.role == "entity":
+                            names = entities.setdefault((self.unit_ids[i], j), {})
+                            key = (binding.source_span.source_key, entity)
+                            names[key] = max(names.get(key, 0.), binding.score)
                         for slot in matching:
                             support[i][j][slot] = max(support[i][j][slot], binding.score)
+        for j, required in enumerate(slots):
+            entity_slots = [(slot, version, subject) for slot, (role, _, version, subject)
+                            in enumerate(required) if role == "entity"]
+            if not entity_slots:
+                continue
+            source_slots = {version: slot for slot, (role, _, version, _) in enumerate(required)
+                            if role == "source"}
+            for i, identity in enumerate(self.unit_ids):
+                unit = by_id[identity]
+                keys = {span.source_key for span in unit.source_spans}
+                for version in source_slots:
+                    if any(not version or key.version == version
+                           for key, _ in entities.get((identity, j), {})):
+                        continue
+                    inherited = {}
+                    for dependency in unit.dependencies:
+                        for (key, entity), score in entities.get((dependency, j), {}).items():
+                            if key in keys and (not version or key.version == version):
+                                inherited[entity] = max(inherited.get(entity, 0.), score)
+                    if len(inherited) == 1:
+                        entity, score = next(iter(inherited.items()))
+                        for slot, required_version, subject in entity_slots:
+                            if required_version == version and subject == entity:
+                                support[i][j][slot] = score
+            for slot, version, _ in entity_slots:
+                for values in support:
+                    values[j][slot] = min(values[j][slot], values[j][source_slots[version]])
         return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids), width),
                 self.embeddings.new_tensor([identity in completed for identity in need_ids]))
 
@@ -228,7 +263,7 @@ class EvidenceEncoding:
         for j, identity in enumerate(need_ids):
             if identity in completed:
                 continue
-            count = len(self.requirements.get(identity, (("source", "", ""),)))
+            count = len(self.requirements.get(identity, (("source", "", "", ""),)))
             scores = support[:, j, :count] * weights[:, None]
             roots = [self.unit_ids[int(scores[:, slot].argmax())]
                      for slot in range(count) if bool((scores[:, slot] > 0).any())]
@@ -302,13 +337,9 @@ class EvidenceEncoding:
                 quotes = [cost_model.quote(ids) for ids in candidates]
                 costs = values.new_tensor([q["milliseconds"] for q in quotes])
                 utility = values - seconds_price * costs / 1000
-                # A transiently busy pool can queue a request. Only discard an oversized
-                # plan when another nonempty plan can actually run from this snapshot.
+                # A feasible request may queue; its quoted wait competes with quality.
                 feasible = torch.tensor([q["feasible"] for q in quotes], device=values.device)
                 utility.masked_fill_(~feasible, -torch.inf)
-                fits = [q["fits"] for q in quotes]
-                if any(fits[1:]):
-                    utility.masked_fill_(~torch.tensor(fits, device=values.device), -torch.inf)
             best = int(utility[:ordinary_count].argmax())
             if len(candidates) > ordinary_count:
                 rivals = utility[ordinary_count:].masked_fill(values[ordinary_count:] < values[best], -torch.inf)
@@ -345,15 +376,15 @@ class EvidenceEncoding:
         ranked_groups = [sorted(members, key=lambda i: float(self.relevance[i]), reverse=True)
                          for members in groups.values()]
         selected = set().union(*(closures[members[0]] for members in ranked_groups))
-        def fits(indices):
+        def feasible(indices):
             return sum(sizes[i] for i in indices) <= body_tokens and (
-                cost_model is None or cost_model.fits(identities(indices), preserve_order=True))
-        if not fits(selected):
+                cost_model is None or cost_model.quote(identities(indices), preserve_order=True)["feasible"])
+        if not feasible(selected):
             selected.clear()
             for members in sorted(ranked_groups, key=lambda group: float(self.relevance[group[0]]), reverse=True):
                 for i in members:
                     candidate = selected | closures[i]
-                    if fits(candidate):
+                    if feasible(candidate):
                         selected = candidate
                         break
         used = sum(sizes[i] for i in selected)
@@ -375,7 +406,7 @@ class EvidenceEncoding:
                     continue
                 candidate = identities(selected | extra)
                 quote = cost_model.quote(candidate, preserve_order=True) if cost_model else None
-                if quote and not quote["fits"]:
+                if quote and not quote["feasible"]:
                     continue
                 coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
                 gain = float(((coverage-represented)*weights).sum())
@@ -860,7 +891,7 @@ class SharedEvidenceEncoder:
                 confidence, labels = confidence.cpu(), labels.cpu()
                 for need_index, (_, need) in enumerate(needs):
                     roles = (FIELD_ROLES if need.operation in {"count", "sum", "mean", "min", "max", "group"}
-                             else tuple(dict.fromkeys(role for role, _, _ in requirements[need.need_id])))
+                             else tuple(dict.fromkeys(role for role, _, _, _ in requirements[need.need_id])))
                     for role in roles:
                         role_index = FIELD_ROLES.index(role)
                         for first, last in _spans(labels[need_index, :, role_index].tolist(), sources):

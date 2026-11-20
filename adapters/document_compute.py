@@ -831,7 +831,51 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         lambda text: decode_projection(text, query, units, need_ids, population))
 
 
-def literal_population_projection(query, units, source_blocks, need_ids, population_ids, primary_ids, examples):
+def population_relations(index, programs):
+    """Project the columns used by the existing relations, joins and filters."""
+    relations = {}
+    for program in programs:
+        used = (0, *(join.right_index for join in program.joins)) if program.joins else range(len(program.projections))
+        required = {program.value_field, *program.entity_fields, *program.group_by, *program.distinct,
+                    *(p.field for p in program.predicates),
+                    *(name for join in program.joins for name in (*join.left_fields, *join.right_fields))}
+        for position in used:
+            projection = program.projections[position]
+            table = index.tables[projection.table_id]
+            columns = {name: i for i, name in enumerate(table.headers)}
+            columns.update((field.name, field.column) for field in projection.fields)
+            needed = required | {p.field for p in projection.predicates}
+            entry = relations.setdefault(table.table_id, {"table": table, "columns": {}, "needs": set()})
+            entry["needs"].add(program.need_id)
+            for name, column in columns.items():
+                if name in needed:
+                    entry["columns"].setdefault(column, []).append(name)
+    return {f"R{i+1}": {**entry, "columns": dict(sorted(entry["columns"].items()))}
+            for i, entry in enumerate(relations.values())}
+
+
+def merge_bound_population(reads, index, programs):
+    """Union raw relation partitions before applying the original program once."""
+    tables, additions = dict(index.tables), {}
+    unresolved = {program.need_id: set(program.unresolved_conditions) for program in programs}
+    for read in reads:
+        for identity, partition in read.index.tables.items():
+            rows, coverage = additions.setdefault(identity, ([], []))
+            rows.extend(partition.rows)
+            coverage.extend(partition.coverage)
+        for program in read.programs:
+            unresolved[program.need_id].update(program.unresolved_conditions)
+    for identity, (rows, coverage) in additions.items():
+        table = tables[identity]
+        tables[identity] = replace(table, rows=(*table.rows, *rows),
+            coverage=_unique_spans((*(table.coverage or (table.source,)), *coverage)))
+    combined = DocumentIndex(tables.values(), index.blocks)
+    return [(combined, replace(program, unresolved_conditions=tuple(sorted(unresolved[program.need_id]))))
+            for program in programs]
+
+
+def literal_population_projection(query, units, source_blocks, need_ids, population_ids, primary_ids, examples,
+                                  *, relations=None):
     """Read stable source KV and bind quoted records back to their original word spans."""
     from controller.cooperative_request import blocks_for_units
     from controller.evidence import assign_references
@@ -840,33 +884,49 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
     refs = dict((key, ref) for ref, key in assign_references(block.key for block in blocks))
     primary = tuple(unit for unit in units if unit.unit_id in primary_ids)
     primary_refs = list(dict.fromkeys(refs[unit.source_spans[0].source_key] for unit in primary))
+    relations = relations or {}
     strings = {"type": "array", "items": {"type": "string"}}
     ids = {"type": "array", "items": {"enum": list(need_ids)}}
-    fields = {"needs": ids, "source": {"enum": primary_refs}, "quote": {"type": "string"},
-              "entity": {"type": "string"}, "measure": {"type": "string"}, "unit": {"type": "string"},
-              "group": strings}
+    fields = {"source": {"enum": primary_refs}, "quote": {"type": "string"}}
+    fields.update({"relation": {"enum": list(relations)}, "values": strings, "units": strings} if relations else
+        {"needs": ids, "entity": {"type": "string"}, "measure": {"type": "string"},
+         "unit": {"type": "string"}, "group": strings})
     record = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
     schema = {"type": "object", "properties": {"records": {"type": "array", "items": record},
               "unresolved": ids, "empty": ids}, "required": ["records", "unresolved", "empty"], "additionalProperties": False}
     operations = {n.need_id: n.operation for n in query.task.needs if n.need_id in need_ids}
-    instruction = ("Read the primary source windows in full for the current question. "
-        "The primary_windows below give source citation IDs, original character spans [start,end), "
-        "and literal beginning/end anchors identifying each primary window in the source text. "
-        "Other source windows are dependencies for interpreting fields, units and conditions; "
-        "do not extract their records in this packet. Extract each qualifying primary record once. "
+    instruction = ("Read the supplied source windows in full for the current question. Extract each record once. "
         "A document or window is a record only when the question counts documents. Skip boilerplate. "
         "For each record quote its exact original row or sentence and give the source citation ID. "
-        "Copy its identifying entity and numeric measure verbatim from the quote. For counts leave measure empty. "
-        "Copy the unit alone from the text or table header. Leave unit empty when unstated. "
-        "Give group values only if the question requests separate group results. "
-        "Use the same records for overlapping Needs. Apply all conditions. "
         "Use empty for a requested quantity with no matching records in the primary windows, even when a "
         "dependency contains matching records. Mark ambiguous primary values or applicability unresolved. "
-        "The CPU computes the final result.\n"
-        + json.dumps({"needs": operations, "task": _query_description(query, need_ids),
-            "primary_windows": [{"source": refs[span.source_key], "span": [span.start, span.end],
-                                 "begin": unit.text[:48], "end": unit.text[-48:]}
-                                for unit in primary for span in unit.source_spans]}, ensure_ascii=False))
+        "The CPU computes the final result. ")
+    task = {"needs": operations, "task": _query_description(query, need_ids)}
+    if relations:
+        instruction += ("Assign each record to a declared relation and copy values in its listed column order, "
+            "verbatim from the quote. Give each value's literal unit in the same order, or an empty string "
+            "when unstated. Extract raw rows, including lookup and eligibility relations, before any filtering. "
+            "The CPU applies the existing joins and filters after combining all source windows. ")
+        task["relations"] = {identity: {"document": item["table"].source.source_key.document_id,
+            "version": item["table"].source.source_key.version, "caption": item["table"].caption,
+            "columns": [{"header": item["table"].headers[column], "fields": list(dict.fromkeys(names))}
+                        for column, names in item["columns"].items()], "needs": sorted(item["needs"])}
+            for identity, item in relations.items()}
+    else:
+        instruction += ("Copy the identifying entity and numeric measure verbatim from the quote. For counts "
+            "leave measure empty. Copy the unit alone from the text or table header; leave it empty when unstated. "
+            "Give group values only for separate group results. Use the same records for overlapping Needs. "
+            "Apply the question's conditions. ")
+    dependencies = tuple(unit for unit in units if unit.unit_id not in primary_ids)
+    if dependencies:
+        instruction += "Only primary sources supply records and empty; dependencies provide interpretation. "
+        task["primary_sources"] = primary_refs
+        shared = {u.source_spans[0].source_key for u in primary} & {u.source_spans[0].source_key for u in dependencies}
+        if shared:
+            task["primary_windows"] = [{"source": refs[span.source_key], "span": [span.start, span.end],
+                "begin": unit.text[:24], "end": unit.text[-24:]} for unit in primary for span in unit.source_spans
+                if span.source_key in shared]
+    instruction += "\n"+json.dumps(task, ensure_ascii=False, separators=(",", ":"))
 
     offsets = [numbered_text(unit.text)[1] for unit in units]
 
@@ -885,16 +945,48 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
         data = json.loads(text)
         unresolved = set(data["unresolved"])
         rows, seen = [], set()
+        table_rows = {identity: [] for identity in relations}
+        assigned = set()
         for row in data["records"]:
+            targets = relations[row["relation"]]["needs"] if relations else row["needs"]
             quote = row["quote"]
             matches = [(i, u.text.find(quote)) for i, u in enumerate(units)
                        if u.unit_id in primary_ids and refs[u.source_spans[0].source_key] == row["source"]
                        and quote and quote in u.text]
             if len(matches) != 1:
-                unresolved.update(row["needs"])
+                unresolved.update(targets)
                 continue
             i, start = matches[0]
             end = start + len(quote)
+            if units[i].text.find(quote, start+1) >= 0:
+                unresolved.update(targets)
+                continue
+            if relations:
+                item = relations[row["relation"]]
+                values = [address(i, value, start, end) for value in row["values"]]
+                unit_addresses = [next((a for j, other in enumerate(units)
+                    if other.source_spans[0].source_key == units[i].source_spans[0].source_key
+                    and (a := address(j, unit)) is not None), None) if unit else None for unit in row["units"]]
+                if (len(values) != len(item["columns"]) or len(unit_addresses) != len(values)
+                        or None in values or any(unit and ref is None for unit, ref in zip(row["units"], unit_addresses))):
+                    unresolved.update(targets)
+                    continue
+                key = (row["relation"], i, start, end, tuple(row["values"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                cells = [Cell("", units[i].source_spans[0]) for _ in item["table"].headers]
+                for column, value, unit, ref in zip(item["columns"], values, row["units"], unit_addresses):
+                    unit_source = _word_source(units[int(ref[0][1:])-1], ref)[1] if ref else None
+                    cells[column] = Cell(*_word_source(units[i], value), unit=unit,
+                        header=item["table"].header_spans[column], qualifiers=(unit_source,) if unit_source else (),
+                        label=item["table"].headers[column])
+                table_rows[row["relation"]].append(tuple(cells))
+                assigned.update(targets)
+                for need in targets:
+                    key = units[i].source_spans[0].source_key
+                    examples.setdefault((need, key.document_id, key.version), quote)
+                continue
             entity = address(i, row["entity"], start, end)
             measure = address(i, row["measure"], start, end)
             group = [address(i, v, start, end) for v in row["group"]]
@@ -909,8 +1001,7 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
                     continue
                 seen.add(key)
                 if (not entity or None in group or (row["unit"] and not unit)
-                        or (operations[need] != "count" and not measure)
-                        or units[i].text.find(quote, start+1) >= 0):
+                        or (operations[need] != "count" and not measure)):
                     unresolved.add(need)
                     continue
                 key = units[i].source_spans[0].source_key
@@ -918,8 +1009,15 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
                 rows.append({"need_ids": [need], "entity": entity,
                              "measure": measure if operations[need] != "count" else None,
                              "unit": unit, "group": group, "qualifiers": []})
-        assigned = {n for row in rows for n in row["need_ids"]}
+        assigned.update(n for row in rows for n in row["need_ids"])
         unresolved.update(set(need_ids) - assigned - set(data["empty"]))
+        if relations:
+            coverage = tuple(span for unit in primary for span in unit.source_spans)
+            tables = [replace(item["table"], rows=tuple(table_rows[identity]), coverage=coverage)
+                      for identity, item in relations.items()]
+            programs = tuple(DocumentProgram(need, (), (), operation=operations[need],
+                unresolved_conditions=(need,) if need in unresolved else ()) for need in need_ids)
+            return SemanticProjection(DocumentIndex(tables, blocks), programs, operations)
         payload = {"operations": operations, "unresolved_need_ids": sorted(unresolved), "records": rows}
         projection = decode_projection(json.dumps(payload), query, units, need_ids, population_ids)
         # A dependency can be visible before its own rows have actually been read.

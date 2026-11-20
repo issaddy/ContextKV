@@ -32,9 +32,9 @@
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
-本版使用字段、条件和指定版本的联合覆盖；集合头仍为 7 参数信息增益校准，停止头使用 16 维共享摘要、14 维状态与 32 维隐藏层。扩展批大小读取 `retrieval.evidence_batch`。停止特征包含下一批来源的编码费用、加入当前上下文的增量报价及执行路线的 GPU 命中/Host 回载 token 变化，编码费用以当前证据批次的实测吞吐估计。
+本版使用各实体、字段、条件和指定版本的联合覆盖；集合头仍为 7 参数信息增益校准，停止头使用 16 维共享摘要、14 维状态与 32 维隐藏层。扩展批大小读取 `retrieval.evidence_batch`。停止特征包含下一批来源的编码费用、加入当前上下文的增量报价及执行路线的 GPU 命中/Host 回载 token 变化，编码费用以当前证据批次的实测吞吐估计。
 
-按下方流程重新生成字段、集合与停止监督，并训练到新的 `TRAIN_RUN`。旧集合特征与旧 12 维停止资产不适用于本版；固定 Qwen3-32B 生成权重。构造训练资料包含同一实体的字段/期间/版本对照、错误实体干扰和互补证据组合，按资料家族分离训练与开发。
+下方命令是恢复训练时的完整流程，本轮保持暂停训练。每轮的原始标签、范围标签、集合与停止监督和模型均写入新的 `TRAIN_RUN`；同一轮中断后才续写该目录。旧集合特征与旧 12 维停止资产不适用于本版；固定 Qwen3-32B 生成权重。构造训练资料包含同一实体的字段/期间/版本对照、错误实体干扰和互补证据组合，按资料家族分离训练与开发。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -59,29 +59,29 @@ python3 -m training.prepare_shared_labels \
   --task-only --source data/multidoc2dial/source \
   --query-model models/qwen3-embedding-0.6b \
   --endpoint http://127.0.0.1:30000 \
-  --output data/training/shared/query_labels.jsonl \
+  --output "$TRAIN_RUN/query_labels.jsonl" \
   --train-states 160 --dev-states 24 --concurrency 4
 
 python3 -m training.prepare_shared_labels \
   --source data/multidoc2dial/source \
   --query-model models/qwen3-embedding-0.6b \
   --endpoint http://127.0.0.1:30000 \
-  --output data/training/shared/labels.jsonl \
+  --output "$TRAIN_RUN/labels.jsonl" \
   --train-states 24 --dev-states 8 --candidates 6 --concurrency 4
 
 python3 -m training.shared_training query \
   --model models/qwen3-embedding-0.6b --init-asset models/shared-query \
-  --data data/training/shared/query_labels.jsonl \
+  --data "$TRAIN_RUN/query_labels.jsonl" \
   --output "$TRAIN_RUN/query" --device cuda:2 --heads-only --epochs 20 --learning-rate 0.0002
 
 python3 -m training.prepare_shared_labels \
   --query-model models/qwen3-embedding-0.6b \
-  --refresh-coverage data/training/shared/query_labels.jsonl data/training/shared/labels.jsonl \
-  --output data/training/shared/query_labels.jsonl --concurrency 4
+  --refresh-coverage "$TRAIN_RUN/query_labels.jsonl" "$TRAIN_RUN/labels.jsonl" \
+  --output "$TRAIN_RUN/query_labels.jsonl" --concurrency 4
 
 python3 -m training.shared_training coverage \
   --model models/qwen3-embedding-0.6b --init-asset "$TRAIN_RUN/query" \
-  --data data/training/shared/query_labels.jsonl \
+  --data "$TRAIN_RUN/query_labels.jsonl" \
   --output "$TRAIN_RUN/query" --device cuda:2 --epochs 200 --learning-rate 0.001
 
 python3 -m training.shared_index \
@@ -93,34 +93,34 @@ python3 -m training.shared_index \
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset "$TRAIN_RUN/query" \
-  --init-asset models/shared-evidence --data data/training/shared/labels.jsonl \
+  --init-asset models/shared-evidence --data "$TRAIN_RUN/labels.jsonl" \
   --output "$TRAIN_RUN/evidence" --device cuda:3 --field-only --epochs 1
 
 python3 -m training.prepare_shared_labels \
   --values-only --source data/multidoc2dial/source \
   --query-model models/qwen3-embedding-0.6b \
   --endpoint http://127.0.0.1:30000 \
-  --output data/training/shared/value_states.jsonl \
+  --output "$TRAIN_RUN/value_states.jsonl" \
   --train-states 24 --dev-states 8 --concurrency 4
 
 python3 -m training.calibrate_kv --config "$TRAIN_RUN/study.yaml" \
-  --data data/training/shared/labels.jsonl --output "$TRAIN_RUN/kv.json" --concurrency 4
+  --data "$TRAIN_RUN/labels.jsonl" --output "$TRAIN_RUN/kv.json" --concurrency 4
 
 python3 -m training.collect_shared_values sets \
-  --config "$TRAIN_RUN/study.yaml" --data data/training/shared/value_states.jsonl \
-  --output data/training/shared/sets.jsonl --train-states 24 --dev-states 6 --concurrency 4
+  --config "$TRAIN_RUN/study.yaml" --data "$TRAIN_RUN/value_states.jsonl" \
+  --output "$TRAIN_RUN/sets.jsonl" --train-states 24 --dev-states 6 --concurrency 4
 
 python3 -m training.shared_training evidence \
   --model models/jina-reranker-v3.5 \
   --query-model models/qwen3-embedding-0.6b --query-asset "$TRAIN_RUN/query" \
-  --init-asset "$TRAIN_RUN/evidence" --data data/training/shared/sets.jsonl \
+  --init-asset "$TRAIN_RUN/evidence" --data "$TRAIN_RUN/sets.jsonl" \
   --output "$TRAIN_RUN/evidence" --device cuda:3 --epochs 80 --learning-rate 0.001
 
 python3 -m training.collect_shared_values stop \
-  --config "$TRAIN_RUN/study.yaml" --data data/training/shared/value_states.jsonl \
-  --output data/training/shared/stop.jsonl --train-states 12 --dev-states 4 --concurrency 4
+  --config "$TRAIN_RUN/study.yaml" --data "$TRAIN_RUN/value_states.jsonl" \
+  --output "$TRAIN_RUN/stop.jsonl" --train-states 12 --dev-states 4 --concurrency 4
 
-python3 -m training.stop_value data/training/shared/stop.jsonl \
+python3 -m training.stop_value "$TRAIN_RUN/stop.jsonl" \
   --output "$TRAIN_RUN/stop.pt" --device cuda:2 \
   --seconds-price 0.001 --tail-price 0.001
 ```
@@ -131,7 +131,7 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
 
-集合采集使用线上首批可见证据，比较当前选择、相邻集合、互补组合与空集合。固定教师先根据参考答案拆分必要事实，再匿名评判各答案。每个集合保存官方质量、逐事实覆盖标记、输出长度和当时的选择特征。集合拟合使用答案质量，开发报告分别给出所选集合的质量与事实覆盖。字段损失只使用与标注对齐的子需求。范围头的开发指标使用与服务一致的整题和子需求联合路由。
+集合与停止采集在各自训练／开发额度内，先选带 `paired_sets` 的配对题，再按原会话轮转顺序填充普通题；样本总额度不增加。集合采集使用线上首批可见证据，比较当前选择、相邻集合、互补组合与空集合。固定教师先根据参考答案拆分必要事实，再匿名评判各答案。每个集合保存官方质量、逐事实覆盖标记、输出长度和当时的选择特征。集合拟合使用答案质量，开发报告分别给出所选集合的质量与事实覆盖。字段损失只使用与标注对齐的子需求。范围头的开发指标使用与服务一致的整题和子需求联合路由。
 
 MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出与 `study_matrix.yaml` 中的索引目录对应。独立 corpus 的索引构建可以并行。
 

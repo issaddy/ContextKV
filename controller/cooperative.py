@@ -355,8 +355,8 @@ class CooperativeController:
 
     async def _read_mixed_population(self, state, snapshot, complete, need_ids):
         from itertools import chain, pairwise
-        from adapters.document_compute import (DocumentIndex, combine_populations,
-            literal_population_projection, merge_projections, quantity)
+        from adapters.document_compute import (DocumentIndex, combine_populations, literal_population_projection,
+            merge_bound_population, merge_projections, population_relations, quantity)
         from adapters.shared_retrieval import SharedEvidenceProvider, need_scope_signature
         index = state.document_index
         bound = {program.need_id: program for program in state.programs if program.need_id in need_ids
@@ -371,6 +371,7 @@ class CooperativeController:
         records = {record["need_id"]: record for record in state.computations}
         for group_index, (table_ids, targets) in enumerate(groups.items()):
             parts = [(index, bound[identity]) for identity in targets if identity in bound]
+            relations = population_relations(index, [program for _, program in parts])
             primary = index.outside_tables(state.population_units, table_ids) if table_ids else state.population_units
             used = {projection.table_id for _, program in parts for projection in program.projections}
             headers = DocumentIndex((table for key, table in index.tables.items() if key in used),
@@ -386,7 +387,7 @@ class CooperativeController:
             # Only the next packet is needed to describe future KV reuse.
             for i, ((roots, packet), (_, upcoming)) in enumerate(pairwise(chain(packets, (((), ()),)))):
                 projection = literal_population_projection(state.query, packet, state.pool.source_blocks,
-                    targets, population, {unit.unit_id for unit in roots}, examples)
+                    targets, population, {unit.unit_id for unit in roots}, examples, relations=relations)
                 future = blocks_for_units(upcoming, state.pool.source_blocks)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, future_sources=future, instruction=projection.instruction,
@@ -403,8 +404,11 @@ class CooperativeController:
                 processed_primary.update(unit.unit_id for unit in roots)
                 state.read_units.update(unit.unit_id for unit in roots)
             if reads:
-                merged = merge_projections(reads)
-                parts.extend((merged.index, program) for program in merged.programs)
+                if parts:
+                    parts = merge_bound_population(reads, index, [program for _, program in parts])
+                else:
+                    merged = merge_projections(reads)
+                    parts = [(merged.index, program) for program in merged.programs]
             calculated, programs = combine_populations(parts)
             for program in programs:
                 if any(identity not in processed_primary for identity in population):
@@ -580,7 +584,7 @@ class CooperativeController:
                 if (any(need.operation in AGGREGATES and need.need_id not in computed for need in state.query.task.needs)
                         and set(population_ids) <= costs.sources.keys()
                         and sum(unit.body_tokens for unit in state.population_units) <= budget
-                        and costs.fits(population_ids, preserve_order=True)):
+                        and costs.quote(population_ids, preserve_order=True)["feasible"]):
                     ids = population_ids
                 else:
                     ids = state.evidence.project_population(units, body_tokens=budget,

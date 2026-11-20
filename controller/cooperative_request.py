@@ -159,7 +159,7 @@ class EvidenceCosts:
             return ids
         best = ids
         quote = self.quote(ids, preserve_order=True)
-        price = (not quote["fits"], quote["milliseconds"])
+        price = (not quote["feasible"], quote["milliseconds"])
         positions = {identity: i for i, identity in enumerate(ids)}
         owners = {source: identity for identity in ids for source in self.sources[identity]}
         for prefix in self.snapshot["prefixes"]:
@@ -174,7 +174,7 @@ class EvidenceCosts:
                        if dep in positions and positions[dep] < positions[identity]):
                     continue
                 quote = self.quote(ordered, preserve_order=True)
-                cost = (not quote["fits"], quote["milliseconds"])
+                cost = (not quote["feasible"], quote["milliseconds"])
                 if cost < price:
                     best, price = ordered, cost
         return best
@@ -202,7 +202,8 @@ class EvidenceCosts:
             return select_route(exact, approximate, mode=self.mode,
                 available_tokens=self.snapshot["available_tokens"],
                 capacity_tokens=self.snapshot["gpu_capacity_tokens"],
-                max_input_tokens=self.snapshot["max_input_tokens"])
+                max_input_tokens=self.snapshot["max_input_tokens"],
+                admission_wait_ms=self.costs.get("admission_wait_ms", 0.0))
         if self.mode == "exact" or (self.mode == "auto" and not addresses):
             return choose()
         costs, cold, host, gpu = self.costs, 0, 0, 0
@@ -234,10 +235,6 @@ class EvidenceCosts:
             "pin_tokens": sum(pins.values()), "resident_tokens": sum(gpu_nodes.values()), "work_tokens": work,
             "gpu_tokens": gpu, "host_tokens": host}
         return choose(approximate)
-
-    def fits(self, ids, *, preserve_order=False):
-        quote = self.quote(ids, preserve_order=preserve_order)
-        return quote["fits"]
 
 
 def compact_computations(results):

@@ -84,6 +84,7 @@ async def collect(args):
                 groups.setdefault(row["conversation_id"], []).append(row)
         ordered = [rows[index] for index in range(max(map(len, groups.values()), default=0))
                    for rows in groups.values() if index < len(rows)]
+        ordered.sort(key=lambda row: not bool(row.get("paired_sets")))
         selected.extend(ordered if count is None else ordered[:count])
     source = selected
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder

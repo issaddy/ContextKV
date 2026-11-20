@@ -33,8 +33,14 @@ def infoflow_work(cold_pages, prompt, body, ratio, page):
     return cold_pages + page_tokens(prompt, page) + prompt + math.ceil(body * ratio)
 
 
-def select_route(exact, approximate, *, mode, available_tokens, capacity_tokens, max_input_tokens):
-    """Prefer executable routes; keep a feasible queued route when the pool is busy."""
+def route_cost(route, available_tokens, admission_wait_ms):
+    waiting = route["new_tokens"] + route["pin_tokens"] > available_tokens
+    return route["milliseconds"] + (admission_wait_ms if waiting else 0.0)
+
+
+def select_route(exact, approximate, *, mode, available_tokens, capacity_tokens, max_input_tokens,
+                 admission_wait_ms=0.0):
+    """Compare feasible routes including measured waiting and approximation loss."""
     routes = ([exact] if mode == "exact" or approximate is None else
               [approximate] if mode == "infoflow" else [exact, approximate])
     feasible = [route for route in routes
@@ -42,8 +48,9 @@ def select_route(exact, approximate, *, mode, available_tokens, capacity_tokens,
                 and route["new_tokens"] + route["resident_tokens"] <= capacity_tokens]
     ready = [route for route in feasible
              if route["new_tokens"] + route["pin_tokens"] <= available_tokens]
-    chosen = min(ready or feasible or routes, key=lambda route: route["milliseconds"])
-    return {**chosen, "feasible": chosen in feasible, "fits": chosen in ready}
+    chosen = min(feasible or routes, key=lambda route: route_cost(route, available_tokens, admission_wait_ms))
+    return {**chosen, "milliseconds": route_cost(chosen, available_tokens, admission_wait_ms),
+            "feasible": chosen in feasible, "fits": chosen in ready}
 
 
 def retention_value(costs, *, mode, on_gpu, host_copy, ratio):

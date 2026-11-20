@@ -217,6 +217,8 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
                 f"{30+mixed_amount} credits", [family+":mixed:contribution"]),
             ("Sum all contributions in this complete document. Publication dates are not contributions.",
                 "30 credits", [family+":mixed:metadata"]),
+            (f"In statement version 2024, compare the current assets of {names[0]} and {names[1]}.",
+                f"{names[0]}: {assets['2024']} credits; {names[1]}: {assets['2024']+19} credits", asset_ids),
         ]
         history = []
         for turn, (question, answer, passages) in enumerate(cases, 1):
@@ -229,7 +231,8 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
                 catalogue = [{"family": family+":assets", "version": version,
                     "valid_from": version+"-01-01", "valid_to": "2024-01-01" if version == "2023" else None,
                     "current": version == "2024"} for version in ("2023", "2024")]
-                groups = [[passage] for passage in asset_ids] + [asset_ids[:2], asset_ids[1:3], asset_ids]
+                groups = [[passage] for passage in asset_ids] + [asset_ids[:2], asset_ids[1:3],
+                    [asset_ids[1], asset_ids[3]], asset_ids]
                 paired_sets = [[unit.unit_id for passage in group for unit in by_passage[passage]] for group in groups]
             grounding = [{"passage_id": passage, "start": 0, "end": len(next(document["text"]
                 for document in documents if document["passage_id"] == passage))} for passage in passages]
