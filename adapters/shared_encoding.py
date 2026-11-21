@@ -153,13 +153,16 @@ class EvidenceEncoding:
         by_id = {unit.unit_id: unit for unit in units}
         positions = {identity: i for i, identity in enumerate(need_ids)}
         support = [[0.] * len(need_ids) for _ in self.unit_ids]
+        by_source = {}
+        for i, identity in enumerate(self.unit_ids):
+            for span in by_id[identity].source_spans:
+                by_source.setdefault(span.source_key, []).append((i, span.start, span.end))
         for binding in self.bindings:
             if binding.role == "source" and binding.need_id in positions:
-                for i, identity in enumerate(self.unit_ids):
-                    if any(span.source_key == binding.source_span.source_key
-                           and span.start <= binding.source_span.start and binding.source_span.end <= span.end
-                           for span in by_id[identity].source_spans):
-                        j = positions[binding.need_id]
+                j = positions[binding.need_id]
+                bspan = binding.source_span
+                for i, start, end in by_source.get(bspan.source_key, ()):
+                    if start <= bspan.start and bspan.end <= end:
                         support[i][j] = max(support[i][j], binding.score)
         return (self.embeddings.new_tensor(support).reshape(len(self.unit_ids), len(need_ids)),
                 self.embeddings.new_tensor([identity in completed for identity in need_ids]))
@@ -185,27 +188,79 @@ class EvidenceEncoding:
                 sets.append(tuple(active))
         return tuple(sets)
 
+    def diverse_frontier(self, units, support=None, completed=None):
+        """Marginal-novelty (MMR) and uncovered-Need frontier with dependency closures."""
+        import torch
+        if not self.unit_ids:
+            return ((),)
+        by_id = {unit.unit_id: unit for unit in units}
+        n = len(self.unit_ids)
+        rel = self.relevance.clamp_min(0)
+        sim = (self.embeddings @ self.embeddings.T).clamp(0, 1)
+        grounded = support * rel[:, None] if support is not None and support.shape[1] else None
+        if grounded is not None:
+            covered = (completed.to(device=rel.device, dtype=rel.dtype).clone()
+                       if completed is not None and len(completed)
+                       else torch.zeros(grounded.shape[1], device=rel.device, dtype=rel.dtype))
+        else:
+            covered = None
+        max_sim = torch.zeros(n, device=rel.device, dtype=rel.dtype)
+        chosen_mask = torch.zeros(n, device=rel.device, dtype=torch.bool)
+        id_to_idx = {identity: i for i, identity in enumerate(self.unit_ids)}
+        active, seen, sets = [], set(), [()]
+
+        def add(identity):
+            if identity in seen:
+                return
+            seen.add(identity)
+            for dependency in by_id[identity].dependencies:
+                add(dependency)
+            active.append(identity)
+            idx = id_to_idx.get(identity)
+            if idx is not None:
+                chosen_mask[idx] = True
+                torch.maximum(max_sim, sim[:, idx], out=max_sim)
+                if grounded is not None:
+                    torch.maximum(covered, grounded[idx], out=covered)
+
+        while not chosen_mask.all():
+            scores = rel * (1.0 - max_sim)
+            if grounded is not None:
+                need_gain = (torch.maximum(grounded, covered[None, :]) - covered[None, :]).mean(-1)
+                scores = scores + need_gain
+            best = int(scores.masked_fill(chosen_mask, -torch.inf).argmax())
+            add(self.unit_ids[best])
+            sets.append(tuple(active))
+        return tuple(sets)
+
     def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0, need_ids=(), completed=()):
-        """Price one information frontier, then compile only its chosen context."""
+        """Price relevance and marginal-novelty frontiers, then compile only the chosen context."""
         import torch
         if not self.unit_ids or body_tokens <= 0:
             return ()
         sizes = {unit.unit_id: unit.body_tokens for unit in units}
         frontier = self.frontier(units)
+        semantic_order = frontier[-1]
+        support, known = self.need_support(units, need_ids, completed)
         candidates = [ids for ids in frontier if sum(sizes[i] for i in ids) <= body_tokens]
-        ordinary_count = len(candidates)
-        warm = cost_model.reusable_units() if cost_model else ()
-        if warm:
-            semantic_order = frontier[-1]
-            seen = {frozenset(ids) for ids in candidates}
-            for ids in self.frontier(units, preferred=warm):
+        member_sets = [frozenset(ids) for ids in candidates]
+        seen = set(member_sets)
+
+        def add_frontier(sets):
+            for ids in sets:
                 members = frozenset(ids)
                 if members not in seen and sum(sizes[i] for i in ids) <= body_tokens:
                     candidates.append(tuple(i for i in semantic_order if i in members))
+                    member_sets.append(members)
                     seen.add(members)
-        masks = torch.tensor([[identity in ids for identity in self.unit_ids] for ids in candidates],
+
+        add_frontier(self.diverse_frontier(units, support, known))
+        ordinary_count = len(candidates)
+        warm = cost_model.reusable_units() if cost_model else ()
+        if warm:
+            add_frontier(self.frontier(units, preferred=warm))
+        masks = torch.tensor([[identity in members for identity in self.unit_ids] for members in member_sets],
                              device=self.embeddings.device, dtype=torch.bool)
-        support, known = self.need_support(units, need_ids, completed)
         with torch.no_grad():
             values = self.heads.utility(self.embeddings, self.relevance, masks, support, known)
             utility = values
@@ -247,6 +302,7 @@ class EvidenceEncoding:
                     found.add(i)
                     pending.extend(by_id[identity] for identity in units[i].dependencies)
             closures.append(found)
+
         def identities(indices):
             return tuple(units[i].unit_id for i in sorted(indices))
 
@@ -254,9 +310,11 @@ class EvidenceEncoding:
         ranked_groups = [sorted(members, key=lambda i: float(self.relevance[i]), reverse=True)
                          for members in groups.values()]
         selected = set().union(*(closures[members[0]] for members in ranked_groups))
+
         def fits(indices):
             return sum(sizes[i] for i in indices) <= body_tokens and (
                 cost_model is None or cost_model.fits(identities(indices), preserve_order=True))
+
         if not fits(selected):
             selected.clear()
             for members in sorted(ranked_groups, key=lambda group: float(self.relevance[group[0]]), reverse=True):
@@ -266,30 +324,31 @@ class EvidenceEncoding:
                         selected = candidate
                         break
         used = sum(sizes[i] for i in selected)
-        similarity = (self.embeddings@self.embeddings.T).clamp(0, 1)
+        relevance = self.relevance.clamp_min(0)
+        weights = relevance.square()
+        similarity = (self.embeddings @ self.embeddings.T).clamp(0, 1)
         same_source = torch.zeros_like(similarity)
         for members in groups.values():
-            same_source[torch.tensor(members)[:, None], torch.tensor(members)[None, :]] = 1
-        relevance = self.relevance.clamp_min(0)
-        affinity = similarity*same_source*relevance[None, :]
-        weights = relevance.square()
+            rows = torch.tensor(members, device=similarity.device, dtype=torch.long)
+            same_source[rows[:, None], rows[None, :]] = 1.
+        affinity = similarity * same_source * relevance[None, :]
         represented = affinity[:, sorted(selected)].amax(1) if selected else torch.zeros_like(relevance)
         while True:
             price = cost_model.estimate(identities(selected), preserve_order=True) if cost_model else 0.
             best, best_score = None, 0.
-            for i, closure in enumerate(closures):
-                extra = closure-selected
+            for closure in closures:
+                extra = closure - selected
                 tokens = sum(sizes[j] for j in extra)
-                if not extra or used+tokens > body_tokens:
+                if not extra or used + tokens > body_tokens:
                     continue
                 candidate = identities(selected | extra)
                 quote = cost_model.quote(candidate, preserve_order=True) if cost_model else None
-                if quote and quote["new_tokens"]+quote["pin_tokens"] > cost_model.snapshot["available_tokens"]:
+                if quote and quote["new_tokens"] + quote["pin_tokens"] > cost_model.snapshot["available_tokens"]:
                     continue
                 coverage = torch.maximum(represented, affinity[:, sorted(extra)].amax(1))
-                gain = float(((coverage-represented)*weights).sum())
-                extra_price = quote["milliseconds"]-price if quote else 0.
-                score = (gain-seconds_price*extra_price/1000)/tokens
+                gain = float(((coverage - represented) * weights).sum())
+                extra_price = quote["milliseconds"] - price if quote else 0.
+                score = (gain - seconds_price * extra_price / 1000) / tokens
                 if score > best_score:
                     best, best_score = extra, score
             if best is None:
@@ -470,29 +529,35 @@ class SharedQueryEncoder:
         return states, self.heads(states, states[query_position])
 
     def encode(self, history, question, task_id, current_turn_id, *, catalogue=(), source_scope=(), history_turns=()):
-        return self.ready.submit({"history": history, "question": question, "task_id": task_id,
-            "current_turn_id": current_turn_id, "catalogue": catalogue, "source_scope": source_scope,
-            "history_turns": history_turns})
+        prepared = query_input(self.tokenizer, history, question, current_turn_id, catalogue,
+            history_tokens=self.history_tokens, history_turns=history_turns)
+        return self.ready.submit({"question": question, "task_id": task_id,
+            "current_turn_id": current_turn_id, "catalogue": catalogue,
+            "source_scope": source_scope, "_prepared": prepared})
 
     def encode_many(self, requests, deliver=None):
         import torch
         started = time.perf_counter()
-        prepared = [query_input(self.tokenizer, row["history"], row["question"], row["current_turn_id"],
-            row.get("catalogue", ()), history_tokens=self.history_tokens, history_turns=row.get("history_turns", ())) for row in requests]
+        prepared = [row["_prepared"] if "_prepared" in row else query_input(
+            self.tokenizer, row["history"], row["question"], row["current_turn_id"],
+            row.get("catalogue", ()), history_tokens=self.history_tokens, history_turns=row.get("history_turns", ()))
+            for row in requests]
         batch = self.tokenizer.pad([item[0] for item in prepared], padding=True, return_tensors="pt").to(self.model.device)
         with self.backbone_lock, torch.no_grad():
             states = self.model(**batch, use_cache=False).last_hidden_state.float()
             results = []
             for index, (row, item) in enumerate(zip(requests, prepared)):
-                result = self._encode(**row, _prepared=item, _states=states[index, -len(item[0]["input_ids"]):])
+                result = self._encode(row["question"], row["task_id"], row["current_turn_id"],
+                    catalogue=row.get("catalogue", ()), source_scope=row.get("source_scope", ()),
+                    _prepared=item, _states=states[index, -len(item[0]["input_ids"]):])
                 result.usage["compute_ms"] = (time.perf_counter()-started)*1000
                 results.append(result)
                 if deliver is not None:
                     deliver(index, result)
         return results
 
-    def _encode(self, history, question, task_id, current_turn_id, *, catalogue=(), source_scope=(),
-                history_turns=(), _prepared, _states):
+    def _encode(self, question, task_id, current_turn_id, *, catalogue=(), source_scope=(),
+                _prepared, _states):
         import torch
         from adapters.shared_heads import (CONDITION_TYPES, EDGE_KINDS, FILTER_OPERATORS, OPERATIONS,
             SCOPES, SPAN_KINDS, TEMPORAL_RELATIONS, UPDATES, VERSION_MODES)
@@ -575,10 +640,15 @@ class SharedQueryEncoder:
             if explicit_versions:
                 selected_versions = list(explicit_versions)
                 predicted_families = set(selected_families)
-                selected_families = []
+                matched_families = []
                 for version in explicit_versions:
                     families = [row["family"] for row in catalogue if row["version"] == version]
-                    selected_families.extend([name for name in families if name in predicted_families] or families)
+                    matched_families.extend(name for name in families if name in predicted_families)
+                if matched_families:
+                    selected_families = matched_families
+                elif not predicted_families:
+                    selected_families = [row["family"] for version in explicit_versions
+                                         for row in catalogue if row["version"] == version]
                 if mode == "current":
                     mode = "explicit"
             intent = VersionIntent(mode,
@@ -630,56 +700,80 @@ class SharedEvidenceEncoder:
         self.manifest = {"model_id": EVIDENCE_MODEL, "asset": str(asset_path), "shared_evidence_encoding": True}
         self.ready = ReadyBatch(self.encode_many)
 
-    def prepare(self, query, units):
-        """Use Jina's listwise prompt and explicit embedding marker token IDs."""
+    def _encode_tokens(self, text):
+        return self.tokenizer.encode(text, add_special_tokens=False)
+
+    def _tokenize_units(self, units):
+        tokenized = []
+        for unit in units:
+            body = self.tokenizer(unit.text, add_special_tokens=False, return_offsets_mapping=True,
+                                  split_special_tokens=True)
+            tokenized.append((unit, body["input_ids"], body["offset_mapping"]))
+        return tokenized
+
+    def _prepare_tokenized(self, query, tokenized_units):
+        """Assemble Jina's listwise prompt from pre-tokenized units in a single pass."""
         prefix = ("<|im_start|>system\nYou are a search relevance expert who can determine a ranking of the passages "
             "based on how relevant they are to the query. If the query is a question, how relevant a passage is "
             "depends on how well it answers the question. If not, try to analyze the intent of the query and "
             "assess how well each passage satisfies the intent. If an instruction is provided, you should follow "
             "the instruction when determining the ranking.<|im_end|>\n<|im_start|>user\n")
-        encode = lambda text: self.tokenizer.encode(text, add_special_tokens=False)
-        ids = encode(prefix + f"I will provide you with {len(units)} passages, each indicated by a numerical identifier. "
+        ids = self._encode_tokens(prefix + f"I will provide you with {len(tokenized_units)} passages, each indicated by a numerical identifier. "
                      f"Rank the passages based on their relevance to query: {query}\n")
         addresses, doc_positions = [None]*len(ids), []
-        for index, unit in enumerate(units):
-            header = encode(f'<passage id="{index}">\n'+(unit.heading+"\n" if unit.heading else ""))
+        passage_tail = self._encode_tokens("\n</passage>\n") if tokenized_units else ()
+        for index, (unit, body_ids, body_offsets) in enumerate(tokenized_units):
+            header = self._encode_tokens(f'<passage id="{index}">\n'+(unit.heading+"\n" if unit.heading else ""))
             ids.extend(header)
             addresses.extend([None]*len(header))
-            body = self.tokenizer(unit.text, add_special_tokens=False, return_offsets_mapping=True,
-                                  split_special_tokens=True)
-            ids.extend(body["input_ids"])
+            ids.extend(body_ids)
             source = unit.source_spans[0]
             addresses.extend((unit.unit_id, source.source_key, source.start+left, source.start+right)
-                             for left, right in body["offset_mapping"])
+                             for left, right in body_offsets)
             doc_positions.append(len(ids))
             ids.append(self.model.doc_embed_token_id)
             addresses.append(None)
-            tail = encode("\n</passage>\n")
-            ids.extend(tail)
-            addresses.extend([None]*len(tail))
-        tail = encode(f"<query>\n{query}")
+            ids.extend(passage_tail)
+            addresses.extend([None]*len(passage_tail))
+        tail = self._encode_tokens(f"<query>\n{query}")
         ids.extend(tail)
-        addresses.extend([None]*len(tail))
         query_position = len(ids)
         ids.append(self.model.query_embed_token_id)
-        addresses.append(None)
-        tail = encode("\n</query><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
-        ids.extend(tail)
-        addresses.extend([None]*len(tail))
+        closing = self._encode_tokens("\n</query><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        ids.extend(closing)
+        addresses.extend([None]*(len(tail)+1+len(closing)))
         return ids, tuple(addresses), doc_positions, query_position
 
-    def forward_batch(self, query, units):
+    def prepare(self, query, units):
+        """Use Jina's listwise prompt and explicit embedding marker token IDs."""
+        return self._prepare_tokenized(query, self._tokenize_units(units))
+
+    def _prepare_request(self, query, units):
+        units = tuple(units)
+        if not units:
+            return ()
+        tokenized = self._tokenize_units(units)
+        overhead = len(self._prepare_tokenized(query.evidence_query, ())[0])
+        packed = pack_passages(tokenized, [len(body_ids)+20 for _, body_ids, _ in tokenized],
+                               overhead=overhead, budget=self.batch_tokens)
+        return tuple((tuple(u for u, _, _ in group), self._prepare_tokenized(query.evidence_query, group))
+                     for group in packed)
+
+    def _forward_packed(self, packed):
         import torch
-        ids, addresses, doc_positions, query_position = self.prepare(query, units)
+        ids, addresses, doc_positions, query_position = packed
         input_ids = torch.tensor([ids], device=self.model.device)
         states = self.model.model(input_ids=input_ids, use_cache=False).last_hidden_state[0]
         documents, scores, q = project_markers(self.model, states, doc_positions, query_position)
         return states.float(), documents, scores, addresses, len(ids), q
 
+    def forward_batch(self, query, units):
+        return self._forward_packed(self.prepare(query, units))
+
     def forward_evidence(self, query, units):
         """Train on the same evidence batches and global cosine scores used online."""
         import torch
-        outputs = [self.forward_batch(query.evidence_query, batch) for batch in self._batches(query, units)]
+        outputs = [self._forward_packed(packed) for _, packed in self._prepare_request(query, units)]
         if not outputs:
             return (torch.empty((0, self.model.config.hidden_size), device=self.model.device),
                     torch.empty((0, 512), device=self.model.device),
@@ -688,31 +782,50 @@ class SharedEvidenceEncoder:
         return (torch.cat([item[0] for item in outputs]), documents, scores,
                 tuple(address for item in outputs for address in item[3]), sum(item[4] for item in outputs))
 
-    def _batches(self, query, units):
-        units = tuple(units)
-        return pack_passages(units,
-            [len(self.tokenizer.encode(unit.text, add_special_tokens=False))+20 for unit in units],
-            overhead=len(self.prepare(query.evidence_query, ())[0]), budget=self.batch_tokens)
+    @staticmethod
+    def _active_needs(query):
+        return [(i, need) for i, need in enumerate(query.task.needs)
+                if query.task.coverage_scope != "all_supplied_documents"
+                or need.operation in {"count", "sum", "mean", "min", "max", "group"}]
 
     def encode(self, query, units):
-        return self.ready.submit((query, tuple(units)))
+        units = tuple(units)
+        # Tokenize and pack on the caller thread so concurrent requests keep the GPU worker fed.
+        prepared = self._prepare_request(query, units)
+        return self.ready.submit((query, units, prepared))
 
     def encode_many(self, requests, deliver=None):
         import torch
         started = time.perf_counter()
-        prepared = [(owner, batch, self.prepare(query.evidence_query, batch))
-                    for owner, (query, units) in enumerate(requests) for batch in self._batches(query, units)]
-        outputs = [{} for _ in requests]
-        remaining = [sum(owner == i for owner, _, _ in prepared) for i in range(len(requests))]
-        results = [None for _ in requests]
+        normalized = []
+        prepared = []
+        need_states = []
+        outputs = []
+        for owner, entry in enumerate(requests):
+            if len(entry) == 3:
+                query, units, batches = entry
+            else:
+                query, units = entry
+                batches = self._prepare_request(query, units)
+            normalized.append((query, units))
+            need_states.append(bool(self._active_needs(query)))
+            # Pre-seed batch keys in original unit order so length-sorted execution
+            # preserves exact alignment between embeddings/relevance and unit_ids.
+            outputs.append({tuple(unit.unit_id for unit in batch_units): None for batch_units, _ in batches})
+            for batch_units, packed in batches:
+                prepared.append((owner, batch_units, packed))
+        remaining = [len(owner_outputs) for owner_outputs in outputs]
+        results = [None for _ in normalized]
         def finish(owner):
-            query, units = requests[owner]
+            query, units = normalized[owner]
             result = self._encode(query, units, outputs[owner])
             result.usage["compute_ms"] = (time.perf_counter()-started)*1000
             results[owner] = result
             outputs[owner].clear()
             if deliver is not None:
                 deliver(owner, result)
+        # Length-sort prepared batches before grouping to minimize left-padding waste.
+        prepared.sort(key=lambda item: len(item[2][0]))
         groups, current, maximum = [], [], 0
         for item in prepared:
             size = len(item[2][0])
@@ -734,8 +847,10 @@ class SharedEvidenceEncoder:
                 for offset, (owner, units, (ids, addresses, positions, query_position)) in enumerate(group):
                     states = hidden[offset, -len(ids):]
                     documents, scores, query = project_markers(self.model, states, positions, query_position)
+                    # Skip materializing full float32 token states when no field decoding runs.
+                    kept = states.float() if need_states[owner] else None
                     outputs[owner][tuple(unit.unit_id for unit in units)] = (
-                        states.float(), documents, scores, addresses, len(ids), query)
+                        kept, documents, scores, addresses, len(ids), query)
                     remaining[owner] -= 1
                     if not remaining[owner]:
                         finish(owner)
@@ -748,9 +863,7 @@ class SharedEvidenceEncoder:
         by_id = {unit.unit_id: unit for unit in units}
         rankings, bindings, binding_vectors = [], [], []
         token_count = 0
-        needs = [(i, need) for i, need in enumerate(query.task.needs)
-                 if query.task.coverage_scope != "all_supplied_documents"
-                 or need.operation in {"count", "sum", "mean", "min", "max", "group"}]
+        needs = self._active_needs(query)
         with torch.no_grad():
             for states, documents, scores, addresses, count, query_vector in outputs.values():
                 token_count += count

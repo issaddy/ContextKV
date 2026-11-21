@@ -140,15 +140,16 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         from controller.cooperative_request import source_address
         planned = {}
         answer_request = service.answer_request
-        async def capture_plan(state, snapshot, complete):
-            request = await answer_request(state, snapshot, complete)
+        async def capture_plan(state, snapshot):
+            request = await answer_request(state, snapshot)
             chosen = set(state.selected_ids)
             order = [identity for identity in state.evidence.frontier(state.pool.units)[-1] if identity in chosen]
             units = {unit.unit_id: unit for unit in state.pool.units}
             ranked = blocks_for_units((units[identity] for identity in order), state.pool.source_blocks)
             members = {source_address(block): block for block in request.evidence}
             ranked_ids = [source_address(block) for block in ranked if source_address(block) in members]
-            ranked_blocks = (*[block for address, block in members.items() if address not in set(ranked_ids)],
+            ranked_set = set(ranked_ids)
+            ranked_blocks = (*[block for address, block in members.items() if address not in ranked_set],
                              *[members[address] for address in ranked_ids])
             planned[id(request)] = {"ranked_evidence": ranked_blocks, "history": snapshot.raw_history}
             return request
@@ -263,17 +264,19 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         await asyncio.gather(*(conversation(sid, turns) for sid, turns in grouped.items()))
     finally:
         measured_end = time.monotonic()
-        kv = await service.engine.metrics()
-        await physical.stop()
-        write_json(directory/"batch_cost.json", {"duration_seconds": measured_end-measured_start,
-            "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
-            "gpu_kv_active_peak_tokens": kv["gpu_active_peak_tokens"],
-            "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
-            **integrate_physical(physical.samples, measured_start, measured_end)})
-        write_jsonl(directory/"references.jsonl", [references[key] for key in expected if key in references])
-        provider.close()
-        await service.aclose()
-        service.store.close()
+        try:
+            await physical.stop()
+            kv = await service.engine.metrics()
+            write_json(directory/"batch_cost.json", {"duration_seconds": measured_end-measured_start,
+                "gpu_kv_peak_tokens": kv["gpu_peak_used_tokens"],
+                "gpu_kv_active_peak_tokens": kv["gpu_active_peak_tokens"],
+                "gpu_kv_peak_gib": kv["gpu_peak_used_tokens"]*kv["pool"]["bytes_per_token"]/2**30,
+                **integrate_physical(physical.samples, measured_start, measured_end)})
+            write_jsonl(directory/"references.jsonl", [references[key] for key in expected if key in references])
+        finally:
+            provider.close()
+            await service.aclose()
+            service.store.close()
     ordered = [results[key] for key in expected]
     if trace:
         from bench.cache_reuse import replay_requests

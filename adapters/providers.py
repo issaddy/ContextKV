@@ -1,6 +1,8 @@
 """Configured providers for ordinary RAG, LlamaIndex and shared ContextKV."""
 from __future__ import annotations
 
+from collections import OrderedDict
+from threading import Lock
 import time
 
 from adapters.corpus import CorpusIndex
@@ -41,7 +43,10 @@ class ConventionalEvidenceProvider:
             self.corpus = CorpusIndex((), corpus_id=retrieval["corpus_id"], snapshot_id=self.corpus_snapshot_id)
         self.candidate_k = retrieval.get("candidate_k", 50)
         self.top_k = config.get("selection", {}).get("max_passages") or 5
-        self._supplied = {}
+        self._supplied = OrderedDict()
+        self._supplied_limit = 16
+        self._supplied_lock = Lock()
+        self._model_lock = Lock()
 
     @property
     def manifest(self):
@@ -50,20 +55,24 @@ class ConventionalEvidenceProvider:
                 "corpus_snapshot_id": self.corpus_snapshot_id}
 
     async def retrieve(self, snapshot, query, request_id):
-        return await run_retrieval_worker(self._retrieve, snapshot, query, request_id)
+        return await run_retrieval_worker(self._retrieve, snapshot, query)
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
                                 coverage_scope="selected_sources"):
-        return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
+        return await run_retrieval_worker(self._retrieve, snapshot, query,
                                           blocks=tuple(blocks), metadata=source_metadata)
 
-    def _retrieve(self, snapshot, query, request_id, *, blocks=None, metadata=None):
+    def _retrieve(self, snapshot, query, *, blocks=None, metadata=None):
         started = time.perf_counter()
         input_tokens = 0
         sparse, dense, corpus, directory = self.sparse, self.dense, self.corpus, None
         if blocks is not None:
             key = snapshot.corpus_snapshot_id, tuple(block.key for block in blocks)
-            if key not in self._supplied:
+            with self._supplied_lock:
+                entry = self._supplied.get(key)
+                if entry is not None:
+                    self._supplied.move_to_end(key)
+            if entry is None:
                 import numpy as np
                 corpus = CorpusIndex(blocks, corpus_id=self.corpus.corpus_id,
                     snapshot_id=self.corpus_snapshot_id, source_metadata=metadata)
@@ -72,13 +81,19 @@ class ConventionalEvidenceProvider:
                                  for unit in directory.units_by_id.values())
                 sparse = BM25SRetriever({item.document_id: {"text": item.text, "title": item.title}
                     for item in contexts}, corpus_snapshot_id=self.corpus_snapshot_id)
-                arrays = [self.encoder.encode_with_usage([item.title+"\n"+item.text for item in contexts[index:index+16]])
-                          for index in range(0, len(contexts), 16)]
+                with self._model_lock:
+                    arrays = [self.encoder.encode_with_usage([item.title+"\n"+item.text for item in contexts[index:index+16]])
+                              for index in range(0, len(contexts), 16)]
                 input_tokens += sum(tokens for _, tokens in arrays)
                 dense = DenseIndex(contexts, np.concatenate([values for values, _ in arrays]), {})
-                self._supplied[key] = sparse, dense, corpus, directory
-            sparse, dense, corpus, directory = self._supplied[key]
-        vector, tokens = self.encoder.encode_with_usage(["Instruct: Retrieve evidence for the question.\nQuery: "+query])
+                with self._supplied_lock:
+                    entry = self._supplied.setdefault(key, (sparse, dense, corpus, directory))
+                    self._supplied.move_to_end(key)
+                    while len(self._supplied) > self._supplied_limit:
+                        self._supplied.popitem(last=False)
+            sparse, dense, corpus, directory = entry
+        with self._model_lock:
+            vector, tokens = self.encoder.encode_with_usage(["Instruct: Retrieve evidence for the question.\nQuery: "+query])
         input_tokens += tokens
         dense_rows = dense.search_vectors(vector, top_k=self.candidate_k)[0]
         sparse_rows = sparse.retrieve([query], top_k=self.candidate_k)
@@ -111,7 +126,7 @@ class ConventionalEvidenceProvider:
             [len(self.rerank_tokenizer.encode(text))+20 for text in texts],
             overhead=2*len(self.rerank_tokenizer.encode(query))+200, budget=self.rerank_tokens)
         rankings, tokens = [], 0
-        with torch.no_grad():
+        with self._model_lock, torch.no_grad():
             for texts in groups:
                 prompt = format_prompt(query, list(texts), special_tokens=self.reranker.special_tokens)
                 batch = self.rerank_tokenizer(prompt, return_tensors="pt").to(self.reranker.device)

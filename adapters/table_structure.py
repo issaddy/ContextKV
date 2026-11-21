@@ -103,8 +103,9 @@ def extend_table_structure(text, parsed_tables):
         nested.append(TableRelations("nested_numeric_list", line, None, (parents[-1][1],), (relation,)))
 
     tables = []
+    line_index = {line.start: i for i, line in enumerate(lines)}
     for table in parsed_tables:
-        index = next(i for i, line in enumerate(lines) if line.start == table.span.start)
+        index = line_index[table.span.start]
         tables.append(replace(table, relations=tuple(replace(row, parent_path=paths[index]) for row in table.relations)))
     tables.extend(nested)
     covered = [(table.span.start, table.span.end) for table in tables]

@@ -41,10 +41,18 @@ def _sections(block, metadata):
         yield tuple(name for _, name in path), heading.start(), end
 
 
+def _content_shingles(text):
+    words = re.findall(r"\w+", text.casefold())
+    if len(words) < 5:
+        return len(words), set(words)
+    return len(words), set(zip(words, words[1:], words[2:], words[3:], words[4:]))
+
+
 class VersionIndex:
-    def __init__(self, blocks, metadata, parts, versions):
+    def __init__(self, blocks, metadata, parts, versions, *, incremental_families=frozenset()):
         self.blocks, self.metadata = blocks, metadata
         self.parts, self.versions = parts, versions
+        self.incremental_families = frozenset(incremental_families)
         self.latest_orders = {}
         for (family, _), info in versions.items():
             if info["order"]:
@@ -83,7 +91,26 @@ class VersionIndex:
                         spans = _unique_spans((row[0].source, cell.source,
                             *((cell.header,) if cell.header else ()), *cell.qualifiers))
                         grouped.setdefault(address, []).append(VersionPart(address, cell.text, spans))
-        return cls(by_key, metadata, parts, versions)
+        # Distinguish cumulative snapshots (latest supersedes earlier) from incremental
+        # release-note series (consecutive versions share little content and lack valid_to).
+        incremental = set()
+        by_family = {}
+        for (family, version), info in versions.items():
+            by_family.setdefault(family, []).append((info["order"], info["valid_from"] or "", version, info))
+        for family, items in by_family.items():
+            if len(items) < 2 or any(info["valid_to"] is not None for _, _, _, info in items):
+                continue
+            items.sort()
+            shingles = [_content_shingles("\n".join(by_key[k].text for k in info["keys"]))
+                        for _, _, _, info in items]
+            word_counts = sorted(count for count, _ in shingles)
+            if word_counts[len(word_counts) // 2] < 100:
+                continue
+            retentions = sorted(len(left & right) / max(1, len(left))
+                                for (_, left), (_, right) in zip(shingles, shingles[1:]))
+            if retentions[len(retentions) // 2] < 0.5:
+                incremental.add(family)
+        return cls(by_key, metadata, parts, versions, incremental_families=incremental)
 
     def legal_keys(self, *, families=(), versions=(), as_of=None, current=False):
         families, versions = set(families), set(versions)
@@ -98,7 +125,7 @@ class VersionIndex:
                     continue
                 if info["valid_to"] is not None and as_of >= info["valid_to"]:
                     continue
-            if current and not versions and as_of is None:
+            if current and not versions and as_of is None and family not in self.incremental_families:
                 if info["current"] is False:
                     continue
                 if info["current"] is None:
@@ -119,9 +146,29 @@ class VersionIndex:
                   and (info[axis] < anchor if direction == "before" else info[axis] > anchor)]
         return (max(values) if direction == "before" else min(values))[1] if values else None
 
+    def _units_from_part_groups(self, part_groups):
+        from controller.schema import EvidenceUnit
+        grouped = {}
+        for parts in part_groups:
+            members = []
+            for part in parts:
+                for span in part.spans:
+                    block = self.blocks[span.source_key]
+                    base = block.span[0] if block.span else 0
+                    identity = f"version:{span.span_id}"
+                    grouped.setdefault(identity, [span, block.text[span.start-base:span.end-base], set()])
+                    members.append(identity)
+            for identity in members:
+                grouped[identity][2].update(member for member in members if member != identity)
+        units = []
+        for identity, (span, text, dependencies) in grouped.items():
+            family = self.metadata.get(span.source_key, {}).get("document_family", span.source_key.document_id)
+            units.append(EvidenceUnit(identity, (span,), text, " / ".join((family, span.source_key.version)),
+                dependencies=tuple(sorted(dependencies)), document_family=family))
+        return tuple(units)
+
     def paired_units(self, family, before_version, after_version, selected_spans=()):
         """Retrieve both sides of matching sections/fields, including unchanged content."""
-        from controller.schema import EvidenceUnit
         before, after = self.parts[family, before_version], self.parts[family, after_version]
         addresses = tuple(dict.fromkeys((*before, *after)))
         pairs = []
@@ -139,26 +186,61 @@ class VersionIndex:
         unmatched_after = tuple(part for address, parts in after.items()
                                 if address[0] == "section" and address not in before for part in parts)
         pairs.extend(_part_pairs(unmatched_before, unmatched_after))
-        grouped = {}
-        for parts in pairs:
-            if selected_spans and not any(
-                source.source_key == selected.source_key and source.start < selected.end
-                and selected.start < source.end
-                for part in parts for source in part.spans for selected in selected_spans):
+        matched = [parts for parts in pairs if not selected_spans or any(
+            source.source_key == selected.source_key and source.start < selected.end
+            and selected.start < source.end
+            for part in parts for source in part.spans for selected in selected_spans)]
+        return self._units_from_part_groups(matched)
+
+    def change_boundary_units(self, selected_spans, *, families=(), limit=6):
+        """Locate earliest introduction and changed consecutive versions for retrieved sections."""
+        if not selected_spans:
+            return ()
+        allowed = set(families)
+        ordered_by_family = {}
+        for (family, version), info in self.versions.items():
+            if allowed and family not in allowed:
                 continue
-            members = []
-            for part in parts:
-                for span in part.spans:
-                    block = self.blocks[span.source_key]
-                    base = block.span[0] if block.span else 0
-                    identity = f"version:{span.span_id}"
-                    grouped.setdefault(identity, [span, block.text[span.start-base:span.end-base], set()])
-                    members.append(identity)
-            for identity in members:
-                grouped[identity][2].update(member for member in members if member != identity)
-        return tuple(EvidenceUnit(identity, (span,), text, " / ".join((family, span.source_key.version)),
-            dependencies=tuple(sorted(dependencies)), document_family=family)
-            for identity, (span, text, dependencies) in grouped.items())
+            ordered_by_family.setdefault(family, []).append((info["order"], info["valid_from"] or "", version))
+        for items in ordered_by_family.values():
+            items.sort()
+        touched = []
+        seen_addr = set()
+        for span in selected_spans:
+            info = self.metadata.get(span.source_key, {})
+            family = info.get("document_family", span.source_key.document_id)
+            if family not in ordered_by_family or len(ordered_by_family[family]) < 2:
+                continue
+            for address, parts in self.parts.get((family, span.source_key.version), {}).items():
+                if address[0] != "section" or address[-1] in {"body", "preamble"}:
+                    continue
+                if (family, address) in seen_addr:
+                    continue
+                if any(s.source_key == span.source_key and s.start < span.end and span.start < s.end
+                       for part in parts for s in part.spans):
+                    seen_addr.add((family, address))
+                    touched.append((family, address))
+                    if len(touched) >= limit:
+                        break
+            if len(touched) >= limit:
+                break
+        chosen_groups = []
+        for family, address in touched:
+            ordered = [v for _, _, v in ordered_by_family[family]]
+            present = [(idx, v, self.parts[family, v][address])
+                       for idx, v in enumerate(ordered) if address in self.parts.get((family, v), {})]
+            if not present:
+                continue
+            section_groups = [present[0][2]]
+            for (_, _, left_parts), (_, _, right_parts) in zip(present, present[1:]):
+                left_text = "\n".join(p.text.strip() for p in left_parts)
+                right_text = "\n".join(p.text.strip() for p in right_parts)
+                if left_text != right_text:
+                    section_groups.append((*left_parts, *right_parts))
+                    if len(section_groups) >= 3:
+                        break
+            chosen_groups.extend(section_groups)
+        return self._units_from_part_groups(chosen_groups)
 
 
 def _part_pairs(before, after):

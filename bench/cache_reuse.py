@@ -11,7 +11,8 @@ import time
 import yaml
 
 from controller.config import apply_study_config, create_model_template, load_config, load_kv_policy
-from controller.cooperative_request import ANSWER_SCOPE, EvidenceCosts, compile_request, source_address
+from controller.cooperative_request import (ANSWER_SCOPE, EvidenceCosts, compile_request,
+                                              history_signature, source_address)
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceUnit
 from controller.serialization import decode
@@ -45,7 +46,8 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 async with lock, slots:
                     original = item["request"]
                     revisited = {block["source_id"] for block in original.blocks if block.get("revisited")}
-                    evidence = priced_evidence[index] if layout == "same_order" else item["ranked_evidence"]
+                    evidence, chosen_layout = (priced_evidence[index] if layout == "same_order"
+                                               else (item["ranked_evidence"], "evidence_first"))
                     if mode == "auto":
                         from controller.schema import SourceSpan
                         units = tuple(EvidenceUnit(source_address(block),
@@ -53,19 +55,23 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                             block.text, body_tokens=len(template.tokenizer.encode(block.text,add_special_tokens=False)))
                             for block in evidence)
                         snapshot = await engine.evidence_state(tuple(unit.unit_id for unit in units),
-                            cache_scope=options["cache_scope"], cache_namespace=options["cache_namespace"])
+                            cache_scope=options["cache_scope"], cache_namespace=options["cache_namespace"],
+                            session_id=session if layout == "priced" else None)
                         empty = compile_request(template, original.messages[-1].content, item["history"], (),
                                                 system_prompt=original.messages[0].content)
                         costs = EvidenceCosts(units, evidence, template.tokenizer, snapshot,
-                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy, previous_sources=revisited)
+                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy,
+                            history_sig=history_signature(item["history"]))
                         by_id = {source_address(block): block for block in evidence}
-                        evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
+                        ordered_ids = costs.order(tuple(by_id))
+                        chosen_layout = costs.quote(ordered_ids, preserve_order=True)["layout"]
+                        evidence = tuple(by_id[identity] for identity in ordered_ids)
                         if layout == "priced":
-                            priced_evidence[index] = evidence
+                            priced_evidence[index] = (evidence, chosen_layout)
                         else:
-                            evidence = priced_evidence[index]
+                            evidence, chosen_layout = priced_evidence[index]
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
-                        system_prompt=original.messages[0].content)
+                        system_prompt=original.messages[0].content, layout=chosen_layout)
                     shift = len(request.input_ids)-len(original.input_ids)
                     request = replace(request, query_span=tuple(position+shift for position in original.query_span),
                         blocks=tuple({**block, "revisited": block["source_id"] in revisited} for block in request.blocks))

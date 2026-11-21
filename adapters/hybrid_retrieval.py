@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 
 from controller.schema import OnlineContext
-from .retrieval import deterministic_top_k
+from .retrieval import deterministic_top_k, legal_positions
 
 
 def reciprocal_rank_fusion(rankings, *, k=60, weights=None):
@@ -26,6 +26,7 @@ def reciprocal_rank_fusion(rankings, *, k=60, weights=None):
 class DenseIndex:
     def __init__(self, contexts, vectors, manifest):
         self.contexts, self.vectors, self.manifest = tuple(contexts), vectors, manifest
+        self._ids = tuple(context.document_id for context in self.contexts)
         self.by_id = {context.document_id: context for context in self.contexts}
         if len(self.by_id) != len(self.contexts) or vectors.shape[0] != len(self.contexts):
             raise ValueError("dense vector rows must align with unique passage IDs")
@@ -72,11 +73,22 @@ class DenseIndex:
     def search_vectors(self, vectors, *, top_k=50, legal_ids=None):
         """Search the legal source population using already computed query/Need vectors."""
         import numpy as np
-        positions = np.asarray([index for index, context in enumerate(self.contexts)
-                                if legal_ids is None or context.document_id in legal_ids], dtype=int)
+        query_matrix = np.asarray(vectors)
+        if len(query_matrix) == 0:
+            return []
+        positions = legal_positions(self._ids, legal_ids, np)
+        if positions is None:
+            matrix = self.vectors
+        elif len(positions) == 0:
+            return [() for _ in range(len(query_matrix))]
+        else:
+            matrix = self.vectors[positions]
         result = []
-        for vector in vectors:
-            scores = np.asarray(self.vectors[positions] @ vector)
+        for vector in query_matrix:
+            scores = np.asarray(matrix @ vector)
             order = deterministic_top_k(scores, top_k, np)
-            result.append(tuple(replace(self.contexts[int(positions[i])], score=float(scores[i])) for i in order))
+            if positions is None:
+                result.append(tuple(replace(self.contexts[int(i)], score=float(scores[i])) for i in order))
+            else:
+                result.append(tuple(replace(self.contexts[int(positions[i])], score=float(scores[i])) for i in order))
         return result

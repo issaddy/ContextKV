@@ -72,8 +72,11 @@ def record_judge_http(endpoint, totals_path):
             started = time.perf_counter()
             with httpx.Client(timeout=180) as client:
                 response = client.post(endpoint+path, json=payload)
-            raw = response.json()
-            usage = raw.get("usage", {})
+            try:
+                raw = response.json()
+            except ValueError:
+                raw = {}
+            usage = raw.get("usage", {}) if isinstance(raw, dict) else {}
             with lock:
                 totals["http_calls"] += 1
                 totals["elapsed_ms"] += (time.perf_counter()-started)*1000
@@ -182,19 +185,18 @@ def _overlap_scores(directory):
     return records, identity, cost
 
 
-async def _loong_scores(config, spec, directory, settings):
-    from bench.judge import OpenAICompletionClient, JudgeConfig
-    from bench.loong_score import COMMIT, score_answer
+async def _run_judge_scores(config, directory, settings, *, filename, scorer, max_new_tokens=None):
+    from bench.judge import JudgeConfig, OpenAICompletionClient
+
     generation = directory.parent
     references = load_jsonl(generation/"references.jsonl")
     predictions = {row["task_id"]: row["predictions"][0]["text"]
                    for row in load_jsonl(generation/"official.jsonl")}
     judge = _judge_config(config, settings)
-    output_tokens = judge.get("max_tokens", 2048)
     client = OpenAICompletionClient(JudgeConfig(judge["base_url"], judge["model"], judge["revision"],
-        max_new_tokens=output_tokens,
+        max_new_tokens=judge.get("max_tokens", 2048) if max_new_tokens is None else max_new_tokens,
         timeout_seconds=settings.get("timeout_seconds", 180)))
-    target = directory/"loong.scores.jsonl"
+    target = directory/filename
     records = load_jsonl(target) if target.exists() else []
     finished = {record["task_id"] for record in records}
     try:
@@ -202,50 +204,37 @@ async def _loong_scores(config, spec, directory, settings):
             for reference in references:
                 if reference["task_id"] in finished:
                     continue
-                record = await asyncio.to_thread(score_answer, reference,
+                record = await asyncio.to_thread(scorer, reference,
                     predictions.get(reference["task_id"]), client)
                 records.append(record)
                 output.write(json.dumps(record, ensure_ascii=False)+"\n")
                 output.flush()
     finally:
         client.close()
+    return records, client.manifest, _cost_totals(records)
+
+
+async def _loong_scores(config, directory, settings):
+    from bench.loong_score import COMMIT, score_answer
+
+    records, manifest, cost = await _run_judge_scores(config, directory, settings,
+        filename="loong.scores.jsonl", scorer=score_answer)
     return records, {"protocol": "loong_reference_rubric_local_judge", "upstream_commit": COMMIT,
-        "judge": client.manifest, "score_range": [0, 100]}, _cost_totals(records)
+        "judge": manifest, "score_range": [0, 100]}, cost
 
 
-async def _versionqa_scores(config, spec, directory, settings):
-    from bench.judge import OpenAICompletionClient, JudgeConfig
+async def _versionqa_scores(config, directory, settings):
     from bench.versionqa import SOURCE_COMMIT, score_answer
 
-    references = load_jsonl(directory.parent/"references.jsonl")
-    predictions = {row["task_id"]: row["predictions"][0]["text"]
-                   for row in load_jsonl(directory.parent/"official.jsonl")}
-    judge = _judge_config(config, settings)
-    client = OpenAICompletionClient(JudgeConfig(judge["base_url"], judge["model"], judge["revision"],
-        max_new_tokens=16,
-        timeout_seconds=settings.get("timeout_seconds", 180)))
-    target = directory/"versionqa.scores.jsonl"
-    records = load_jsonl(target) if target.exists() else []
-    finished = {record["task_id"] for record in records}
-    try:
-        with target.open("a") as output:
-            for reference in references:
-                if reference["task_id"] in finished:
-                    continue
-                record = await asyncio.to_thread(score_answer, reference,
-                    predictions.get(reference["task_id"]), client)
-                records.append(record)
-                output.write(json.dumps(record, ensure_ascii=False)+"\n")
-                output.flush()
-    finally:
-        client.close()
+    records, manifest, cost = await _run_judge_scores(config, directory, settings,
+        filename="versionqa.scores.jsonl", max_new_tokens=16, scorer=score_answer)
     return records, {"protocol": "versionqa_author_binary_accuracy", "upstream_commit": SOURCE_COMMIT,
-        "judge": client.manifest, "score_range": [0, 1],
+        "judge": manifest, "score_range": [0, 1],
         "judge_view": "original question, reference answer and model answer",
-        "adaptation": "author binary correctness rubric through the configured judge endpoint"}, _cost_totals(records)
+        "adaptation": "author binary correctness rubric through the configured judge endpoint"}, cost
 
 
-def _record_metrics(record, spec, settings):
+def _record_metrics(record, spec):
     def observed(value):
         if isinstance(value, (list, tuple)):
             return bool(value) and all(observed(item) for item in value)
@@ -291,9 +280,9 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
     elif primary in {"RB_llm", "mtrageval_harmonic"}:
         records, identity, judge_cost = await _official_scores(config, dataset_spec, directory, settings)
     elif primary == "loong_reference_score":
-        records, identity, judge_cost = await _loong_scores(config, dataset_spec, directory, settings)
+        records, identity, judge_cost = await _loong_scores(config, directory, settings)
     elif primary == "versionqa_accuracy":
-        records, identity, judge_cost = await _versionqa_scores(config, dataset_spec, directory, settings)
+        records, identity, judge_cost = await _versionqa_scores(config, directory, settings)
     else:
         raise ValueError(f"No declared scorer for {primary}")
     by_id = {str(record["task_id"]): record for record in records}
@@ -302,11 +291,10 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
     updated = []
     for row in rows:
         record = by_id.get(str(row["task_id"]))
-        metrics = _record_metrics(record, dataset_spec, settings) if record is not None else {}
-        observed_metrics = metrics
-        has_primary = all(_metric({"metrics": observed_metrics}, name, dataset_spec)[0] is not None
+        metrics = _record_metrics(record, dataset_spec) if record is not None else {}
+        has_primary = all(_metric({"metrics": metrics}, name, dataset_spec)[0] is not None
                           for name in _required(dataset_spec))
-        updated.append({**row, "metrics": observed_metrics,
+        updated.append({**row, "metrics": metrics,
             "scoring": {
                 "status": "failed" if record is not None and record.get("status") == "failed" else "scored" if has_primary else "missing",
                 "error": record.get("error") if record is not None else None,
@@ -338,7 +326,7 @@ def main(argv=None):
         rows = load_jsonl(args.rows)
     else:
         from bench.study import saved_study_rows
-        rows = [row for row in saved_study_rows(args.generation_dir) if row["status"] == "completed"]
+        rows = saved_study_rows(args.generation_dir)
     scored = asyncio.run(score_dataset(config, matrix["datasets"][args.dataset], rows, args.generation_dir,
         expected_task_ids=matrix.get("cohorts", {}).get(args.split, {}).get(args.dataset), split=args.split))
     if all(row["status"] != "completed" or row["scoring"]["status"] == "scored" for row in scored):

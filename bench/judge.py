@@ -38,8 +38,9 @@ class OpenAICompletionClient:
         self.config = config
         if tokenizer is None:
             from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path or config.model,
-                revision=config.tokenizer_revision or config.revision, local_files_only=True)
+            from controller.templates import ThreadTokenizer
+            tokenizer = ThreadTokenizer(AutoTokenizer.from_pretrained(config.tokenizer_path or config.model,
+                revision=config.tokenizer_revision or config.revision, local_files_only=True))
         self.tokenizer = tokenizer
         self.client = httpx.Client(timeout=config.timeout_seconds, transport=transport)
 
@@ -73,7 +74,7 @@ class OpenAICompletionClient:
             choice = raw["choices"][0]
             return CompletionResult("completed", choice["message"]["content"], choice["finish_reason"],
                 count, raw.get("usage"), (time.perf_counter()-started)*1000)
-        except httpx.HTTPError as error:
+        except (httpx.HTTPError, ValueError, KeyError, IndexError) as error:
             return CompletionResult("failed", input_tokens=count,
                                     elapsed_ms=(time.perf_counter()-started)*1000, error=str(error))
 

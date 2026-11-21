@@ -127,7 +127,7 @@ async def collect(args):
             DocumentIndex.from_blocks(source_blocks(all_units)), body_tokens=config["selection"]["body_tokens"],
             cache_scope=identity, cache_namespace=identity, totals=totals)
         SharedEvidenceProvider._finish_state(state)
-        state.version_catalogue = catalogue_versions(catalogue, query.task.version_intent.document_families)
+        state.version_catalogue = catalogue_versions(catalogue)
         return state
 
     async def answer(row, state, snapshot, identity, previous_totals):
@@ -138,7 +138,7 @@ async def collect(args):
             cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
         if args.stage == "sets":
             await controller.read_required(state, snapshot, complete)
-        request = await controller.answer_request(state, snapshot, complete)
+        request = await controller.answer_request(state, snapshot)
         result = await complete(request, "answer")
         item = {"source": row, "answer": result["text"], "output_tokens": result["meta"]["completion_tokens"]}
         if args.stage == "stop":
@@ -180,8 +180,10 @@ async def collect(args):
                         choice = tuple(block.unit_id for block in blocks)
                         if choice not in choices and sum(sizes[key] for key in choice) <= budget:
                             choices += (choice,)
+                import torch
                 support, known = encoded.need_support(units, tuple(n.need_id for n in query.task.needs), state.completed_needs)
-                masks = encoded.embeddings.new_tensor([[k in choice for k in encoded.unit_ids] for choice in choices])
+                masks = torch.tensor([[k in choice for k in encoded.unit_ids] for choice in choices],
+                                     device=encoded.embeddings.device, dtype=torch.bool)
                 features = encoded.heads.features(encoded.embeddings, encoded.relevance, masks, support, known).tolist()
                 for number, chosen in enumerate(choices):
                     identity = f"sets:{row['task_id']}:{number}"

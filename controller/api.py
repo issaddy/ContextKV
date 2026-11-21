@@ -49,8 +49,8 @@ def create_app(controller=None, config=None, *, retrieval=None,
         from adapters.providers import create_evidence_provider
         provider = retrieval or await asyncio.to_thread(create_evidence_provider, study, service.template)
         app.state.qa = DocumentQA(service, provider)
-        await app.state.qa.start()
         try:
+            await app.state.qa.start()
             yield
         finally:
             provider.close()

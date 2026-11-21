@@ -1,7 +1,9 @@
 """Scope-first retrieval and shared evidence encoding for the cooperative executor."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
+from threading import Lock
 import time
 
 from adapters.corpus import CorpusIndex
@@ -99,11 +101,15 @@ class SharedEvidenceProvider:
             self.corpus_snapshot_id = "supplied"
             self.corpus = CorpusIndex((), corpus_id=retrieval["corpus_id"], snapshot_id=self.corpus_snapshot_id)
         self.directory = SourceDirectory(self.corpus, template.tokenizer)
-        self.versions = VersionIndex.from_blocks(self.corpus.blocks, self.corpus.source_metadata)
+        self.documents = DocumentIndex.from_blocks(self.corpus.blocks)
+        self.versions = VersionIndex.from_blocks(self.corpus.blocks, self.corpus.source_metadata,
+                                                 documents=self.documents)
         self.catalogue = self._catalogue(self.corpus)
         self.candidate_k = retrieval.get("candidate_k", 50)
         self.evidence_batch = retrieval.get("evidence_batch", 24)
-        self._supplied = {}
+        self._supplied = OrderedDict()
+        self._supplied_limit = 16
+        self._supplied_lock = Lock()
 
     @property
     def manifest(self):
@@ -142,6 +148,7 @@ class SharedEvidenceProvider:
         started = time.perf_counter()
         document_tokens = 0
         corpus, directory, sparse, dense, versions = self.corpus, self.directory, self.sparse, self.dense, self.versions
+        documents = self.documents
         catalogue = self.catalogue
         cached = None
         if supplied_blocks is not None:
@@ -149,15 +156,26 @@ class SharedEvidenceProvider:
                 (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")))
                 for index, block in enumerate(supplied_blocks))
             key = snapshot.corpus_snapshot_id, tuple(block.key for block in supplied_blocks)
-            if key not in self._supplied:
+            with self._supplied_lock:
+                cached = self._supplied.get(key)
+                if cached is not None:
+                    self._supplied.move_to_end(key)
+            if cached is None:
                 supplied_corpus = CorpusIndex(supplied_blocks, corpus_id=self.corpus.corpus_id,
                     snapshot_id=self.corpus_snapshot_id, source_metadata=source_metadata)
                 supplied_directory = SourceDirectory(supplied_corpus, self.template.tokenizer, unit_tokens=256)
-                self._supplied[key] = {"corpus": supplied_corpus, "directory": supplied_directory,
-                    "versions": VersionIndex.from_blocks(supplied_blocks, source_metadata),
-                    "catalogue": self._catalogue(supplied_corpus)}
-            cached = self._supplied[key]
+                supplied_documents = DocumentIndex.from_blocks(supplied_blocks)
+                entry = {"corpus": supplied_corpus, "directory": supplied_directory,
+                    "documents": supplied_documents,
+                    "versions": VersionIndex.from_blocks(supplied_blocks, source_metadata, documents=supplied_documents),
+                    "catalogue": self._catalogue(supplied_corpus), "lock": Lock()}
+                with self._supplied_lock:
+                    cached = self._supplied.setdefault(key, entry)
+                    self._supplied.move_to_end(key)
+                    while len(self._supplied) > self._supplied_limit:
+                        self._supplied.popitem(last=False)
             corpus, directory, versions = cached["corpus"], cached["directory"], cached["versions"]
+            documents = cached["documents"]
             catalogue = cached["catalogue"]
         history = tuple((row.turn_id, message.role, message.content) for row in snapshot.raw_history
                         for message in history_messages((row,)))
@@ -183,17 +201,33 @@ class SharedEvidenceProvider:
                 for family, version in versions.versions if (not families or family in families)
                 and version in wanted_versions)
             wanted_versions = tuple(dict.fromkeys((*wanted_versions, *filter(None, related)))) if intent.mode == "compare" else tuple(filter(None, related))
+        elif intent.mode == "compare" and len(wanted_versions) == 1:
+            # Single-version change queries ("What changed in vX?") need vX paired with its predecessor.
+            related = tuple(versions.adjacent(family, version, "before")
+                for family, version in versions.versions if (not families or family in families)
+                and version in wanted_versions)
+            wanted_versions = tuple(dict.fromkeys((*filter(None, related), *wanted_versions)))
         # The catalogue head resolves as_of text to version IDs during the shared
         # query pass; natural-language date spans are not sortable timestamps.
         version_keys = versions.legal_keys(families=families, versions=wanted_versions,
             current=intent.mode == "current")
         if intent.mode in {"explicit", "as_of"} and not wanted_versions:
             version_keys = ()
-        legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
+        if corpus.has_applicability and query.task.conditions:
+            constraints = self._scope_constraints(query)
+            legal = tuple(key for key in version_keys
+                          if self._matches_scope(constraints, corpus.source_metadata.get(key, {})))
+        else:
+            legal = version_keys
         query.task = replace(query.task, effective_source_scope=legal)
-        legal_set = set(legal)
-        previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
-                               if span.source_key in legal_set)
+        all_legal = len(legal) == len(corpus.blocks)
+        if all_legal:
+            previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
+                                   if span.source_key in corpus)
+        else:
+            legal_set = set(legal)
+            previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
+                                   if span.source_key in legal_set)
         complete_population = "all_supplied_documents" in (
             coverage_scope, query.task.coverage_scope, *(need.scope for need in query.task.needs))
         if complete_population:
@@ -202,34 +236,39 @@ class SharedEvidenceProvider:
         population_units = ()
         historical_ids = ()
         if full:
-            document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
+            resolved_legal = corpus.resolve(legal)
+            document_index = documents.subset(resolved_legal)
             pool = directory.full_scope(legal)
             population_units = pool.units
             query.source_titles = tuple(block.title for block in pool.source_blocks)
             units = pool.units
         else:
             if supplied_blocks is not None:
-                if "dense" not in cached:
-                    contexts = tuple(OnlineContext(unit.unit_id, unit.text,
-                        corpus.resolve((unit.source_spans[0].source_key,))[0].source_uri, unit.heading)
-                        for unit in directory.units_by_id.values())
-                    cached["sparse"] = BM25SRetriever({context.document_id: {"text": context.text,
-                        "source": context.source, "title": context.title} for context in contexts},
-                        corpus_snapshot_id=self.corpus_snapshot_id)
-                    batches = [self.query_encoder.encode_documents_with_usage([context.title+"\n"+context.text
-                        for context in contexts[start:start+16]]) for start in range(0, len(contexts), 16)]
-                    import numpy as np
-                    document_tokens += sum(tokens for _, tokens in batches)
-                    cached["dense"] = DenseIndex(contexts, np.concatenate([vectors for vectors, _ in batches]), {})
-                sparse, dense = cached["sparse"], cached["dense"]
-                legal_ids = {unit.unit_id for unit in directory.units_by_id.values()
-                             if unit.source_spans[0].source_key in legal_set}
+                with cached["lock"]:
+                    if "dense" not in cached:
+                        contexts = tuple(OnlineContext(unit.unit_id, unit.text,
+                            corpus.resolve((unit.source_spans[0].source_key,))[0].source_uri, unit.heading)
+                            for unit in directory.units_by_id.values())
+                        cached["sparse"] = BM25SRetriever({context.document_id: {"text": context.text,
+                            "source": context.source, "title": context.title} for context in contexts},
+                            corpus_snapshot_id=self.corpus_snapshot_id)
+                        batches = [self.query_encoder.encode_documents_with_usage([context.title+"\n"+context.text
+                            for context in contexts[start:start+16]]) for start in range(0, len(contexts), 16)]
+                        import numpy as np
+                        document_tokens += sum(tokens for _, tokens in batches)
+                        cached["dense"] = DenseIndex(contexts, np.concatenate([vectors for vectors, _ in batches]), {})
+                    sparse, dense = cached["sparse"], cached["dense"]
+                legal_ids = (None if all_legal else {unit.unit_id for unit in directory.units_by_id.values()
+                             if unit.source_spans[0].source_key in legal_set})
             else:
-                legal_ids = {key.passage_id for key in legal}
+                legal_ids = None if all_legal else {key.passage_id for key in legal}
             vectors = torch.cat((query.query_vector[None, :], query.need_vectors)).cpu().numpy()
             dense_rows = dense.search_vectors(vectors, legal_ids=legal_ids, top_k=self.candidate_k)
-            sparse_rows = [sparse.retrieve([text], legal_ids=legal_ids, top_k=self.candidate_k)
-                           for text in query.search_texts]
+            sparse_cache = {}
+            for text in query.search_texts:
+                if text not in sparse_cache:
+                    sparse_cache[text] = sparse.retrieve([text], legal_ids=legal_ids, top_k=self.candidate_k)
+            sparse_rows = [sparse_cache[text] for text in query.search_texts]
             fused = reciprocal_rank_fusion([[context.document_id for context in rows]
                 for pair in zip(sparse_rows, dense_rows) for rows in pair],
                 weights=[weight for index in range(len(sparse_rows))
@@ -253,24 +292,29 @@ class SharedEvidenceProvider:
                 roots = (*units, *observed)
                 units = self._closure(roots, {unit.unit_id: unit for unit in (*units, *prior.units)})
                 pool = EvidencePool(units, tuple({b.key: b for b in (*pool.source_blocks, *prior.source_blocks)}.values()))
-        if intent.mode == "compare" and len(wanted_versions) >= 2:
+        if intent.mode == "compare":
             selected_spans = tuple(span for unit in units for span in unit.source_spans)
             pairs = []
-            for family in dict.fromkeys(family for family, _ in versions.versions):
-                ordered = [version for name, version in versions.versions
-                           if name == family and version in wanted_versions]
-                ordered.sort(key=lambda version: (versions.versions[family, version]["order"],
-                    versions.versions[family, version]["valid_from"] or "", version))
-                for before, after in zip(ordered, ordered[1:]):
-                    pairs.extend(versions.paired_units(family, before, after, selected_spans))
+            if len(wanted_versions) >= 2:
+                for family in dict.fromkeys(family for family, _ in versions.versions):
+                    ordered = [version for name, version in versions.versions
+                               if name == family and version in wanted_versions]
+                    ordered.sort(key=lambda version: (versions.versions[family, version]["order"],
+                        versions.versions[family, version]["valid_from"] or "", version))
+                    for before, after in zip(ordered, ordered[1:]):
+                        pairs.extend(versions.paired_units(family, before, after, selected_spans))
+            elif not wanted_versions:
+                pairs.extend(versions.change_boundary_units(selected_spans, families=families))
             if pairs:
                 units = tuple({unit.unit_id: unit for unit in (*pairs, *units)}.values())
                 keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
                 pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
         if not full:
-            document_index = DocumentIndex.from_blocks(pool.source_blocks)
+            document_index = documents.subset(pool.source_blocks)
             query.task = replace(query.task, effective_source_scope=tuple(block.key for block in pool.source_blocks))
-        units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in units)
+        units = tuple(unit if unit.body_tokens > 0 else replace(
+            unit, body_tokens=len(self.template.tokenizer.encode(unit.text, add_special_tokens=False)))
+            for unit in units)
         usage = dict(query.usage)
         available = self._body_budget(snapshot, query)
         by_id = {unit.unit_id: unit for unit in units}
@@ -297,7 +341,7 @@ class SharedEvidenceProvider:
             population_keys = corpus.document_keys(anchors, legal)
             pool = replace(directory.full_scope(population_keys), scope_id="located_documents")
             population_units = pool.units
-            document_index = DocumentIndex.from_blocks(pool.source_blocks)
+            document_index = documents.subset(pool.source_blocks)
             population_keys = {block.key for block in pool.source_blocks}
             positions = [index for index, unit in enumerate(initial)
                          if all(span.source_key in population_keys for span in unit.source_spans)]
@@ -313,7 +357,9 @@ class SharedEvidenceProvider:
             fresh = tuple(replace(unit,
                 dependencies=tuple(dict.fromkeys(aliases[dependency] for dependency in unit.dependencies)))
                 for unit in (*binding_units, *outside) if aliases[unit.unit_id] == unit.unit_id)
-            fresh = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in fresh)
+            fresh = tuple(unit if unit.body_tokens > 0 else replace(
+                unit, body_tokens=len(self.template.tokenizer.encode(unit.text, add_special_tokens=False)))
+                for unit in fresh)
             evidence = replace(evidence, unit_ids=tuple(unit.unit_id for unit in retained),
                 embeddings=evidence.embeddings[positions], relevance=evidence.relevance[positions],
                 bindings=tuple(binding for binding in evidence.bindings
@@ -329,7 +375,7 @@ class SharedEvidenceProvider:
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units,
             evidence_batch=self.evidence_batch)
-        state.version_catalogue = catalogue_versions(catalogue, families)
+        state.version_catalogue = catalogue_versions(catalogue)
         if supplied_blocks is not None:
             from controller.cooperative_request import document_headers
             state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
@@ -364,42 +410,52 @@ class SharedEvidenceProvider:
 
     @staticmethod
     def _reuse_computations(state, history):
+        if not history:
+            return ()
+        complete = [computation for past in history for computation in past["computations"]
+                    if computation["complete"]]
+        if not complete:
+            return ()
         from controller.serialization import decode
         legal = set(state.query.task.effective_source_scope)
         programs = () if state.query.task.coverage_scope == "all_supplied_documents" else state.programs
+        program_sigs = tuple((program.need_id, computation_signature(program)) for program in programs)
+        need_scopes = tuple((need.need_id, need_scope_signature(state.query, need.need_id, state.document_index))
+                            for need in state.query.task.needs)
         reused = []
-        for past in history:
-            for computation in past["computations"]:
-                if not computation["complete"]:
-                    continue
-                sources = tuple(decode(SourceSpan, source) for source in computation["sources"])
-                if any(source.source_key not in legal for source in sources):
-                    continue
-                for program in programs:
-                    if computation["input"] != computation_signature(program):
-                        continue
+        for computation in complete:
+            sources = tuple(decode(SourceSpan, source) for source in computation["sources"])
+            if any(source.source_key not in legal for source in sources):
+                continue
+            for need_id, signature in program_sigs:
+                if computation["input"] == signature:
                     # Identical source-addressed input fields and predicates identify a reusable calculation.
-                    reused.append({**computation, "need_id": program.need_id})
-                for need in state.query.task.needs:
-                    if computation.get("scope") == need_scope_signature(state.query, need.need_id, state.document_index):
-                        reused.append({**computation, "need_id": need.need_id})
+                    reused.append({**computation, "need_id": need_id})
+            scope = computation.get("scope")
+            if scope is not None:
+                for need_id, expected in need_scopes:
+                    if scope == expected:
+                        reused.append({**computation, "need_id": need_id})
         return tuple({item["need_id"]: item for item in reused}.values())
 
     @staticmethod
-    def _matches_scope(query, metadata):
-        declared = {name.upper(): str(value).casefold() for name, value in metadata.get("applicability", {}).items()}
+    def _scope_constraints(query):
         conditions = {condition.condition_id: condition for condition in query.task.conditions}
-        for need in query.task.needs:
-            matching = True
-            for identity in need.condition_ids:
-                condition = conditions[identity]
-                name = condition.relation_type.upper()
-                if name in declared and condition.value_spans:
-                    allowed = {query.text((ref,)).casefold() for ref in condition.value_spans}
-                    matching &= declared[name] in allowed
-            if matching:
-                return True
-        return not query.task.needs
+        return tuple(
+            tuple((condition.relation_type.upper(), {query.text((ref,)).casefold() for ref in condition.value_spans})
+                  for identity in need.condition_ids
+                  if (condition := conditions[identity]).value_spans)
+            for need in query.task.needs
+        )
+
+    @staticmethod
+    def _matches_scope(constraints, metadata):
+        applicability = metadata.get("applicability")
+        if not applicability or not constraints:
+            return True
+        declared = {name.upper(): str(value).casefold() for name, value in applicability.items()}
+        return any(all(declared[name] in allowed for name, allowed in need_constraints if name in declared)
+                   for need_constraints in constraints)
 
     @staticmethod
     def _finish_state(state):

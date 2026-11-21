@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _tuples(instance, *names: str) -> None:
+    for name in names:
+        object.__setattr__(instance, name, tuple(getattr(instance, name)))
+
+
 @dataclass(frozen=True, order=True)
 class EvidenceKey:
     corpus_id: str
@@ -28,8 +33,7 @@ class EvidenceBlock:
     anchors: tuple[str, ...] = ()
 
     def __post_init__(self):
-        for name in ("token_ids", "provenance", "dependencies", "anchors"):
-            object.__setattr__(self, name, tuple(getattr(self, name)))
+        _tuples(self, "token_ids", "provenance", "dependencies", "anchors")
         if self.span is not None:
             object.__setattr__(self, "span", tuple(self.span))
 
@@ -151,11 +155,6 @@ class EvidenceClaim:
 class Message:
     role: str
     content: str
-
-
-def _tuples(instance, *names: str) -> None:
-    for name in names:
-        object.__setattr__(instance, name, tuple(getattr(instance, name)))
 
 
 @dataclass(frozen=True)

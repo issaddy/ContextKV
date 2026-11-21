@@ -134,16 +134,20 @@ class BM25SRetriever:
     def retrieve(self, user_questions: Sequence[str], *, top_k: int = 5, legal_ids=None) -> tuple[OnlineContext, ...]:
         if top_k < 1:
             raise ValueError("top_k must be positive")
+        if legal_ids is not None and not legal_ids:
+            return ()
         query = retrieval_query(user_questions)
         tokens = self._bm25s.tokenize([query], stopwords="en", stemmer=None,
                                       return_ids=False, show_progress=False)[0]
         if not tokens:
             return ()
         scores = self._index.get_scores(tokens)
-        if legal_ids is None:
+        positions = legal_positions(self._ids, legal_ids, self._np)
+        if positions is None:
             order = deterministic_top_k(scores, top_k, self._np)
+        elif len(positions) == 0:
+            return ()
         else:
-            positions = self._np.asarray([i for i, identity in enumerate(self._ids) if identity in legal_ids], dtype=int)
             order = positions[deterministic_top_k(scores[positions], top_k, self._np)]
         return tuple(replace(self._contexts[int(i)], score=float(scores[i])) for i in order)
 
@@ -154,6 +158,13 @@ class BM25SRetriever:
         (directory / "passages.jsonl").write_text("\n".join(json.dumps(asdict(c), ensure_ascii=False) for c in self._contexts) + "\n", encoding="utf-8")
         (directory / "manifest.json").write_text(json.dumps(
             {**self.manifest, **self.runtime_versions}, indent=2), encoding="utf-8")
+
+
+def legal_positions(ids, legal_ids, np):
+    if legal_ids is None:
+        return None
+    indices = [index for index, identity in enumerate(ids) if identity in legal_ids]
+    return None if len(indices) == len(ids) else np.asarray(indices, dtype=int)
 
 
 def deterministic_top_k(scores, k: int, np):

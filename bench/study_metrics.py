@@ -8,8 +8,6 @@ import statistics
 
 
 MTRAGEVAL_COMPONENTS = ("RL_F", "RB_llm", "RB_alg")
-RB_AGG_ALIAS_SOURCE = "data/mtrag-official/scripts/evaluation/run_algorithmic.py:184"
-MTRAGEVAL_RANKING_SOURCE = "https://ibm.github.io/mt-rag-benchmark/MTRAGEval/#-leaderboard-ranking"
 
 
 def split_metric_spec(spec, split):

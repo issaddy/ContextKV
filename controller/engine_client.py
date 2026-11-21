@@ -78,6 +78,9 @@ class SGLangEngineClient:
                 "cache_scope": cache_scope,
                 "blocks": list(request.blocks), "demand": list(request.demand),
                 "query_span": list(request.query_span),
+                "layout": request.layout,
+                "history_end": request.history_end,
+                "history_signature": list(request.history_signature),
                 "recompute_ratio": recompute_ratio, "quality_loss": quality_loss,
                 "quality_price_ms": quality_price_ms, "costs": costs or {},
             },
@@ -85,8 +88,10 @@ class SGLangEngineClient:
         try:
             data = await self._post("/generate", body)
         except (httpx.TimeoutException, asyncio.CancelledError):
-            response = await self._client.post("/abort_request", json={"rid": request_id})
-            response.raise_for_status()
+            try:
+                await asyncio.shield(self._client.post("/abort_request", json={"rid": request_id}, timeout=5.0))
+            except Exception:
+                pass
             raise
         return {"text": data["text"], "output_ids": tuple(data.get("output_ids", ())),
                 "meta": data["meta_info"], "elapsed_ms": (time.perf_counter() - started) * 1000}
