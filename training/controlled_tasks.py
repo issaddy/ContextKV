@@ -168,6 +168,13 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
                 "valid_from": version+"-01-01", "valid_to": "2024-01-01" if version == "2023" else None,
                 "title": f"{entity} statement {version}",
                 "text": f"{entity}, statement {version}. {field_name}: {amount} credits."})
+        mention_id = family+":assets:entity-mention"
+        documents.append({"passage_id": mention_id, "document_id": family+":assets",
+            "document_family": family+":assets", "version": "2024", "version_order": [2024],
+            "current": True, "valid_from": "2024-01-01", "valid_to": None,
+            "title": f"{names[0]} statement 2024",
+            "text": f"{names[0]}, statement 2024. Current assets: {assets['2024']} credits. See also {names[1]}."})
+        entity_passages = [*asset_ids, mention_id]
         mixed_amount = randomizer.randrange(10, 30)
         for kind, footer in (("contribution", f"Outside the table, {names[2]} contributed {mixed_amount} credits."),
                              ("metadata", "Prepared on 2024-06-30. This date is publication metadata.")):
@@ -218,7 +225,7 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
             ("Sum all contributions in this complete document. Publication dates are not contributions.",
                 "30 credits", [family+":mixed:metadata"]),
             (f"In statement version 2024, compare the current assets of {names[0]} and {names[1]}.",
-                f"{names[0]}: {assets['2024']} credits; {names[1]}: {assets['2024']+19} credits", asset_ids),
+                f"{names[0]}: {assets['2024']} credits; {names[1]}: {assets['2024']+19} credits", entity_passages),
         ]
         history = []
         for turn, (question, answer, passages) in enumerate(cases, 1):
@@ -227,12 +234,14 @@ def controlled_states(tokenizer, *, train_families=2, dev_families=1, seed=42):
                 "valid_to": "2025-01-01" if version == "2021" else None, "current": version == "2025"}
                 for version in ("2021", "2025")] if passages == policy_ids else []
             paired_sets = []
-            if passages == asset_ids:
+            if passages == asset_ids or passages == entity_passages:
                 catalogue = [{"family": family+":assets", "version": version,
                     "valid_from": version+"-01-01", "valid_to": "2024-01-01" if version == "2023" else None,
                     "current": version == "2024"} for version in ("2023", "2024")]
                 groups = [[passage] for passage in asset_ids] + [asset_ids[:2], asset_ids[1:3],
                     [asset_ids[1], asset_ids[3]], asset_ids]
+                if passages == entity_passages:
+                    groups.extend(([mention_id], [mention_id, asset_ids[3]]))
                 paired_sets = [[unit.unit_id for passage in group for unit in by_passage[passage]] for group in groups]
             grounding = [{"passage_id": passage, "start": 0, "end": len(next(document["text"]
                 for document in documents if document["passage_id"] == passage))} for passage in passages]

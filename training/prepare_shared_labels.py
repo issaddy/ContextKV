@@ -56,6 +56,8 @@ source marks a passage span that supports a Need. The other roles mark original 
 entity identifiers, periods, units and constraints required to compute the requested result.
 For lookup and comparison Needs, also label the entity, period and filter bindings needed to qualify their supporting evidence.
 Label each requested entity identifier separately, together with the source evidence supporting that entity's answer.
+For each entity, source must be the smallest span containing its identifier and the facts answering this Need.
+Exclude unrelated mentions and navigation references from that source span; explicit entity headers may qualify dependent rows.
 Use condition_id to link filter/period columns to a declared query condition.
 relation_group identifies matching join keys across tables; leave it empty for non-join fields.
 Reuse the relation_group in known_join_keys when the same semantic join field occurs in another source batch.

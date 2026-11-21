@@ -888,10 +888,21 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
     strings = {"type": "array", "items": {"type": "string"}}
     ids = {"type": "array", "items": {"enum": list(need_ids)}}
     fields = {"source": {"enum": primary_refs}, "quote": {"type": "string"}}
-    fields.update({"relation": {"enum": list(relations)}, "values": strings, "units": strings} if relations else
-        {"needs": ids, "entity": {"type": "string"}, "measure": {"type": "string"},
-         "unit": {"type": "string"}, "group": strings})
-    record = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
+    if relations:
+        widths = {}
+        for identity, relation in relations.items():
+            widths.setdefault(len(relation["columns"]), []).append(identity)
+        records = []
+        for width, identities in widths.items():
+            values = {**strings, "minItems": width, "maxItems": width}
+            properties = {**fields, "relation": {"enum": identities}, "values": values, "units": values}
+            records.append({"type": "object", "properties": properties,
+                            "required": list(properties), "additionalProperties": False})
+        record = records[0] if len(records) == 1 else {"anyOf": records}
+    else:
+        fields.update({"needs": ids, "entity": {"type": "string"}, "measure": {"type": "string"},
+                       "unit": {"type": "string"}, "group": strings})
+        record = {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
     schema = {"type": "object", "properties": {"records": {"type": "array", "items": record},
               "unresolved": ids, "empty": ids}, "required": ["records", "unresolved", "empty"], "additionalProperties": False}
     operations = {n.need_id: n.operation for n in query.task.needs if n.need_id in need_ids}

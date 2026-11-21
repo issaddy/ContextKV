@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import replace
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -74,6 +75,7 @@ async def collect(args):
     run = apply_study_config(load_config(config["generation"]["run_config"]), config)
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
+    batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
     source = [row for row in source if row["task_state"]["coverage_scope"] == "selected_sources"]
     selected = []
@@ -84,8 +86,15 @@ async def collect(args):
                 groups.setdefault(row["conversation_id"], []).append(row)
         ordered = [rows[index] for index in range(max(map(len, groups.values()), default=0))
                    for rows in groups.values() if index < len(rows)]
-        ordered.sort(key=lambda row: not bool(row.get("paired_sets")))
-        selected.extend(ordered if count is None else ordered[:count])
+        if args.stage == "sets":
+            ordered.sort(key=lambda row: not bool(row.get("paired_sets")))
+        elif split == "dev":
+            ordered = [row for row in ordered if row["dataset"] == config["retrieval"]["corpus_id"]
+                       and conversation(row)]
+        else:
+            ordered.sort(key=lambda row: not (row["dataset"] == config["retrieval"]["corpus_id"]
+                                              and conversation(row)))
+        selected.extend(ordered if args.stage == "stop" or count is None else ordered[:count])
     source = selected
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
     from adapters.shared_retrieval import SharedEvidenceState, SharedEvidenceProvider
@@ -152,16 +161,23 @@ async def collect(args):
         arrived = time.monotonic()
         async with limit:
             snapshot = SessionSnapshot(row["task_id"], raw_history=history(row))
+            query = None
             if row["dataset"] == config["retrieval"]["corpus_id"]:
                 query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"],
                                                                   initial_only=args.stage == "sets")
                 row = {**row, "units": to_jsonable(units), "candidate_origin": "online_scope_hybrid"}
             else:
                 units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
+            if args.stage == "stop":
+                by_id = {unit.unit_id: unit for unit in units}
+                initial = {unit.unit_id for unit in SharedEvidenceProvider._closure(units[:batch_size], by_id)}
+                if all(unit.unit_id in initial for unit in units):
+                    return False
+            if query is None:
                 query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
                     row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
             if query.task.coverage_scope == "all_supplied_documents" or not units:
-                return
+                return False
             snapshot = replace(snapshot, raw_history=working_history(query, snapshot.raw_history))
             totals = execution_totals()
             if args.stage == "sets":
@@ -206,15 +222,13 @@ async def collect(args):
                     "sets": [{"unit_ids": chosen, "quality": item["quality"], "covered_facts": flags,
                               "output_tokens": item["output_tokens"], "features": vector}
                              for (chosen, item), flags, vector in zip(observations, marks, features)]})
-                return
+                return True
             # A trajectory includes its initial queue and online work. The
             # counterfactual STOP probes and warmup fixtures are not that work.
             paid_seconds = time.monotonic()-arrived
             warm = index % 2 == 1
             state, encoded, states = None, None, []
-            batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
             pending, observed = units, ()
-            by_id = {unit.unit_id: unit for unit in units}
             while pending:
                 branch_id = f"stop:{row['task_id']}:{len(observed)}"
                 if warm:
@@ -255,6 +269,9 @@ async def collect(args):
                 complete = controller.executor(branch_id, branch_id+":work", totals,
                     cache_scope=branch_id, cache_namespace=branch_id)
                 await controller.prepare_state(state, snapshot, complete)
+                if not states and (state.needs_complete or state.budget_exhausted):
+                    await engine.close_session(branch_id)
+                    return False
                 transition_id = f"expand:{row['task_id']}:{len(observed)}"
                 windows[transition_id] = first, time.monotonic()
                 paid_seconds += windows[transition_id][1]-first
@@ -265,12 +282,28 @@ async def collect(args):
                     controller._value_state(state, time.monotonic()-paid_seconds)).cpu().tolist()
                 item = await answer(row, state, snapshot, branch_id, totals)
                 states.append({"features": features, "answer": item})
-                if state.needs_complete:
+                if state.needs_complete or state.budget_exhausted:
                     break
-            outputs.append((row, states))
+            if len(states) > 1:
+                outputs.append((row, states))
+                return True
+            return False
 
     try:
-        await asyncio.gather(*(collect_state(row, index) for index, row in enumerate(source)))
+        if args.stage == "sets":
+            await asyncio.gather(*(collect_state(row, index) for index, row in enumerate(source)))
+        else:
+            for split, count in (("train", args.train_states), ("dev", args.dev_states)):
+                candidates = iter((index, row) for index, row in enumerate(source) if row["split"] == split)
+                remaining = count
+                while remaining is None or remaining > 0:
+                    batch = tuple(islice(candidates, args.concurrency if remaining is None
+                                         else min(args.concurrency, remaining)))
+                    if not batch:
+                        break
+                    accepted = await asyncio.gather(*(collect_state(row, index) for index, row in batch))
+                    if remaining is not None:
+                        remaining -= sum(accepted)
     finally:
         if args.stage == "stop":
             await sampler.stop()

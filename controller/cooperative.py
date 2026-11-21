@@ -409,14 +409,16 @@ class CooperativeController:
                 else:
                     merged = merge_projections(reads)
                     parts = [(merged.index, program) for program in merged.programs]
-            calculated, programs = combine_populations(parts)
-            for program in programs:
-                if any(identity not in processed_primary for identity in population):
-                    program = replace(program, unresolved_conditions=(*program.unresolved_conditions, "unread_population"))
+            for part in parts:
+                program = part[1]
                 try:
+                    calculated, (program,) = combine_populations((part,))
+                    if any(identity not in processed_primary for identity in population):
+                        program = replace(program, unresolved_conditions=(*program.unresolved_conditions, "unread_population"))
                     result = calculated.execute(program)
                 except (KeyError, IndexError, ValueError, ArithmeticError):
                     # Conflicting fields, grouping, or units leave the Need open for the final answer.
+                    records.pop(program.need_id, None)
                     continue
                 record = computation_record(program, result)
                 need = next(n for n in state.query.task.needs if n.need_id == program.need_id)

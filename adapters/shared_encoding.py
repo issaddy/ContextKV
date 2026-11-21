@@ -195,6 +195,10 @@ class EvidenceEncoding:
         width = max(map(len, slots), default=1)
         support = [[[0.] * len(required) + [1.] * (width-len(required))
                     for required in slots] for _ in self.unit_ids]
+        answers = {}
+        for binding in self.bindings:
+            if binding.role == "source" and binding.need_id in positions:
+                answers.setdefault((binding.need_id, binding.source_span.source_key), []).append(binding)
         entities = {}
         for binding in self.bindings:
             if binding.need_id in positions:
@@ -208,12 +212,17 @@ class EvidenceEncoding:
                     continue
                 for i, start, end in sources.get(binding.source_span.source_key, ()):
                     if start <= binding.source_span.start and binding.source_span.end <= end:
+                        score = binding.score
                         if binding.role == "entity":
+                            score = min(score, max((answer.score for answer in answers.get(
+                                (binding.need_id, binding.source_span.source_key), ())
+                                if start <= answer.source_span.start <= binding.source_span.start
+                                and binding.source_span.end <= answer.source_span.end <= end), default=0.))
                             names = entities.setdefault((self.unit_ids[i], j), {})
                             key = (binding.source_span.source_key, entity)
                             names[key] = max(names.get(key, 0.), binding.score)
                         for slot in matching:
-                            support[i][j][slot] = max(support[i][j][slot], binding.score)
+                            support[i][j][slot] = max(support[i][j][slot], score)
         for j, required in enumerate(slots):
             entity_slots = [(slot, version, subject) for slot, (role, _, version, subject)
                             in enumerate(required) if role == "entity"]
