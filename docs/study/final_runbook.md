@@ -129,7 +129,7 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
 
-InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及用历史段落等量替换的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)
+InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及在被移除段落的原位置等量填入历史段落的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)
 
 ```bash
 python3 -m training.prepare_inscit data/training/inscit/train.json "$TRAIN_RUN/inscit-pairs.jsonl" \
@@ -143,6 +143,8 @@ python3 -m training.collect_shared_values sets --config configs/study.yaml \
 ```
 
 容器 `data/training/shared/aux_supervision/inscit-wide-sets.jsonl` 保存 24 段候选池的段落 ID、集合特征和回答标签，可直接作为集合头的 `--data`。同目录的 `inscit-orders.jsonl` 按题记录两种文章顺序的答案得分、事实覆盖率、输出长度和引擎计数。每种顺序先用上一轮作者引用的证据做一次单 token 预填充，再用实际历史回答当前问题。文件中的 `ms` 是本次生成调用耗时。
+
+逐事实配对文件可直接传入集合头训练的 `--data`。每行包含只给历史的对照和两个等长证据集。`sets[].quality` 是该条参考事实被回答且有可见材料支持的二值标签，`answer_quality` 保留整题得分，`covered_facts` 记录回答是否命中该事实。`fact_witness` 的字符区间为左闭右开，可按题号和来源回到 `inscit-sets.jsonl` 的原段落或历史发言核查。[逐事实配对文件](../../training/assets/inscit-supported-swaps.jsonl)
 
 集合采集使用线上首批可见证据，比较当前选择、相邻集合与空集合。固定教师先根据参考答案拆分必要事实，再匿名评判各答案。每个集合保存答案质量、逐事实覆盖标记、输出长度和选择特征。MultiDoc2Dial 用参考答案 F1，其余训练来源用固定教师对照参考答案评分。开发报告中的 `dev_chosen_quality` 和 `dev_chosen_fact_recall` 取自有标签的干预集合中效用最高的一项。线上选择还要考虑完整候选集合、KV 报价和容量。字段损失只使用与标注对齐的子需求。范围头的开发指标使用与服务一致的整题和子需求联合路由。
 

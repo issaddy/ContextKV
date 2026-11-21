@@ -63,7 +63,8 @@ def paired_turns(dialogues, dev_sessions=20, seed=42):
                 choices.append(kept)
                 count = len(cited) - len(kept)
                 if len(substitutes) >= count:
-                    choices.append((*kept, *substitutes[:count]))
+                    replacements = iter(substitutes)
+                    choices.append(tuple(next(replacements) if article(k) == doc else k for k in cited))
             yield {"dataset": "inscit", "task_id": task_id, "conversation_id": f"inscit:{session}",
                    "turn": i+1, "split": split, "question": turn["context"][-1],
                    "history": [{"turn_id": j//2+1, "speaker": "user" if j%2 == 0 else "assistant",
