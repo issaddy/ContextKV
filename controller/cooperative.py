@@ -232,6 +232,7 @@ class CooperativeController:
         return False
 
     async def read_required(self, state, snapshot, complete):
+        from adapters.document_compute import DocumentComputationError
         from adapters.shared_retrieval import need_scope_signature
         reused = state.completed_needs
         population = state.query.task.coverage_scope == "all_supplied_documents"
@@ -265,7 +266,12 @@ class CooperativeController:
                          for projection in program.projections)]
         records = {record["need_id"]: record for record in state.computations}
         for program in bound:
-            record = computation_record(program, state.document_index.execute(program))
+            try:
+                result = state.document_index.execute(program)
+            except DocumentComputationError:
+                records.pop(program.need_id, None)
+                continue
+            record = computation_record(program, result)
             if population:
                 record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
             records[program.need_id] = record
@@ -295,8 +301,7 @@ class CooperativeController:
         if state.needs_complete:
             selected = ()
         else:
-            selected = selected_blocks(state)
-        selected = with_document_headers(selected, state.source_headers)
+            selected = with_document_headers(selected_blocks(state), state.source_headers)
         return compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
             instruction=self._answer_instruction(state))
@@ -341,7 +346,7 @@ class CooperativeController:
 
     async def _read_mixed_population(self, state, snapshot, complete, need_ids):
         from itertools import chain, pairwise
-        from adapters.document_compute import (DocumentIndex, literal_population_projection,
+        from adapters.document_compute import (DocumentComputationError, DocumentIndex, literal_population_projection,
             merge_bound_population, merge_projections, population_relations)
         from adapters.shared_retrieval import SharedEvidenceProvider, need_scope_signature
         index = state.document_index
@@ -400,8 +405,8 @@ class CooperativeController:
                     if any(identity not in processed_primary for identity in population):
                         program = replace(program, unresolved_conditions=(*program.unresolved_conditions, "unread_population"))
                     result = calculated.execute(program)
-                except (KeyError, IndexError, ValueError, ArithmeticError):
-                    # Conflicting fields, grouping, or units leave the Need open for the final answer.
+                except DocumentComputationError:
+                    # Incompatible source values or units leave the Need open for the final answer.
                     records.pop(program.need_id, None)
                     continue
                 record = computation_record(program, result)
@@ -412,7 +417,7 @@ class CooperativeController:
         state.computations = tuple(records.values())
 
     async def _compute_documents(self, state, need_ids, snapshot, complete, outside):
-        from adapters.document_compute import (DocumentIndex, combine_populations,
+        from adapters.document_compute import (DocumentComputationError, DocumentIndex, combine_populations,
             merge_projections, semantic_binding, semantic_projection)
         from adapters.shared_retrieval import need_scope_signature
         from .schema import Message, history_messages
@@ -495,13 +500,19 @@ class CooperativeController:
             parts.extend((merged.index, program) for program in merged.programs)
         parts = [(part, replace(program, operation=resolved_operations.get(program.need_id, program.operation)))
                  for part, program in parts if program.need_id in need_ids]
-        calculated_index, programs = combine_populations(parts)
+        grouped = {}
+        for part, program in parts:
+            grouped.setdefault(program.need_id, []).append((part, program))
         computations = []
-        for program in programs:
-            unread = any(unit.unit_id not in state.read_units for unit in outside)
-            if state.budget_exhausted or (unread and state.query.task.coverage_scope == "all_supplied_documents"):
-                program = replace(program, unresolved_conditions=(*program.unresolved_conditions, "unread_population"))
-            result = calculated_index.execute(program)
+        unread = any(unit.unit_id not in state.read_units for unit in outside)
+        for need_parts in grouped.values():
+            try:
+                calculated_index, (program,) = combine_populations(need_parts)
+                if state.budget_exhausted or (unread and state.query.task.coverage_scope == "all_supplied_documents"):
+                    program = replace(program, unresolved_conditions=(*program.unresolved_conditions, "unread_population"))
+                result = calculated_index.execute(program)
+            except DocumentComputationError:
+                continue
             record = computation_record(program, result)
             record["scope"] = need_scope_signature(state.query, program.need_id, index)
             computations.append(record)

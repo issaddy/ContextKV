@@ -189,7 +189,7 @@ class SharedEvidenceProvider:
         available = self._body_budget(snapshot, query)
         def finish(state):
             state.version_catalogue = catalogue_versions(catalogue, families)
-            if supplied_blocks is not None:
+            if supplied_blocks is not None and not state.needs_complete:
                 from controller.cooperative_request import document_headers
                 state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
             context = QueryContext(question, "shared", task_state=query.task,

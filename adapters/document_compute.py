@@ -30,6 +30,10 @@ UNIT_FACTORS = {
 }
 
 
+class DocumentComputationError(ValueError):
+    """Source values cannot support the requested document computation."""
+
+
 def canonical_quantity(value, unit):
     canonical, factor = UNIT_FACTORS.get(unit, (unit, Decimal(1)))
     literal = str(value)
@@ -148,7 +152,7 @@ def quantity(cell):
         if suffix in UNIT_FACTORS:
             declared, literal = suffix, match.group()
     if not _NUMBER.fullmatch(literal):
-        raise ValueError(f"cell is not a numeric value: {cell.text!r}")
+        raise DocumentComputationError(f"cell is not a numeric value: {cell.text!r}")
     unit, value = canonical_quantity(literal, declared)
     return unit, -value if negative else value
 
@@ -202,7 +206,7 @@ def _matches(record, predicate):
         unit, actual = quantity(cell)
         expected_unit, expected = canonical_quantity(predicate.value, predicate.unit or cell.unit)
         if unit != expected_unit:
-            raise ValueError(f"predicate unit {predicate.unit!r} ({expected_unit}) differs from column unit {cell.unit!r} ({unit})")
+            raise DocumentComputationError(f"predicate unit {predicate.unit!r} ({expected_unit}) differs from column unit {cell.unit!r} ({unit})")
     else:
         actual, expected = cell.text.strip(), str(predicate.value).strip()
     return _COMPARISONS[predicate.operation](actual, expected)
@@ -357,7 +361,7 @@ class DocumentIndex:
                         values = ((quantity(left), quantity(right)) if program.operation in _NUMERIC_AGGREGATES
                                   else (left.text, right.text))
                         if values[0] != values[1]:
-                            raise ValueError("distinct entity has conflicting measure values")
+                            raise DocumentComputationError("distinct entity has conflicting measure values")
                     record = _Record(previous.fields, _unique_spans((*previous.sources, *record.sources)))
                 unique[key] = record
             records = tuple(unique.values())
@@ -404,7 +408,7 @@ class DocumentIndex:
                 quantities = [quantity(record.fields[program.value_field]) for record in selected]
                 units = {unit for unit, _ in quantities}
                 if len(units) > 1:
-                    raise ValueError("aggregation requires compatible units")
+                    raise DocumentComputationError("aggregation requires compatible units")
                 unit = next(iter(units), "")
                 numbers = [number for _, number in quantities]
                 if program.operation == "sum":
