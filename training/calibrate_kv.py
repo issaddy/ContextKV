@@ -39,6 +39,7 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
     try:
         # Compare complete batches. Interleaving per-state exact/InfoFlow pairs
         # prices mixed dispatch and graph capture as if they were path costs.
+        await engine.profile_prepare()
         generated, cold, output_lengths = {}, {}, {}
         for mode in ("exact", "infoflow"):
             results = await asyncio.gather(*(generate(row, mode, config["execution"]["output_tokens"]) for row in source))

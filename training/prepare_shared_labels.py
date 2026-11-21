@@ -206,7 +206,7 @@ async def prepare_labels(args):
                        else AutoTokenizer.from_pretrained(args.teacher_model))
     excluded = {row["conversation_id"] for path in args.exclude_labelled_sessions
                 for row in map(json.loads, Path(path).read_text().splitlines())}
-    states = prepare_states(args, tokenizer, excluded)
+    states = prepare_states(args, tokenizer, excluded) if args.train_states or args.dev_states else []
     from training.controlled_tasks import controlled_states
     extras = controlled_states(tokenizer, train_families=args.controlled_train_families,
         dev_families=args.controlled_dev_families, seed=args.seed)

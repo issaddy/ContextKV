@@ -617,7 +617,7 @@ class SharedEvidenceEncoder:
         if not train or asset_path is not None:
             path = Path(asset_path)
             weights = torch.load(path / "heads.pt", map_location=device, weights_only=True)
-            if train:
+            if train and "set_weights" not in weights:
                 weights = {**self.heads.state_dict(),
                            **{name: value for name, value in weights.items() if not name.startswith("set_")}}
             self.heads.load_state_dict(weights)
