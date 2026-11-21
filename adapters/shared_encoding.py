@@ -168,11 +168,6 @@ class EvidenceEncoding:
             return ()
         sizes = {unit.unit_id: unit.body_tokens for unit in units}
         candidates = [ids for ids in self.frontier(units) if sum(sizes[i] for i in ids) <= body_tokens]
-        quotes = [cost_model.quote(ids) for ids in candidates] if cost_model else None
-        if quotes is not None:
-            feasible = [(ids, quote) for ids, quote in zip(candidates, quotes) if quote["feasible"]]
-            candidates = [ids for ids, _ in feasible]
-            quotes = [quote for _, quote in feasible]
         if not candidates:
             return ()
         masks = torch.tensor([[identity in ids for identity in self.unit_ids] for ids in candidates],
@@ -180,10 +175,17 @@ class EvidenceEncoding:
         support, known = self.need_support(units, need_ids, completed)
         with torch.no_grad():
             values = self.heads.utility(self.embeddings, self.relevance, masks, support, known).tolist()
-        best = max(range(len(candidates)), key=lambda i: (
-            values[i], -quotes[i]["milliseconds"] if quotes is not None else 0.))
-        selected = candidates[best]
-        return cost_model.order(selected) if cost_model else selected
+        ranked = sorted(range(len(candidates)), key=values.__getitem__, reverse=True)
+        if cost_model is None:
+            return candidates[ranked[0]]
+        best, price = None, None
+        for i in ranked:
+            if best is not None and values[i] < values[best]:
+                break
+            quote = cost_model.quote(candidates[i])
+            if quote["feasible"] and (best is None or quote["milliseconds"] < price):
+                best, price = i, quote["milliseconds"]
+        return cost_model.order(candidates[best]) if best is not None else ()
 
     def project_population(self, units, *, body_tokens, cost_model=None):
         """Cover each source, then add query-weighted representative spans within it."""

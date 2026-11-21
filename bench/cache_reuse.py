@@ -30,8 +30,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
     branches, answers = [], []
     priced_evidence = [None] * len(trace)
     try:
-        for layout, mode in (("ranked", "exact"), ("priced", configured_mode), ("same_order", "exact"),
-                             ("no_demand", configured_mode)):
+        for layout, mode in (("ranked", "exact"), ("priced", configured_mode), ("same_order", "exact")):
             await engine.profile_prepare()
             start = time.monotonic()
             slots, sessions = asyncio.Semaphore(concurrency), {}
@@ -46,7 +45,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 async with lock, slots:
                     original = item["request"]
                     evidence = priced_evidence[index] if layout == "same_order" else item["ranked_evidence"]
-                    if layout in ("priced", "no_demand"):
+                    if layout == "priced":
                         from controller.schema import SourceSpan
                         units = tuple(EvidenceUnit(source_address(block),
                             (SourceSpan(source_address(block), block.key, *(block.span or (0,len(block.text)))),),
@@ -60,17 +59,11 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                             prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy, mode=mode)
                         by_id = {source_address(block): block for block in evidence}
                         evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
-                        if layout == "priced":
-                            priced_evidence[index] = evidence
-                        else:
-                            evidence = priced_evidence[index]
+                        priced_evidence[index] = evidence
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
                         system_prompt=original.messages[0].content)
                     shift = len(request.input_ids)-len(original.input_ids)
                     request = replace(request, query_span=tuple(position+shift for position in original.query_span))
-                    if layout == "priced":
-                        from controller.cooperative_request import with_source_demand
-                        request = with_source_demand(request, original.demand)
                     result = await engine.compute(request, **options)
                 records[index] = {"complete_ms": (time.monotonic()-start-arrival)*1000,
                                   **receipt(result),
@@ -97,9 +90,8 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 await engine.close_session(session)
     finally:
         await engine.aclose()
-    value = {"conditions": "Same evidence members, histories and arrival offsets. Each branch starts with cold KV and greedy sampling. Cache-priced execution follows configured kv_mode. same_order_native replays its evidence order without repeating the price lookup. no_demand keeps that layout, execution mode and lookup but submits no future-source demand.",
-             "branches": branches[:2], "same_order_native": branches[2], "same_order_no_demand": branches[3],
-             "no_demand_identical_answers": sum(a == b for a,b in zip(answers[1], answers[3])),
+    value = {"conditions": "Final-answer requests only, with the same evidence members, histories and arrival offsets. Each branch starts with cold KV and greedy sampling. Cache-priced execution follows configured kv_mode. same_order_native replays its evidence order without repeating the price lookup. This comparison does not replay READ or future-source retention.",
+             "branches": branches[:2], "same_order_native": branches[2],
              "identical_answers": sum(a == b for a,b in zip(answers[0], answers[1])),
              "same_order_identical_answers": sum(a == b for a,b in zip(answers[1], answers[2])),
              "questions": len(trace)}

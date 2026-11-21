@@ -140,16 +140,18 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         from controller.cooperative_request import source_address
         planned = {}
         answer_request = service.answer_request
-        async def capture_plan(state, snapshot, complete):
-            request = await answer_request(state, snapshot, complete)
-            chosen = set(state.selected_ids)
-            order = [identity for identity in state.evidence.frontier(state.pool.units)[-1] if identity in chosen]
-            units = {unit.unit_id: unit for unit in state.pool.units}
-            ranked = blocks_for_units((units[identity] for identity in order), state.pool.source_blocks)
-            members = {source_address(block): block for block in request.evidence}
-            ranked_ids = [source_address(block) for block in ranked if source_address(block) in members]
-            ranked_blocks = (*[block for address, block in members.items() if address not in set(ranked_ids)],
-                             *[members[address] for address in ranked_ids])
+        def capture_plan(state, snapshot):
+            request = answer_request(state, snapshot)
+            ranked_blocks = request.evidence
+            if state.evidence is not None:
+                chosen = set(state.selected_ids)
+                order = [identity for identity in state.evidence.frontier(state.pool.units)[-1] if identity in chosen]
+                units = {unit.unit_id: unit for unit in state.pool.units}
+                ranked = blocks_for_units((units[identity] for identity in order), state.pool.source_blocks)
+                members = {source_address(block): block for block in request.evidence}
+                ranked_ids = [source_address(block) for block in ranked if source_address(block) in members]
+                ranked_blocks = (*[block for address, block in members.items() if address not in set(ranked_ids)],
+                                 *[members[address] for address in ranked_ids])
             planned[id(request)] = {"ranked_evidence": ranked_blocks, "history": snapshot.raw_history}
             return request
         service.answer_request = capture_plan

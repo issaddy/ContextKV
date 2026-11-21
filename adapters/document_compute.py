@@ -58,7 +58,6 @@ class DocumentTable:
     source: SourceSpan
     caption: str = ""
     coverage: tuple[SourceSpan, ...] = ()
-    records_extracted: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,7 +120,6 @@ class DocumentResult:
     covered_tables: tuple[str, ...]
     source_spans: tuple[SourceSpan, ...]
     complete: bool
-    records_extracted: bool = False
 
 
 @dataclass(frozen=True)
@@ -374,8 +372,6 @@ class DocumentIndex:
             for span in (self.tables[table_id].coverage or (self.tables[table_id].source,)))
         complete = (set(program.population_table_ids) <= set(covered) | set(program.excluded_table_ids)
                     and not program.unresolved_conditions)
-        records_extracted = any(self.tables[identity].records_extracted
-                                for identity in (*covered, *program.excluded_table_ids))
         claims = []
         for index, record in enumerate(records):
             entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(index)
@@ -392,7 +388,7 @@ class DocumentIndex:
                 qualifiers=tuple(dict.fromkeys(text for cell in record.fields.values()
                                                for text in cell.qualifier_texts))))
         if program.operation == "lookup" or not complete:
-            return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete, records_extracted)
+            return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete)
         groups = {}
         for index, record in enumerate(records):
             groups.setdefault(_record_key(record, program.group_by), []).append(index)
@@ -432,7 +428,7 @@ class DocumentIndex:
                 parent_claim_ids=parents, entity=" / ".join(group), relation=" / ".join(labels) or program.value_field,
                 qualifiers=tuple(dict.fromkeys(text for record in selected for cell in record.fields.values()
                                                for text in cell.qualifier_texts))))
-        return DocumentResult(tuple(claims), tuple(conclusions), covered, scope, complete, records_extracted)
+        return DocumentResult(tuple(claims), tuple(conclusions), covered, scope, complete)
 
 
 def _binding_columns(table, binding):
@@ -792,8 +788,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids, operati
         for identity, rows in grouped.items():
             origin = units_by_id[identity].source_spans[0]
             table_id = f"projection:{need_id}:{units_by_id[identity].unit_id}"
-            tables.append(DocumentTable(table_id, headers, tuple(None for _ in headers), tuple(rows), origin,
-                                        records_extracted=True))
+            tables.append(DocumentTable(table_id, headers, tuple(None for _ in headers), tuple(rows), origin))
             projections.append(Projection(table_id, tuple(Field(name, column) for column, name in enumerate(headers))))
         programs.append(DocumentProgram(need_id, tuple(projections),
             tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
@@ -876,14 +871,14 @@ def merge_bound_population(reads, index, programs):
             unresolved[program.need_id].update(program.unresolved_conditions)
     for identity, (rows, coverage) in additions.items():
         table = tables[identity]
-        tables[identity] = replace(table, rows=(*table.rows, *rows), records_extracted=True,
+        tables[identity] = replace(table, rows=(*table.rows, *rows),
             coverage=_unique_spans((*(table.coverage or (table.source,)), *coverage)))
     combined = DocumentIndex(tables.values(), index.blocks)
     return [(combined, replace(program, unresolved_conditions=tuple(sorted(unresolved[program.need_id]))))
             for program in programs]
 
 
-def literal_population_projection(query, units, source_blocks, need_ids, population_ids, primary_ids, examples,
+def literal_population_projection(query, units, source_blocks, need_ids, population_ids, primary_ids,
                                   *, relations=None):
     """Read stable source KV and bind quoted records back to their original word spans."""
     from controller.cooperative_request import blocks_for_units
@@ -1003,9 +998,6 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
                         label=item["table"].headers[column])
                 table_rows[row["relation"]].append(tuple(cells))
                 assigned.update(targets)
-                for need in targets:
-                    key = units[i].source_spans[0].source_key
-                    examples.setdefault((need, key.document_id, key.version), quote)
                 continue
             entity = address(i, row["entity"], start, end)
             measure = address(i, row["measure"], start, end)
@@ -1024,8 +1016,6 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
                         or (operations[need] != "count" and not measure)):
                     unresolved.add(need)
                     continue
-                key = units[i].source_spans[0].source_key
-                examples.setdefault((need, key.document_id, key.version), quote)
                 rows.append({"need_ids": [need], "entity": entity,
                              "measure": measure if operations[need] != "count" else None,
                              "unit": unit, "group": group, "qualifiers": []})
@@ -1033,8 +1023,7 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
         unresolved.update(set(need_ids) - assigned - set(data["empty"]))
         if relations:
             coverage = tuple(span for unit in primary for span in unit.source_spans)
-            tables = [replace(item["table"], rows=tuple(table_rows[identity]), coverage=coverage,
-                              records_extracted=True)
+            tables = [replace(item["table"], rows=tuple(table_rows[identity]), coverage=coverage)
                       for identity, item in relations.items()]
             programs = tuple(DocumentProgram(need, (), (), operation=operations[need],
                 unresolved_conditions=(need,) if need in unresolved else ()) for need in need_ids)
@@ -1103,7 +1092,7 @@ def combine_populations(parts):
         identity = f"population:{program.need_id}:{part_index}"
         if scope:
             tables.append(DocumentTable(identity, names, tuple(None for _ in names), tuple(rows), scope[0],
-                coverage=scope, records_extracted=any(index.tables[key].records_extracted for key in processed)))
+                coverage=scope))
         entry = grouped.setdefault(program.need_id, {"source": program, "projections": [], "population": [],
                                                     "unresolved": set()})
         if scope:

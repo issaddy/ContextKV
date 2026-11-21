@@ -70,7 +70,6 @@ class ComputeRuntime:
                         prefixes.append(dict(source_ids=prefix['sources'], gpu_tokens=gpu, host_tokens=host,
                                              gpu_nodes=resident['gpu_nodes'], unpinned_nodes=resident['unpinned_nodes']))
             return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs),
-                        queue_depth=len(self.scheduler.waiting_queue),
                         page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
                         max_input_tokens=self.scheduler.max_req_input_len,
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
@@ -438,27 +437,6 @@ class ComputeRuntime:
                 if node is not None:
                     node.priority = priority
 
-    def ready_tokens(self, state):
-        from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
-
-        if state.mode == 'infoflow':
-            nodes = [block.node for block in state.blocks if not block.owned]
-        else:
-            match = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
-                array('q', state.input_ids), state.request.extra_key, cache_salt=state.request.cache_salt)))
-            nodes = [match.best_match_node]
-        seen, gpu, host = set(), 0, 0
-        for node_id in nodes:
-            node = self.cache.tree_core.node_by_id(node_id)
-            while node is not None and node.id not in seen:
-                seen.add(node.id)
-                full = node.component_data[ComponentType.FULL]
-                gpu += len(full.value) if full.value is not None else 0
-                host += (len(full.host_value) if full.host_value is not None
-                         and node.write_through_pending_id is None else 0)
-                node = node.parent
-        return gpu, host
-
     def finish(self, req):
         state = req.contextkv_compute_state
         if state.published:
@@ -504,23 +482,17 @@ class ComputeRuntime:
                     source_id = scope, item['source_id']
                     self.source_nodes[source_id, 'exact'] = match.best_match_node
                     self.source_prefixes[source_id] = dict(sources=tuple(prefix), tokens=item['end'], namespace=req.cache_salt)
-        host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, route_cost_ms=state.route_costs, input_tokens=len(state.input_ids),
             output_tokens=output_count, elapsed_ms=elapsed,
             **state.counters, **{name + '_ms': value for name, value in phase_ms.items()},
-            gpu_available_tokens=self.allocator.available_size(),
-            host_available_tokens=host_pool.available_size() if host_pool else 0,
             actual_prefill_tokens=(state.counters['cold_tokens'] + state.counters['score_tokens'] +
                 state.counters['replay_tokens'] if state.mode == 'infoflow'
                 else len(state.input_ids) - req.cached_tokens),
             cached_tokens=state.counters['reused_tokens'] if state.mode == 'infoflow' else req.cached_tokens)
         host_loaded = state.counters['host_load_tokens'] if state.mode == 'infoflow' else req.cached_tokens_host
-        gpu_ready, host_ready = self.ready_tokens(state)
         receipt.update(prefill_tokens=receipt['actual_prefill_tokens'],
             device_hit_tokens=state.counters['device_hit_tokens'] if state.mode == 'infoflow' else req.cached_tokens_device,
-            host_loaded_tokens=host_loaded,
-            queue_depth=len(self.scheduler.waiting_queue),
-            gpu_ready_tokens=gpu_ready, host_ready_tokens=host_ready, **self.costs)
+            host_loaded_tokens=host_loaded)
         req.customized_info = req.customized_info or {}
         req.customized_info['contextkv_compute'] = [receipt]
 

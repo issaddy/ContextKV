@@ -248,8 +248,8 @@ def compact_computations(results):
                                  for identity, label, value, unit in fact["fields"]]
             facts.append(row)
         records.append({name: result[name] for name in (
-            "need_id", "operation", "conditions", "complete", "records_extracted")} | {"results": facts, "sources": references}
-                       | {key: result[key] for key in ("target", "by_source") if key in result})
+            "need_id", "operation", "conditions", "complete")} | {"results": facts, "sources": references}
+                       | {key: result[key] for key in ("target",) if key in result})
     return {"fields": [{"id": reference, "name": key[0], "label": key[1], "unit": key[2]}
                        for key, reference in fields.items()],
             "qualifiers": {reference: text for text, reference in qualifiers.items()},
@@ -266,8 +266,7 @@ def answer_task(question, results):
     return question + "\nComputed results with original-source addresses:\n" + json.dumps(
         compact_computations(results), ensure_ascii=False, separators=(",", ":")) + (
         "\nComplete means that the declared input range was processed. Calculations apply to the supplied records "
-        "and conditions. When records_extracted is true, records were selected from prose by the model; "
-        "use the source evidence to interpret the result and any missing qualifications. "
+        "and conditions. Use their source evidence to interpret the result. "
         "Incomplete computations contain observations.")
 
 
@@ -281,19 +280,6 @@ class CompiledRequest:
     blocks: tuple[dict, ...]
     demand: tuple[dict, ...]
     query_span: tuple[int, int] = (0, 0)
-
-
-def with_source_demand(request, demand):
-    """Price a demanded source's Native alternative as its complete prefix."""
-    wanted = {item['source_id']: item for item in demand}
-    ends = {block['source_id']: block['end'] for block in request.blocks}
-    aligned = []
-    for identity, original in wanted.items():
-        item = {key: value for key, value in original.items() if key != 'native_prefix_end'}
-        if identity in ends:
-            item['native_prefix_end'] = ends[identity]
-        aligned.append(item)
-    return replace(request, demand=tuple(aligned))
 
 
 def source_body(evidence):

@@ -123,7 +123,7 @@ async def collect(args):
         complete = controller.executor(identity, identity, totals,
             cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
         await controller.read_required(state, snapshot, complete)
-        request = await controller.answer_request(state, snapshot, complete)
+        request = controller.answer_request(state, snapshot)
         result = await complete(request, "answer")
         item = {"source": row, "answer": result["text"], "output_tokens": result["meta"]["completion_tokens"]}
         await engine.close_session(identity)
@@ -134,7 +134,7 @@ async def collect(args):
             snapshot = SessionSnapshot(row["task_id"], raw_history=history(row))
             query = None
             if row["dataset"] == config["retrieval"]["corpus_id"]:
-                query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"], initial_only=True)
+                query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"])
                 row = {**row, "units": to_jsonable(units), "candidate_origin": "online_scope_hybrid"}
             else:
                 units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
@@ -160,7 +160,7 @@ async def collect(args):
             for number, chosen in enumerate(choices):
                 identity = f"sets:{row['task_id']}:{number}"
                 branch = replace(state, query=replace(state.query), selected_ids=chosen,
-                    read_units=set(state.read_units), processed_tables=set(state.processed_tables),
+                    read_units=set(state.read_units),
                     resolved_operations=dict(state.resolved_operations),
                     cache_scope=identity, cache_namespace=identity)
                 item = await answer(row, branch, snapshot, identity, totals)

@@ -44,7 +44,6 @@ class SharedEvidenceState:
     selected_ids: tuple[str, ...]
     document_index: DocumentIndex
     programs: tuple = ()
-    reused_claims: tuple = ()
     body_tokens: int = 0
     population_units: tuple = ()
     source_headers: tuple = ()
@@ -56,30 +55,22 @@ class SharedEvidenceState:
     table_read: bool = False
     projections: tuple = ()
     read_units: set = field(default_factory=set)
-    processed_tables: set = field(default_factory=set)
     resolved_operations: dict = field(default_factory=dict)
     prepared_programs: tuple = ()
     totals: dict | None = None
     budget_exhausted: bool = False
     cache_scope: str = "shared"
     cache_namespace: str | None = None
-    session_id: str | None = None
 
     @property
     def completed_needs(self):
-        return {record["need_id"] for record in self.computations
-                if record["complete"] and record.get("records_extracted") is False}
+        return {record["need_id"] for record in self.computations if record["complete"]}
 
     @property
     def needs_complete(self):
         completed = self.completed_needs
         return bool(self.query.task.needs) and all(
             need.need_id in completed for need in self.query.task.needs)
-
-    @property
-    def open_needs(self):
-        completed = self.completed_needs
-        return tuple(need for need in self.query.task.needs if need.need_id not in completed)
 
 
 class SharedEvidenceProvider:
@@ -114,10 +105,10 @@ class SharedEvidenceProvider:
     async def retrieve(self, snapshot, query, request_id, *, facts=()):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, facts=facts)
 
-    async def retrieve_candidates(self, snapshot, query, request_id, *, initial_only=False):
-        """Return serving candidates, optionally restricted to the first encoded batch."""
+    async def retrieve_candidates(self, snapshot, query, request_id):
+        """Return the serving candidates used to train evidence selection."""
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
-                                          candidate_view="initial" if initial_only else "all")
+                                          candidate_view=True)
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
                                 coverage_scope="selected_sources", facts=()):
@@ -137,7 +128,7 @@ class SharedEvidenceProvider:
         return tuple(row for row in catalogue if counts[row["family"]] > 1)
 
     def _retrieve(self, snapshot, question, request_id, *, supplied_blocks=None, source_metadata=None,
-                  coverage_scope="selected_sources", facts=(), candidate_view=None):
+                  coverage_scope="selected_sources", facts=(), candidate_view=False):
         import torch
         started = time.perf_counter()
         document_tokens = 0
@@ -214,7 +205,7 @@ class SharedEvidenceProvider:
                 state = SharedEvidenceState(query, None, EvidencePool((), blocks), (), DocumentIndex((), blocks),
                     body_tokens=available)
                 fixed_claims = self._reuse_computations(state, facts)
-                state.reused_claims = state.computations = fixed_claims
+                state.computations = fixed_claims
                 if state.needs_complete:
                     return finish(state)
             document_index = DocumentIndex.from_blocks(blocks)
@@ -291,7 +282,7 @@ class SharedEvidenceProvider:
             state = SharedEvidenceState(query, None, replace(pool, units=units), (), document_index,
                 body_tokens=available,
                 population_units=tuple(by_id[unit.unit_id] for unit in population_units),
-                reused_claims=fixed_claims, computations=fixed_claims)
+                computations=fixed_claims)
             return finish(state)
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
         initial_ids.update(historical_ids)
@@ -303,8 +294,7 @@ class SharedEvidenceProvider:
                     pending_dependencies.append(identity)
         initial = tuple(unit for unit in units if unit.unit_id in initial_ids)
         if candidate_view:
-            pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
-            return query, initial if candidate_view == "initial" else (*initial, *pending)
+            return query, initial
         evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
         selected = ()
@@ -323,14 +313,12 @@ class SharedEvidenceProvider:
             query.source_titles = tuple(block.title for block in pool.source_blocks)
             state = SharedEvidenceState(query, None, replace(pool, units=population_units), (), document_index,
                 body_tokens=available, population_units=population_units)
-            state.reused_claims = self._reuse_computations(state, facts)
-            state.computations = state.reused_claims
+            state.computations = self._reuse_computations(state, facts)
             return finish(state)
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
             document_index, body_tokens=available, population_units=population_units)
         self._finish_state(state)
-        state.reused_claims = fixed_claims if full else self._reuse_computations(state, facts)
-        state.computations = state.reused_claims
+        state.computations = self._reuse_computations(state, facts)
         return finish(state)
 
     def _body_budget(self, snapshot, query):
@@ -366,7 +354,7 @@ class SharedEvidenceProvider:
         reused = []
         for past in history:
             for computation in past["computations"]:
-                if not computation["complete"] or computation.get("records_extracted") is not False:
+                if not computation["complete"]:
                     continue
                 sources = tuple(decode(SourceSpan, source) for source in computation["sources"])
                 if any(source.source_key not in legal for source in sources):
@@ -411,13 +399,10 @@ class SharedEvidenceProvider:
         usage = await run_retrieval_worker(bind)
         return {**usage, "compute_ms": (time.perf_counter()-started)*1000}
 
-    async def encode_evidence(self, state, units=None):
+    async def encode_evidence(self, state):
         """Encode original spans only when the chosen execution needs selection."""
         def encode():
-            chosen = state.pool.units if units is None else self._closure(
-                units, {unit.unit_id: unit for unit in state.pool.units})
-            state.evidence = self.evidence_encoder.encode(state.query, chosen)
-            state.pool = replace(state.pool, units=tuple(chosen))
+            state.evidence = self.evidence_encoder.encode(state.query, state.pool.units)
             state.selected_ids, state.costs = (), None
             return state.evidence.usage
         started = time.perf_counter()

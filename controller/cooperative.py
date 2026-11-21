@@ -60,8 +60,6 @@ def execution_totals():
 def computation_record(program, result):
     from adapters.shared_retrieval import computation_signature
     observations = program.operation == "lookup" or not result.complete
-    sources = (tuple(dict.fromkeys(span for claim in result.claims for span in claim.source_spans))
-               if result.records_extracted else result.source_spans)
     return {"need_id": program.need_id, "operation": program.operation,
             "input": computation_signature(program),
             "fields": list(dict.fromkeys(field.name for projection in program.projections for field in projection.fields)),
@@ -70,8 +68,7 @@ def computation_record(program, result):
                          **({"fields": claim.attributes} if observations else
                             {"field": claim.relation, "value": claim.value, "unit": claim.unit})}
                         for claim in result.conclusions],
-            "sources": to_jsonable(sources), "complete": result.complete,
-            "records_extracted": result.records_extracted}
+            "sources": to_jsonable(result.source_spans), "complete": result.complete}
 
 
 class CooperativeController:
@@ -155,13 +152,11 @@ class CooperativeController:
                                                 complete, totals, arrived)
                 selection = await retrieve(query)
                 state = selection.shared_state
-                state.session_id = session_id
                 state.totals = totals
                 snapshot = replace(snapshot, raw_history=working_history(state.query, snapshot.raw_history))
                 auxiliary = selection.auxiliary_usage
-                state.computations = tuple(state.reused_claims)
                 auxiliary["compute_ms"] += await self.prepare_state(state, snapshot, complete, provider=provider)
-                request = await self.answer_request(state, snapshot, complete)
+                request = self.answer_request(state, snapshot)
                 computations = state.computations
                 final = await complete(request, "answer")
                 source_keys = {decode(EvidenceKey, span["source_key"]) for item in computations for span in item["sources"]}
@@ -199,10 +194,7 @@ class CooperativeController:
                 if state.needs_complete:
                     state.selected_ids = ()
                     return auxiliary_ms
-            units = self._computed_source_units(state)
-            if units and await self._source_answer(state, snapshot, units):
-                return auxiliary_ms
-            usage = await provider.encode_evidence(state, units=units or None)
+            usage = await provider.encode_evidence(state)
             auxiliary_ms += usage["compute_ms"]
             await self._select_evidence(state, snapshot, state.computations)
             return auxiliary_ms
@@ -227,7 +219,7 @@ class CooperativeController:
         if sum(unit.body_tokens for unit in units) > budget:
             return False
         state.selected_ids = tuple(unit.unit_id for unit in units)
-        request = await self.answer_request(state, snapshot, None)
+        request = self.answer_request(state, snapshot)
         tokens = len(request.input_ids) + self.policy.max_new_tokens
         remaining = self.settings["max_total_tokens"]-state.totals["input_tokens"]-state.totals["output_tokens"]
         info = await self.start()
@@ -238,23 +230,6 @@ class CooperativeController:
             return True
         state.selected_ids = ()
         return False
-
-    @staticmethod
-    def _computed_source_units(state):
-        """Keep original windows and dependencies behind processed extracted records."""
-        from adapters.shared_retrieval import SharedEvidenceProvider
-        from .schema import SourceSpan
-        records = {record["need_id"]: record for record in state.computations}
-        needed = [need.need_id for need in state.query.task.needs if need.need_id not in state.completed_needs]
-        if any(identity not in records or not records[identity]["complete"]
-               or not records[identity]["sources"] for identity in needed):
-            return ()
-        spans = [decode(SourceSpan, span) for identity in needed for span in records[identity]["sources"]]
-        units = state.population_units
-        roots = tuple(unit for unit in units if any(
-            source.source_key == span.source_key and source.start < span.end and span.start < source.end
-            for source in unit.source_spans for span in spans))
-        return SharedEvidenceProvider._closure(roots, {unit.unit_id: unit for unit in units})
 
     async def read_required(self, state, snapshot, complete):
         from adapters.shared_retrieval import need_scope_signature
@@ -294,7 +269,6 @@ class CooperativeController:
             if population:
                 record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
             records[program.need_id] = record
-            state.processed_tables.update(projection.table_id for projection in program.projections)
         state.computations = tuple(records.values())
         if population:
             return
@@ -314,7 +288,7 @@ class CooperativeController:
                 operation=state.resolved_operations.get(need.need_id, need.operation))
                 for need in state.query.task.needs))
 
-    async def answer_request(self, state, snapshot, complete):
+    def answer_request(self, state, snapshot):
         """Online answers and training branches use this same conclusion path."""
         if state.compiled_answer is not None:
             return state.compiled_answer
@@ -367,8 +341,8 @@ class CooperativeController:
 
     async def _read_mixed_population(self, state, snapshot, complete, need_ids):
         from itertools import chain, pairwise
-        from adapters.document_compute import (DocumentIndex, combine_populations, literal_population_projection,
-            merge_bound_population, merge_projections, population_relations, quantity)
+        from adapters.document_compute import (DocumentIndex, literal_population_projection,
+            merge_bound_population, merge_projections, population_relations)
         from adapters.shared_retrieval import SharedEvidenceProvider, need_scope_signature
         index = state.document_index
         bound = {program.need_id: program for program in state.programs if program.need_id in need_ids
@@ -395,11 +369,11 @@ class CooperativeController:
             population = tuple(unit.unit_id for unit in primary)
             packs = self._source_packs(primary, input_limit, lambda unit: unit.text, dependencies=by_id)
             packets = ((roots, SharedEvidenceProvider._closure(roots, by_id)) for roots in packs)
-            reads, examples, processed_primary = [], {}, set()
+            reads, processed_primary = [], set()
             # Only the next packet is needed to describe future KV reuse.
             for i, ((roots, packet), (_, upcoming)) in enumerate(pairwise(chain(packets, (((), ()),)))):
                 projection = literal_population_projection(state.query, packet, state.pool.source_blocks,
-                    targets, population, {unit.unit_id for unit in roots}, examples, relations=relations)
+                    targets, population, {unit.unit_id for unit in roots}, relations=relations)
                 future = blocks_for_units(upcoming, state.pool.source_blocks)
                 request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history,
                     projection.blocks, future_sources=future, instruction=projection.instruction,
@@ -421,10 +395,8 @@ class CooperativeController:
                 else:
                     merged = merge_projections(reads)
                     parts = [(merged.index, program) for program in merged.programs]
-            for part in parts:
-                program = part[1]
+            for calculated, program in parts:
                 try:
-                    calculated, (program,) = combine_populations((part,))
                     if any(identity not in processed_primary for identity in population):
                         program = replace(program, unresolved_conditions=(*program.unresolved_conditions, "unread_population"))
                     result = calculated.execute(program)
@@ -435,22 +407,8 @@ class CooperativeController:
                 record = computation_record(program, result)
                 need = next(n for n in state.query.task.needs if n.need_id == program.need_id)
                 record["target"] = state.query.text(need.anchor_spans)
-                if result.complete and not program.group_by and program.operation in {"sum", "count"}:
-                    contributions = {}
-                    original_examples = dict(examples)
-                    for row in calculated.records(program):
-                        cell = row.fields[program.value_field if program.operation == "sum" else "entity"]
-                        key = cell.source.source_key
-                        unit, amount = quantity(cell) if program.operation == "sum" else ("records", 1)
-                        group = (key.document_id, key.version, unit)
-                        contributions[group] = contributions.get(group, 0) + amount
-                        original_examples.setdefault((program.need_id, key.document_id, key.version), cell.text)
-                    record["by_source"] = [{"document": doc, "version": version, "unit": unit, "value": str(amount),
-                                            "original_example": original_examples[program.need_id, doc, version]}
-                                           for (doc, version, unit), amount in contributions.items()]
                 record["scope"] = need_scope_signature(state.query, program.need_id, state.document_index)
                 records[program.need_id] = record
-            state.processed_tables.update(table_ids)
         state.computations = tuple(records.values())
 
     async def _compute_documents(self, state, need_ids, snapshot, complete, outside):
@@ -497,6 +455,9 @@ class CooperativeController:
                     break
                 generated = await complete(request, f"binding:{number}", schema=binding.schema,
                                            output_tokens=allowance)
+                if generated["meta"]["finish_reason"]["type"] == "length":
+                    state.budget_exhausted = True
+                    break
                 programs = binding.decode(generated["text"])
                 resolved_operations.update((program.need_id, program.operation) for program in programs)
                 state.table_parts = (*state.table_parts, *((subset, program) for program in programs))
@@ -521,6 +482,9 @@ class CooperativeController:
                     break
                 generated = await complete(request, f"projection:{len(state.projections)}", schema=projection.schema,
                                            output_tokens=allowance)
+                if generated["meta"]["finish_reason"]["type"] == "length":
+                    state.budget_exhausted = True
+                    break
                 parsed = projection.decode(generated["text"])
                 state.projections = (*state.projections, parsed)
                 state.read_units.update(unit.unit_id for unit in units)
@@ -531,8 +495,6 @@ class CooperativeController:
             parts.extend((merged.index, program) for program in merged.programs)
         parts = [(part, replace(program, operation=resolved_operations.get(program.need_id, program.operation)))
                  for part, program in parts if program.need_id in need_ids]
-        state.processed_tables.update(projection.table_id for _, program in parts for projection in program.projections
-                                      if projection.table_id in state.document_index.tables)
         calculated_index, programs = combine_populations(parts)
         computations = []
         for program in programs:

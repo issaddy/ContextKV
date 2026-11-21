@@ -4,7 +4,7 @@
 |---|---|---|
 | [Qwen3 Embedding](https://github.com/QwenLM/Qwen3-Embedding/blob/main/README.md#L82) | 复用作者 `last_token_pool` 与 L2 归一化；左 padding 下取末 token。共享查询前向供任务头使用，文档编码保持冻结 base 空间 | `SharedQueryEncoder.encode_many`、`encode_documents_with_usage` |
 | [RCEM §3，公式4–7](https://arxiv.org/html/2606.01697v2#S3) | 采用会话→改写查询的点 L2 对齐、普通查询自对齐和成对距离 SL（λ=1）；文档通过关闭查询适配器直接保持冻结空间。复用现有 LoRA 与共享任务头实现，未找到公开的作者训练源码 | `training/shared_training.py:task_loss` |
-| [Jina-reranker-v3.5 作者源码](https://huggingface.co/jinaai/jina-reranker-v3.5/blob/main/modeling.py#L81) | 复用骨干、末层 marker 池化和原 projector，并接通作者 [`rerank` 跨批 query 加权 cosine](https://huggingface.co/jinaai/jina-reranker-v3.5/blob/main/modeling.py#L237)。项目按来源地址组织输入，字段与集合头共享这些表示 | `SharedEvidenceEncoder.forward_evidence`、`EvidenceEncoding.merge` |
+| [Jina-reranker-v3.5 作者源码](https://huggingface.co/jinaai/jina-reranker-v3.5/blob/main/modeling.py#L81) | 复用骨干、末层 marker 池化和原 projector，并接通作者 [`rerank` 跨批 query 加权 cosine](https://huggingface.co/jinaai/jina-reranker-v3.5/blob/main/modeling.py#L237)。项目按来源地址组织输入，字段与集合头共享这些表示 | `SharedEvidenceEncoder.forward_evidence` |
 | [MMR 原始论文 §2](https://www.cs.cmu.edu/afs/cs/Web/People/jgc/publication/MMR_DiversityBased_Reranking_SIGIR_1998.pdf) | 复用相关性与新颖度的分解思想。项目用查询相关性乘以相对已选材料的新颖程度，并做饱和累积；以 Need 支持和干扰特征校准实际答案收益，再比较带依赖闭包的有序集合 | `EvidenceHeads.features`、`EvidenceEncoding.frontier` |
 | [Lin & Bilmes，ACL 2011](https://aclanthology.org/P11-1052/) | 借鉴查询摘要的覆盖、代表性和预算贪心选择。总体投影采用查询加权的 facility-location 目标，分别保留各文档的证据；加上来源闭包与实际缓存容量约束。项目适配没有套用原论文的全局近似保证 | `EvidenceEncoding.project_population` |
 | [OptiSet §3.2–3.3](https://arxiv.org/html/2601.05027v1#S3.SS2) | 借鉴相对无证据基线的生成器集合效用：本项目用真实答案 ΔQ=Q(S)−Q(∅)，以 MSE＋集合列表 KL 校准 7 参数的信息增益函数；用会话隔离的开发标签选择拟合轮次。原文用 PPL 差与生成式 CE/KL。[作者仓库](https://github.com/liunian-Jay/OptiSet/blob/master/README.md#L48)提供说明与框架图，本项目实现共享表示上的效用校准 | `training/collect_shared_values.py`、`EvidenceHeads.loss` |
@@ -13,7 +13,7 @@
 | [InfoFlow KV 作者源码](https://github.com/tx467/InfoFlow-KV/tree/main/llm/models/qwen/kv_cache) | 仅显式实验：独立块、全局 RoPE、head 均值后的 query L2 norm、末两层平均与稀疏重算；在 SGLang 中接入请求私有页和同一 GPU/Host 页池 | `engine_patches/infoflow.py`、`engine_patches/infoflow_attention.py` |
 | [SGLang](https://arxiv.org/abs/2312.07104)、[HiCache](https://docs.sglang.io/docs/advanced_features/hicache_design) | 原生执行、精确前缀和 GPU/Host 分层缓存 | `engine_patches/contextkv_compute.py`、SGLang 集成补丁 |
 
-任务、字段和集合头是本项目在共享表示上的训练实现。来源支持与集合效用用于软排序，不证明答案充分。结构化计算保留原文地址，并区分原表记录与模型抽取记录。默认 Native 精确执行与已知消费者需求协同；InfoFlow 的近似执行需要独立质量验证。
+任务、字段和集合头是本项目在共享表示上的训练实现。来源支持与集合效用用于软排序，不证明答案充分。结构化计算保留完整处理范围的原文地址，适用的完整结果可替代对应获取工作。默认 Native 精确执行与已知消费者需求协同；InfoFlow 的近似执行需要独立质量验证。
 
 GPU 运行与实测结果见运行手册中的同版资产和 benchmark 入口。
 
