@@ -127,7 +127,7 @@ async def collect(args):
             DocumentIndex.from_blocks(source_blocks(all_units)), body_tokens=config["selection"]["body_tokens"],
             cache_scope=identity, cache_namespace=identity, totals=totals)
         SharedEvidenceProvider._finish_state(state)
-        state.version_catalogue = catalogue_versions(catalogue)
+        state.version_catalogue = catalogue_versions(catalogue, query.task.version_intent.document_families)
         return state
 
     async def answer(row, state, snapshot, identity, previous_totals):
@@ -138,7 +138,7 @@ async def collect(args):
             cache_scope=state.cache_scope, cache_namespace=state.cache_namespace)
         if args.stage == "sets":
             await controller.read_required(state, snapshot, complete)
-        request = await controller.answer_request(state, snapshot)
+        request = await controller.answer_request(state, snapshot, complete)
         result = await complete(request, "answer")
         item = {"source": row, "answer": result["text"], "output_tokens": result["meta"]["completion_tokens"]}
         if args.stage == "stop":

@@ -41,9 +41,9 @@ def physical_sample(gpu_devices, process_ids):
     for pid in descendants((*process_ids, os.getpid())):
         try:
             contents = Path(f"/proc/{pid}/smaps_rollup").read_text()
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        pss_kib += next((int(line.split()[1]) for line in contents.splitlines() if line.startswith("Pss:")), 0)
+        pss_kib += next(int(line.split()[1]) for line in contents.splitlines() if line.startswith("Pss:"))
     return {"timestamp": (before+time.monotonic())/2,
             "gpu_gib": gpu_gib, "host_gib": pss_kib/(1024**2)}
 

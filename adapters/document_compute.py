@@ -10,30 +10,19 @@ from typing import Any
 
 from adapters.table_relations import extract_table_relations
 from controller.schema import EvidenceBlock, EvidenceClaim, EvidenceUnit, SourceSpan
-from controller.source_windows import numbered_text, word_spans
+from controller.source_windows import numbered_text
 
 
-# Factors use canonical SI units, with time quantities canonicalized to seconds
-# and binary/decimal byte units aligned with table_relations._UNIT.
+# Factors use canonical SI units, with time quantities canonicalized to seconds.
 UNIT_FACTORS = {
     "": ("", Decimal(1)), "1": ("", Decimal(1)),
     "kg": ("g", Decimal(1000)), "g": ("g", Decimal(1)),
     "mg": ("g", Decimal("0.001")),
     "km": ("m", Decimal(1000)), "m": ("m", Decimal(1)),
     "cm": ("m", Decimal("0.01")),
-    "day": ("s", Decimal(86400)), "days": ("s", Decimal(86400)),
-    "h": ("s", Decimal(3600)), "hr": ("s", Decimal(3600)),
-    "hour": ("s", Decimal(3600)), "hours": ("s", Decimal(3600)),
-    "min": ("s", Decimal(60)), "minute": ("s", Decimal(60)), "minutes": ("s", Decimal(60)),
-    "s": ("s", Decimal(1)), "sec": ("s", Decimal(1)),
-    "second": ("s", Decimal(1)), "seconds": ("s", Decimal(1)),
-    "ms": ("s", Decimal("0.001")),
-    "B": ("B", Decimal(1)), "byte": ("B", Decimal(1)), "bytes": ("B", Decimal(1)),
-    "KB": ("B", Decimal(1000)), "MB": ("B", Decimal(10**6)),
-    "GB": ("B", Decimal(10**9)), "TB": ("B", Decimal(10**12)),
-    "KiB": ("B", Decimal(1024)), "MiB": ("B", Decimal(1024**2)),
-    "GiB": ("B", Decimal(1024**3)), "TiB": ("B", Decimal(1024**4)),
-    "$": ("USD", Decimal(1)), "美元": ("USD", Decimal(1)), "USD": ("USD", Decimal(1)),
+    "h": ("s", Decimal(3600)), "min": ("s", Decimal(60)),
+    "s": ("s", Decimal(1)),
+    "美元": ("USD", Decimal(1)), "USD": ("USD", Decimal(1)),
     "元": ("CNY", Decimal(1)), "CNY": ("CNY", Decimal(1)),
     "万元": ("CNY", Decimal(10000)),
     "credit": ("credit", Decimal(1)), "credits": ("credit", Decimal(1)),
@@ -151,16 +140,9 @@ def quantity(cell):
     text = cell.text.strip()
     negative = text.startswith("(") and text.endswith(")")
     literal = text[1:-1].strip() if negative else text
-    if literal.startswith("-$"):
-        negative = not negative
-        literal = literal[1:].strip()
     declared = cell.unit
     if declared and literal.endswith(declared):
         literal = literal[:-len(declared)].strip()
-    elif declared and literal.startswith(declared):
-        literal = literal[len(declared):].strip()
-    elif not declared and literal.startswith("$") and _NUMBER.fullmatch(literal[1:].strip()):
-        declared, literal = "$", literal[1:].strip()
     elif not declared and (match := _NUMBER.match(literal)):
         suffix = literal[match.end():].strip()
         if suffix in UNIT_FACTORS:
@@ -177,14 +159,9 @@ def _literal_unit(relation):
     header = re.search(r"[\[(]([^\])]+)[\])]$", relation.column.text)
     if header and header[1] in UNIT_FACTORS:
         return header[1]
-    raw = relation.value.text.strip()
-    if raw.startswith(("-$", "$")):
-        number = raw[2:].strip() if raw.startswith("-$") else raw[1:].strip()
-        if _NUMBER.fullmatch(number):
-            return "$"
     for unit in sorted(UNIT_FACTORS, key=len, reverse=True):
-        if unit and unit != "1" and raw.endswith(unit):
-            number = raw[:-len(unit)].strip()
+        if unit and unit != "1" and relation.value.text.endswith(unit):
+            number = relation.value.text[:-len(unit)].strip()
             if _NUMBER.fullmatch(number):
                 return unit
     return ""
@@ -205,6 +182,10 @@ def _cell_sources(cell):
     return (cell.source, *((cell.header,) if cell.header else ()), *cell.qualifiers)
 
 
+def _record_sources(record):
+    return record.sources
+
+
 def _record_key(record, fields):
     return tuple(record.fields[name].text.strip() for name in fields)
 
@@ -212,26 +193,18 @@ def _record_key(record, fields):
 def _matches(record, predicate):
     cell = record.fields[predicate.field]
     if predicate.operation == "contains":
-        return str(predicate.value).strip().casefold() in cell.text.casefold()
+        return str(predicate.value) in cell.text
     if predicate.operation == "in":
-        allowed = {str(item).strip().casefold() for item in predicate.value}
-        return cell.text.strip().casefold() in allowed
+        return cell.text.strip() in predicate.value
     if predicate.operation == "not_in":
-        disallowed = {str(item).strip().casefold() for item in predicate.value}
-        return cell.text.strip().casefold() not in disallowed
+        return cell.text.strip() not in predicate.value
     if predicate.numeric:
-        try:
-            unit, actual = quantity(cell)
-        except ValueError:
-            if predicate.operation in {"eq", "ne"}:
-                actual, expected = cell.text.strip().casefold(), str(predicate.value).strip().casefold()
-                return _COMPARISONS[predicate.operation](actual, expected)
-            raise
+        unit, actual = quantity(cell)
         expected_unit, expected = canonical_quantity(predicate.value, predicate.unit or cell.unit)
         if unit != expected_unit:
             raise ValueError(f"predicate unit {predicate.unit!r} ({expected_unit}) differs from column unit {cell.unit!r} ({unit})")
     else:
-        actual, expected = cell.text.strip().casefold(), str(predicate.value).strip().casefold()
+        actual, expected = cell.text.strip(), str(predicate.value).strip()
     return _COMPARISONS[predicate.operation](actual, expected)
 
 
@@ -239,35 +212,6 @@ class DocumentIndex:
     def __init__(self, tables, blocks=()):
         self.tables = {table.table_id: table for table in tables}
         self.blocks = tuple(blocks)
-        self._blocks_by_key = {}
-        for block in self.blocks:
-            self._blocks_by_key.setdefault(block.key, []).append(block)
-        self._tables_by_key = {}
-        for table in self.tables.values():
-            self._tables_by_key.setdefault(table.source.source_key, []).append(table)
-
-    def subset(self, blocks):
-        """Return an equivalent DocumentIndex for a subset of already-indexed blocks."""
-        blocks = tuple(blocks)
-        if not blocks:
-            return DocumentIndex((), ())
-        seen = set()
-        kept_blocks = []
-        kept_tables = []
-        for block in blocks:
-            if block.key in seen:
-                return DocumentIndex.from_blocks(blocks)
-            seen.add(block.key)
-            existing = self._blocks_by_key.get(block.key)
-            if not existing or len(existing) != 1:
-                return DocumentIndex.from_blocks(blocks)
-            indexed = existing[0]
-            span = block.span or (0, len(block.text))
-            if indexed.span != span or indexed.text != block.text or indexed.title != block.title:
-                return DocumentIndex.from_blocks(blocks)
-            kept_blocks.append(indexed)
-            kept_tables.extend(self._tables_by_key.get(block.key, ()))
-        return DocumentIndex(kept_tables, kept_blocks)
 
     @classmethod
     def from_blocks(cls, blocks):
@@ -434,7 +378,7 @@ class DocumentIndex:
         claims = []
         for index, record in enumerate(records):
             entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(index)
-            sources = record.sources
+            sources = _record_sources(record)
             value = record.fields[program.value_field].text if program.value_field else {name: c.text for name, c in record.fields.items()}
             unit = record.fields[program.value_field].unit if program.value_field else ""
             claims.append(EvidenceClaim(f"document:{program.need_id}:{index}", program.need_id,
@@ -507,15 +451,11 @@ def _condition_predicate(query, condition, field):
     values = tuple(query.text((ref,)) for ref in condition.value_spans)
     if operation == "in":
         return Predicate(field, operation, values)
-    value = " ".join(values).strip()
+    value = " ".join(values)
     unit = ""
-    if operation in {"eq", "ne", "lt", "le", "gt", "ge"}:
+    if operation in {"lt", "le", "gt", "ge"}:
         if _NUMBER.fullmatch(value):
             value = Decimal(value.replace(",", ""))
-        elif value.startswith(("-$", "$")) and _NUMBER.fullmatch(value[2:].strip() if value.startswith("-$") else value[1:].strip()):
-            sign = Decimal(-1) if value.startswith("-$") else Decimal(1)
-            literal = value[2:].strip() if value.startswith("-$") else value[1:].strip()
-            value, unit = sign * Decimal(literal.replace(",", "")), "$"
         else:
             for name in sorted(UNIT_FACTORS, key=len, reverse=True):
                 if name and name != "1" and value.endswith(name):
@@ -574,7 +514,7 @@ def build_programs(query, evidence, index):
                 name = f"group:{position}"
                 fields[name] = column
                 group_names.append(name)
-            for binding, column, row in sorted(located, key=lambda item: -item[0].score):
+            for binding, column, row in located:
                 condition_id = binding.condition_id
                 if binding.role not in {"filter", "period"} or not condition_id:
                     continue
@@ -661,9 +601,8 @@ def _query_description(query, need_ids):
             for condition in query.task.conditions if condition.condition_id in condition_ids]}
 
 
-def _word_source(unit, address, offsets=None):
-    if offsets is None:
-        offsets = word_spans(unit.text)
+def _word_source(unit, address):
+    _, offsets = numbered_text(unit.text)
     first, last = sorted(address[1:])
     start, cursor = offsets[first][0], offsets[last][1]
     origin = unit.source_spans[0]
@@ -676,7 +615,7 @@ def _word_address_schema(units):
     return {"oneOf": [{"type": "array", "prefixItems": [{"const": f"S{i+1}"},
         *[{"type": "integer", "minimum": 0, "maximum": len(offsets)-1} for _ in range(2)]],
         "minItems": 3, "items": False}
-        for i, unit in enumerate(units) if (offsets := word_spans(unit.text))]}
+        for i, unit in enumerate(units) if (offsets := numbered_text(unit.text)[1])]}
 
 
 def _word_blocks(units):
@@ -722,15 +661,12 @@ def decode_programs(text, query, index):
     needs = {need.need_id: need for need in query.task.needs}
     result = []
     fragments = {f"S{i+1}": unit for i, unit in enumerate(index.binding_units())}
-    offsets = {}
     tables = {f"T{i+1}": identity for i, identity in enumerate(index.tables)}
     def field_binding(field):
         address = field["unit_span"]
         if address is None:
             return Field(field["name"], field["column"])
-        unit = fragments[address[0]]
-        unit_offsets = offsets.setdefault(address[0], word_spans(unit.text))
-        text, span = _word_source(unit, address, unit_offsets)
+        text, span = _word_source(fragments[address[0]], address)
         return Field(field["name"], field["column"], text, span)
     def projection_binding(projection):
         columns = tuple(dict.fromkeys(predicate["column"] for predicate in projection["predicates"]))
@@ -812,18 +748,13 @@ def semantic_projection_schema(units, need_ids, operations=None):
             "group": array(address), "qualifiers": array(address)}))})
 
 
-def decode_projection(text, query, units, need_ids, population_unit_ids, *, offsets_by_id=None):
-    data = json.loads(text) if isinstance(text, str) else text
+def decode_projection(text, query, units, need_ids, population_unit_ids):
+    data = json.loads(text)
     units_by_id = {f"S{index+1}": unit for index, unit in enumerate(units)}
-    offsets = dict(offsets_by_id) if offsets_by_id is not None else {}
 
     def source(address):
-        unit_id = address[0]
-        unit = units_by_id[unit_id]
-        unit_offsets = offsets.get(unit_id)
-        if unit_offsets is None:
-            unit_offsets = offsets[unit_id] = word_spans(unit.text)
-        return _word_source(unit, address, unit_offsets)
+        unit = units_by_id[address[0]]
+        return _word_source(unit, address)
 
     tables, programs = [], []
     needs = {need.need_id: need for need in query.task.needs}
@@ -852,9 +783,6 @@ def decode_projection(text, query, units, need_ids, population_unit_ids, *, offs
                            qualifier_texts=qualifier_texts)
             groups = tuple(Cell(*source(address), qualifiers=qualifiers, qualifier_texts=qualifier_texts)
                            for address in record["group"])
-            if len(groups) < group_count:
-                pad = Cell("", entity_source, qualifiers=qualifiers, qualifier_texts=qualifier_texts)
-                groups = (*groups, *(pad for _ in range(group_count - len(groups))))
             grouped[record["entity"][0]].append((entity, measure, *groups))
         projections = []
         for identity, rows in grouped.items():
@@ -932,7 +860,7 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
         "Use empty only for a requested quantity with explicitly no matching records in this packet. Mark spurious or ambiguous Need fragments unresolved. The CPU computes the final result.\n"
         + json.dumps({"needs": operations, "task": _query_description(query, need_ids)}, ensure_ascii=False))
 
-    offsets = [word_spans(unit.text) for unit in units]
+    offsets = [numbered_text(unit.text)[1] for unit in units]
 
     def address(i, literal, start=0, end=None):
         if not literal:
@@ -986,8 +914,7 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
         assigned = {n for row in rows for n in row["need_ids"]}
         unresolved.update(set(need_ids) - assigned - set(data["empty"]))
         payload = {"operations": operations, "unresolved_need_ids": sorted(unresolved), "records": rows}
-        projection = decode_projection(payload, query, units, need_ids, population_ids,
-            offsets_by_id={f"S{index+1}": spans for index, spans in enumerate(offsets)})
+        projection = decode_projection(json.dumps(payload), query, units, need_ids, population_ids)
         # A dependency can be visible before its own rows have actually been read.
         programs = tuple(replace(p, projections=tuple(item for item, unit in zip(p.projections, units)
             if unit.unit_id in primary_ids)) for p in projection.programs)
@@ -1008,12 +935,11 @@ def merge_projections(projections):
             if previous is not None:
                 program = replace(program, projections=(*previous.projections, *program.projections),
                     population_table_ids=tuple(dict.fromkeys((*previous.population_table_ids, *program.population_table_ids))),
-                    group_by=max((previous.group_by, program.group_by), key=len),
+                    group_by=program.group_by or previous.group_by,
                     unresolved_conditions=tuple(dict.fromkeys((*previous.unresolved_conditions, *program.unresolved_conditions))))
             programs[program.need_id] = program
-    operations = {key: value for projection in projections for key, value in projection.operations.items()}
     return SemanticProjection(DocumentIndex(tables.values(), blocks.values()),
-                              tuple(programs.values()), operations)
+                              tuple(programs.values()), projections[0].operations)
 
 
 def combine_populations(parts):

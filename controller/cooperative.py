@@ -5,12 +5,10 @@ import asyncio
 from dataclasses import dataclass, field, replace
 import json
 import time
-from urllib.parse import quote
 from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, ANSWER_SCOPE, EvidenceCosts, blocks_for_units, compile_request,
-                                  history_signature, source_address, source_body, with_document_headers,
-                                  working_history, with_source_demand)
+                                  source_address, source_body, with_document_headers, working_history, with_source_demand)
 from .schema import EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -160,23 +158,16 @@ class CooperativeController:
                 selection = await retrieve(query)
                 state = selection.shared_state
                 reuse = self.reuse.setdefault(session_id, {"scope": None, "sources": {}})
-                # Only prune retained sources when document family or version scope changes;
-                # conversational predicate refinements within the same corpus still reuse prior KV.
-                scope = (state.query.task.version_intent.document_families,
+                scope = (tuple(sorted((condition.relation_type,
+                                      state.query.text(tuple(ref for ref in (condition.key_span, condition.predicate_span)
+                                                             if ref is not None)).casefold(),
+                                      state.query.text(condition.value_spans).casefold())
+                                      for condition in state.query.task.conditions)),
+                         state.query.task.version_intent.document_families,
                          state.query.task.version_intent.version_ids)
-                if reuse["sources"] and scope != reuse["scope"]:
-                    legal_prefixes = {
-                        "/".join(quote(str(v), safe="") for v in (k.corpus_id, k.document_id, k.version)) + "/"
-                        for k in (state.query.task.effective_source_scope or ())
-                    }
-                    if legal_prefixes:
-                        reuse["sources"] = {
-                            addr: count for addr, count in reuse["sources"].items()
-                            if any(addr.startswith(prefix) for prefix in legal_prefixes)
-                        }
-                    else:
-                        reuse["sources"].clear()
-                reuse["scope"] = scope
+                if scope != reuse["scope"]:
+                    reuse["sources"].clear()
+                    reuse["scope"] = scope
                 state.session_id = session_id
                 state.retained_sources = reuse["sources"]
                 state.totals = totals
@@ -199,7 +190,7 @@ class CooperativeController:
                     state = await provider.expand(state)
                     auxiliary = {**auxiliary,
                         "compute_ms": auxiliary["compute_ms"] + state.evidence.usage["compute_ms"]}
-                request = await self.answer_request(state, snapshot)
+                request = await self.answer_request(state, snapshot, complete)
                 computations = state.computations
                 final = await complete(request, "answer")
                 final["meta"]["contextkv_compute"]["cache_changed_members"] = state.costs.changed_members
@@ -251,7 +242,7 @@ class CooperativeController:
             selected_keys = {block.key for block in blocks}
         bound = [program for program in state.programs if program.need_id in required
                  and program.operation in AGGREGATES
-                 and self._population_complete(program)
+                 and self._population_complete(state.document_index, program)
                  and all(state.document_index.tables[projection.table_id].source.source_key in selected_keys
                          for projection in program.projections)]
         records = {record["need_id"]: record for record in state.computations}
@@ -281,20 +272,17 @@ class CooperativeController:
                 operation=state.resolved_operations.get(need.need_id, need.operation))
                 for need in state.query.task.needs))
 
-    async def answer_request(self, state, snapshot):
+    async def answer_request(self, state, snapshot, complete):
         """Online answers and training branches use this same conclusion path."""
         if state.query.task.needs and all(need.need_id in state.completed_needs for need in state.query.task.needs):
             selected = ()
         else:
             selected = selected_blocks(state)
         selected = with_document_headers(selected, state.source_headers)
-        layout = (state.costs.quote(state.selected_ids, preserve_order=True)["layout"]
-                  if state.costs is not None and snapshot.raw_history else "evidence_first")
         request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
-            instruction=self._answer_instruction(state), layout=layout)
-        # Keep a small next-turn working set; repeated sources take precedence,
-        # and Native evidence-first retention closes the prefix from block 0 so GPU priority attaches.
+            instruction=self._answer_instruction(state))
+        # Keep a small next-turn working set; repeated sources take precedence.
         open_ids = {need.need_id for need in state.open_needs}
         open_spans = [binding.source_span for binding in state.evidence.bindings if binding.need_id in open_ids]
         pending = set()
@@ -302,17 +290,9 @@ class CooperativeController:
             start, end = block.span or (0, len(block.text))
             if any(span.source_key == block.key and start < span.end and span.start < end for span in open_spans):
                 pending.add(source_address(block))
-        cap = max(1, len(state.query.task.needs))
         retained = sorted(request.blocks, key=lambda block: (
-            block["source_id"] not in pending, -state.retained_sources.get(block["source_id"], 0)))[:cap]
-        if request.layout != "history_first" and request.blocks:
-            retained_ids = {block["source_id"] for block in retained}
-            # Close the prefix from block 0 through the furthest retained early block so
-            # with_source_demand binds native_prefix_end without dropping priority to 0.
-            last_prefix = max((i for i, b in enumerate(request.blocks[:cap + 1])
-                               if b["source_id"] in retained_ids), default=0)
-            retained = list({b["source_id"]: b for b in (
-                *request.blocks[:last_prefix + 1], *retained)}.values())
+            block["source_id"] not in pending, -state.retained_sources.get(block["source_id"], 0)))[
+            :max(1, len(state.query.task.needs))]
         demand = []
         for block in retained:
             address = block["source_id"]
@@ -332,7 +312,7 @@ class CooperativeController:
         return max(0, min(output_tokens, self.policy.max_total_model_tokens-len(request.input_ids),
                           remaining-len(request.input_ids)-answer))
 
-    def _population_complete(self, program):
+    def _population_complete(self, index, program):
         used = ((0, *(join.right_index for join in program.joins)) if program.joins
                 else range(len(program.projections)))
         covered = {program.projections[i].table_id for i in used} | set(program.excluded_table_ids)
@@ -416,18 +396,16 @@ class CooperativeController:
             self.policy.max_total_model_tokens-output_tokens-len(fixed.input_ids))
         semantic_needs = {program.need_id for _, program in state.table_parts}
         parts = [(index, program) for program in state.programs if program.need_id in need_ids
-                 and program.need_id not in semantic_needs and self._population_complete(program)]
+                 and program.need_id not in semantic_needs and self._population_complete(index, program)]
         resolved_operations = state.resolved_operations
         bound = {program.need_id for _, program in parts}
         unbound = need_ids - bound
         if index.tables and unbound and not state.table_read:
-            units_by_table = {}
-            for unit in index.binding_units():
-                units_by_table.setdefault(unit.table_id, []).append(unit)
+            table_units = index.binding_units()
             pending, size = [], 0
             packets = []
             for table in index.tables.values():
-                units = units_by_table.get(table.table_id, ())
+                units = [unit for unit in table_units if unit.table_id == table.table_id]
                 tokens = sum(len(self.template.tokenizer.encode(numbered_text(unit.text)[0], add_special_tokens=False)) for unit in units)
                 if pending and size + tokens > input_tokens:
                     packets.append(tuple(pending))
@@ -534,12 +512,11 @@ class CooperativeController:
             await self.engine.evidence_state(tuple(available_sources),
                 cache_scope=state.cache_scope, cache_namespace=state.cache_namespace,
                 session_id=state.session_id, retained_sources=state.retained_sources))
-        hist_sig = history_signature(snapshot.raw_history)
         def select():
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
                 policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers,
-                blocks=blocks, history_sig=hist_sig)
+                previous_sources=state.retained_sources)
             if closed:
                 ids = ()
             elif state.query.task.coverage_scope == "all_supplied_documents":
@@ -550,10 +527,8 @@ class CooperativeController:
                         and costs.fits(population_ids, preserve_order=True)):
                     ids = population_ids
                 else:
-                    # Congestion-aware pricing trims low-value tail spans when requests are queued.
-                    price = self.prices.seconds * (1 + native.get("queue_depth", 0))
                     ids = state.evidence.project_population(units, body_tokens=budget,
-                        cost_model=costs, seconds_price=price)
+                        cost_model=costs, seconds_price=self.prices.seconds)
             elif self.settings.get("evidence_selection", "utility") == "ranked":
                 sizes = {unit.unit_id: unit.body_tokens for unit in units}
                 frontier = state.evidence.frontier(units)
@@ -569,13 +544,12 @@ class CooperativeController:
     def _value_state(self, state, arrived):
         from adapters.shared_retrieval import SharedEvidenceProvider
         native = state.costs.costs
-        quote = state.costs.quote(state.selected_ids, preserve_order=True)
+        quote = state.costs.quote(state.selected_ids)
         by_id = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
         encoded = set(state.evidence.unit_ids)
         upcoming = SharedEvidenceProvider._closure(state.pending_units[:state.evidence_batch], by_id)
         row_count = sum(len(table.rows) for table in state.document_index.tables.values())
-        selected_set = set(state.selected_ids)
-        selected_tokens = sum(unit.body_tokens for unit in state.pool.units if unit.unit_id in selected_set)
+        selected_tokens = sum(unit.body_tokens for unit in state.pool.units if unit.unit_id in state.selected_ids)
         processed = sum(len(state.document_index.tables[identity].rows) for identity in state.processed_tables)
         return {"remaining_source_fraction": len(state.pending_units)/max(1, len(state.pool.units)+len(state.pending_units)),
                 "open_need_fraction": len(state.open_needs)/max(1, len(state.query.task.needs)),

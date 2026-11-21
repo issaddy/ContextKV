@@ -4,15 +4,10 @@ from __future__ import annotations
 import re
 
 SOURCE_WINDOW_TOKENS = 2048
-_WORD_RE = re.compile(r"[\u3400-\u9fff]|\w+|[^\w\s]")
-
-
-def word_spans(text):
-    return tuple(word.span() for word in _WORD_RE.finditer(text))
 
 
 def numbered_text(text):
-    words = tuple(_WORD_RE.finditer(text))
+    words = tuple(re.finditer(r"[\u3400-\u9fff]|\w+|[^\w\s]", text))
     return " ".join(f"{i}:{word.group()}" for i, word in enumerate(words)), tuple(word.span() for word in words)
 
 

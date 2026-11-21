@@ -51,9 +51,8 @@ class ConversationStore:
         return self.get_snapshot(session_id)
 
     def get_snapshot(self, session_id):
-        row = self.db.execute("SELECT corpus_id FROM qa_sessions WHERE session_id=?", (session_id,)).fetchone()
-        corpus = row[0] if row is not None else "default"
-        turns = tuple(decode(TurnRecord, json.loads(item[0])) for item in self.db.execute(
+        corpus = self.db.execute("SELECT corpus_id FROM qa_sessions WHERE session_id=?", (session_id,)).fetchone()[0]
+        turns = tuple(decode(TurnRecord, json.loads(row[0])) for row in self.db.execute(
             "SELECT turn FROM qa_turns WHERE session_id=? ORDER BY turn_id", (session_id,)))
         return SessionSnapshot(session_id, version=len(turns), raw_history=turns,
                                corpus_snapshot_id=corpus)
@@ -78,11 +77,8 @@ class ConversationStore:
         return RegisteredDocuments(document_id, document_id, blocks, metadata)
 
     def load_document_set(self, document_set_id):
-        row = self.db.execute("SELECT sources,metadata FROM qa_documents WHERE document_set_id=?",
-                              (document_set_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"unknown document_set_id: {document_set_id}")
-        sources, metadata = row
+        sources, metadata = self.db.execute("SELECT sources,metadata FROM qa_documents WHERE document_set_id=?",
+                                            (document_set_id,)).fetchone()
         blocks = tuple(decode(EvidenceBlock, json.loads(self.db.execute(
             "SELECT block FROM qa_sources WHERE address=?", (address,)).fetchone()[0]))
             for address in json.loads(sources))
@@ -101,9 +97,8 @@ class ConversationStore:
         return json.loads(row[0]) if row else None
 
     def commit(self, session_id, request_id, query, answer, *, evidence, task, facts, metrics):
-        next_turn_id = self.db.execute(
-            "SELECT COALESCE(MAX(turn_id), 0) FROM qa_turns WHERE session_id=?", (session_id,)).fetchone()[0] + 1
-        turn = TurnRecord(next_turn_id, query, answer, evidence_keys=tuple(b.key for b in evidence),
+        snapshot = self.get_snapshot(session_id)
+        turn = TurnRecord(snapshot.version + 1, query, answer, evidence_keys=tuple(b.key for b in evidence),
             source_spans=tuple(SourceSpan(source_address(b), b.key, *(b.span or (0, len(b.text)))) for b in evidence),
                           query_context=QueryContext(query, "shared", task_state=task))
         with self.db:

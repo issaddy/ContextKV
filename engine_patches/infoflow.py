@@ -17,20 +17,16 @@ from sglang.srt.managers.infoflow_attention import paged_attention, segmented_de
 
 def relocate_keys(keys, local_positions, global_positions, rotary):
     """Undo the stored local RoPE and apply the actual request's RoPE."""
-    cache = rotary.cos_sin_cache
-    old_cos, old_sin = cache[local_positions].to(device=keys.device, dtype=torch.float32).chunk(2, dim=-1)
-    new_cos, new_sin = cache[global_positions].to(device=keys.device, dtype=torch.float32).chunk(2, dim=-1)
+    cache = rotary.cos_sin_cache.to(device=keys.device, dtype=torch.float32)
+    old_cos, old_sin = cache[local_positions].chunk(2, dim=-1)
+    new_cos, new_sin = cache[global_positions].chunk(2, dim=-1)
     denominator = old_cos.square() + old_sin.square()
     cosine = (new_cos * old_cos + new_sin * old_sin) / denominator
     sine = (new_sin * old_cos - new_cos * old_sin) / denominator
-    return _apply_relative_rope(keys, cosine, sine, rotary.is_neox_style)
-
-
-def _apply_relative_rope(keys, cosine, sine, is_neox_style):
     cosine, sine = cosine[:, None, :], sine[:, None, :]
     rotary_dim = cosine.shape[-1] * 2
     value, tail = keys[..., :rotary_dim], keys[..., rotary_dim:]
-    if is_neox_style:
+    if rotary.is_neox_style:
         first, second = value.chunk(2, dim=-1)
         value = torch.cat((first * cosine - second * sine,
                            second * cosine + first * sine), dim=-1)
@@ -110,31 +106,13 @@ class RequestState:
     decode_lengths: tuple = ()
     decode_offsets: tuple = ()
     complete: bool = False
-    input_ids_tensor: torch.Tensor | None = None
     counters: dict = field(default_factory=lambda: dict(
         cold_tokens=0, reused_tokens=0, recomputed_tokens=0, replay_tokens=0, score_tokens=0,
         host_load_tokens=0, device_hit_tokens=0, private_tokens=0, new_compute_kv_pages=0))
-    route_costs: dict = field(default_factory=dict)
-    runtime: object = None
-    events: list = field(default_factory=list)
-    published: bool = False
-    native_work: int = 0
-    batch_prefill_tokens: int = 0
-    mixed_prefill: bool = False
-    transferred_ranges: list = field(default_factory=list)
-    host_pages: set = field(default_factory=set)
-
-    def ids_tensor(self, device):
-        if self.input_ids_tensor is None or self.input_ids_tensor.device != device:
-            self.input_ids_tensor = torch.tensor(self.input_ids, device=device, dtype=torch.int64)
-        return self.input_ids_tensor
 
     def scoring_keys(self, layer_id, rotary, length):
         """Restore global keys for importance scoring without copying values."""
         keys, _ = self.pool.get_kv_buffer(layer_id)
-        if self.position_cosine is not None and self.position_sine is not None:
-            return _apply_relative_rope(keys[self.row[:length]], self.position_cosine[:length],
-                                        self.position_sine[:length], rotary.is_neox_style)
         return relocate_keys(keys[self.row[:length]], self.local_positions[:length],
                              torch.arange(length, device=self.row.device), rotary)
 
@@ -211,15 +189,15 @@ class QwenInfoFlow:
         device, count = state.row.device, int(prompt[-1]) + 1
         query_start, query_end = state.metadata['query_span']
         query_rows = (prompt >= query_start) & (prompt < query_end)
-        has_query = count > query_start and bool(query_rows.any())
-        hidden = self.model.embed_tokens(state.ids_tensor(device)[prompt])
+        ids = torch.tensor(state.input_ids, device=device, dtype=torch.int64)
+        hidden = self.model.embed_tokens(ids[prompt])
         # The author's default aggregates the last two layers.
         for index, layer in enumerate(self.layers):
             layer_id = layer.self_attn.attn.layer_id
             q, k, v = self._qkv(layer, hidden, prompt)
             keys, values = state.pool.get_kv_buffer(layer_id)
             keys[state.row[prompt]], values[state.row[prompt]] = k, v
-            if index >= len(self.layers) - 2 and has_query:
+            if index >= len(self.layers) - 2 and count > query_start:
                 all_k = state.scoring_keys(layer_id, layer.self_attn.rotary_emb, count)
                 state.scores[index-len(self.layers)+2, :count] += attention_norm_squared(
                     q[query_rows], all_k, prompt[query_rows])
@@ -253,7 +231,8 @@ class QwenInfoFlow:
 
     @torch.inference_mode()
     def replay(self, state, positions):
-        hidden = self.model.embed_tokens(state.ids_tensor(positions.device)[positions])
+        ids = torch.tensor(state.input_ids, device=positions.device, dtype=torch.int64)
+        hidden = self.model.embed_tokens(ids[positions])
         for layer in self.layers:
             layer_id = layer.self_attn.attn.layer_id
             q, k, v = self._qkv(layer, hidden, positions)

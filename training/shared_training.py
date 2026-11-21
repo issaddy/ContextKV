@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import random
@@ -89,8 +90,7 @@ def task_loss(encoder, row, prepared=None):
             start = text.find(version)
             if start >= 0:
                 span = TextRef(turn_id, speaker, start, start+len(version))
-                if positions((span,)):
-                    tag((span,), "version")
+                tag((span,), "version")
     losses = [F.cross_entropy(logits["span"].reshape(-1, 3), labels.reshape(-1)),
         F.cross_entropy(coverage[None], torch.tensor(
             [SCOPES.index(task.coverage_scope)], device=device))]
@@ -107,35 +107,38 @@ def task_loss(encoder, row, prepared=None):
     def pool(spans):
         return logits["features"][positions(spans)].mean(0)
 
-    need_vectors = torch.stack([pool(need.anchor_spans) for need in task.needs]) if task.needs else states[:0]
+    need_indices = [i for i, need in enumerate(task.needs) if positions(need.anchor_spans)]
+    needs = [task.needs[i] for i in need_indices]
+    conditions = [c for c in task.conditions if positions((c.predicate_span or c.key_span,))]
+    need_vectors = torch.stack([pool(need.anchor_spans) for need in needs]) if needs else states[:0]
     condition_vectors = (torch.stack([pool((condition.predicate_span or condition.key_span,))
-                                     for condition in task.conditions]) if task.conditions else states[:0])
-    subjects = tuple(dict.fromkeys(ref for need in task.needs for ref in need.subject_refs))
+                                     for condition in conditions]) if conditions else states[:0])
+    subjects = tuple(dict.fromkeys(ref for need in needs for ref in need.subject_refs if positions((ref,))))
     subject_vectors = torch.stack([pool((ref,)) for ref in subjects]) if subjects else states[:0]
-    values = tuple(dict.fromkeys(ref for condition in task.conditions for ref in condition.value_spans))
+    values = tuple(dict.fromkeys(ref for condition in conditions for ref in condition.value_spans if positions((ref,))))
     value_vectors = torch.stack([pool((ref,)) for ref in values]) if values else states[:0]
     for name, expected in (
-        ("operation", [OPERATIONS.index(need.operation) for need in task.needs]),
-        ("scope", [SCOPES.index(need.scope) for need in task.needs]),
-        ("join", [need.need_id in row.get("join_needs", ()) for need in task.needs]),
-        ("distinct", [need.need_id in row.get("distinct_needs", ()) for need in task.needs])):
+        ("operation", [OPERATIONS.index(need.operation) for need in needs]),
+        ("scope", [SCOPES.index(need.scope) for need in needs]),
+        ("join", [need.need_id in row.get("join_needs", ()) for need in needs]),
+        ("distinct", [need.need_id in row.get("distinct_needs", ()) for need in needs])):
         if expected:
             losses.append(F.cross_entropy(getattr(encoder.heads, name)(need_vectors), torch.tensor(expected, device=device, dtype=torch.long)))
     for name, expected in (
-        ("condition_type", [CONDITION_TYPES.index(condition.relation_type) for condition in task.conditions]),
-        ("update", [UPDATES.index(condition.update) for condition in task.conditions])):
+        ("condition_type", [CONDITION_TYPES.index(condition.relation_type) for condition in conditions]),
+        ("update", [UPDATES.index(condition.update) for condition in conditions])):
         if expected:
             losses.append(F.cross_entropy(getattr(encoder.heads, name)(condition_vectors), torch.tensor(expected, device=device)))
     operator_labels = row.get("filter_operators", {})
-    for index, condition in enumerate(task.conditions):
+    for index, condition in enumerate(conditions):
         if condition.condition_id in operator_labels:
             target = torch.tensor([FILTER_OPERATORS.index(operator_labels[condition.condition_id])], device=device)
             losses.append(F.cross_entropy(encoder.heads.filter_operator(condition_vectors[index:index+1]), target))
     for name, left, right, expected in (
-        ("subject", need_vectors, subject_vectors, [[ref in need.subject_refs for ref in subjects] for need in task.needs]),
-        ("condition", need_vectors, condition_vectors, [[condition.condition_id in need.condition_ids for condition in task.conditions] for need in task.needs]),
-        ("predecessor", need_vectors, need_vectors, [[other.need_id in need.predecessor_need_ids for other in task.needs] for need in task.needs]),
-        ("value", condition_vectors, value_vectors, [[ref in condition.value_spans for ref in values] for condition in task.conditions])):
+        ("subject", need_vectors, subject_vectors, [[ref in need.subject_refs for ref in subjects] for need in needs]),
+        ("condition", need_vectors, condition_vectors, [[condition.condition_id in need.condition_ids for condition in conditions] for need in needs]),
+        ("predecessor", need_vectors, need_vectors, [[other.need_id in need.predecessor_need_ids for other in needs] for need in needs]),
+        ("value", condition_vectors, value_vectors, [[ref in condition.value_spans for ref in values] for condition in conditions])):
         if len(left) and len(right):
             predicted = encoder.heads.edges(left, right)[:, :, EDGE_KINDS.index(name)]
             losses.append(F.binary_cross_entropy_with_logits(predicted, states.new_tensor(expected)))
@@ -150,6 +153,7 @@ def task_loss(encoder, row, prepared=None):
         if len(need_vectors):
             aligned = F.normalize(torch.cat((states[query_position:query_position+1],
                 encoder.heads.need_projection(need_vectors))), dim=-1)
+            alignment_targets = alignment_targets[[0, *(i+1 for i in need_indices)]]
             losses.append(torch.linalg.vector_norm(aligned-alignment_targets, dim=-1).mean())
             losses.append((F.pdist(aligned)-F.pdist(alignment_targets)).abs().mean())
         return torch.stack(losses).mean()
@@ -160,7 +164,7 @@ def task_loss(encoder, row, prepared=None):
     ordinary_states = encoder.model(**ordinary, use_cache=False).last_hidden_state[:, -1].float()
     predicted = encoder.heads.need_projection(need_vectors)
     adapted = F.normalize(torch.cat((states[query_position:query_position+1], predicted, ordinary_states)), dim=-1)
-    targets = [row["rewritten_query"], *row.get("need_queries", ()), row["question"]]
+    targets = [row["rewritten_query"], *(row["need_queries"][i] for i in need_indices), row["question"]]
     batch = encoder.tokenizer([instruction+text for text in targets],
                               padding=True, return_tensors="pt").to(encoder.model.device)
     with torch.no_grad(), encoder.model.disable_adapter():
@@ -314,18 +318,19 @@ def train_evidence(args):
             if (bool(row["task_state"]["needs"] and row["units"]) if args.field_only else bool(row.get("sets")))]
     training = [row for row in data if row["split"] == "train"]
     needs_encoding = args.field_only or any("features" not in row["sets"][0] for row in data)
-    query_encoder = encoder = None
-    if needs_encoding:
-        query_encoder = SharedQueryEncoder(args.query_model, args.query_asset, device=args.device, history_tokens=args.history_tokens)
-        encoder = SharedEvidenceEncoder(args.model, args.init_asset, device=args.device, train=True)
-        encoder.model.requires_grad_(False).eval()
-        heads = encoder.heads
-    else:
-        from adapters.shared_heads import EvidenceHeads
-        weights = torch.load(Path(args.init_asset)/"heads.pt", map_location="cpu", weights_only=True)
-        heads = EvidenceHeads(weights["field.weight"].shape[1], weights["query.1.weight"].shape[1]).to(args.device)
-        heads.load_state_dict(weights)
-    try:
+    with ExitStack() as resources:
+        if needs_encoding:
+            query_encoder = SharedQueryEncoder(args.query_model, args.query_asset, device=args.device, history_tokens=args.history_tokens)
+            resources.callback(query_encoder.close)
+            encoder = SharedEvidenceEncoder(args.model, args.init_asset, device=args.device, train=True)
+            resources.callback(encoder.close)
+            encoder.model.requires_grad_(False).eval()
+            heads = encoder.heads
+        else:
+            from adapters.shared_heads import EvidenceHeads
+            weights = torch.load(Path(args.init_asset)/"heads.pt", map_location="cpu", weights_only=True)
+            heads = EvidenceHeads(weights["field.weight"].shape[1], weights["query.1.weight"].shape[1]).to(args.device)
+            heads.load_state_dict(weights)
         steps, total = 0, 0.
         selection = {}
         if not args.field_only:
@@ -400,11 +405,6 @@ def train_evidence(args):
             "steps": steps, "loss": total/steps, "method": "shared_fields_generator_set_utility",
             "quality_target": "bounded_answer_gain_listwise", "phase": "fields" if args.field_only else "sets",
             **selection}, indent=2)+"\n")
-    finally:
-        if query_encoder is not None:
-            query_encoder.close()
-        if encoder is not None:
-            encoder.close()
 
 
 def train_coverage(args):

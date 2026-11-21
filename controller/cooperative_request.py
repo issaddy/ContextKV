@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import hashlib
 import json
 from urllib.parse import quote
 
@@ -67,24 +66,11 @@ def source_address(block):
         key.corpus_id, key.document_id, key.version, key.passage_id, f"{start}:{end}"))
 
 
-def history_signature(history):
-    """Compact turn-prefix fingerprint used to match append-only cached history."""
-    return tuple(
-        hashlib.sha256(f"{turn.turn_id}\0{turn.user_text or ''}\0{turn.assistant_text or ''}".encode("utf-8")).hexdigest()[:16]
-        for turn in history
-    )
-
-
 def document_headers(blocks, tokenizer, tokens=128):
     """Keep the literal document identity beside excerpts from its later pages."""
     result = []
     for block in blocks:
-        # Tokenize only a conservative prefix first to avoid scanning entire long documents.
-        limit = max(1024, tokens * 16)
-        snippet = block.text[:limit] if len(block.text) > limit else block.text
-        offsets = tokenizer(snippet, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
-        if len(offsets) < tokens and len(snippet) < len(block.text):
-            offsets = tokenizer(block.text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
+        offsets = tokenizer(block.text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
         end = offsets[min(tokens, len(offsets))-1][1] if offsets else 0
         start = block.span[0] if block.span else 0
         result.append(replace(block, text=block.text[:end], span=(start, start+end), token_ids=()))
@@ -120,37 +106,26 @@ class EvidenceCosts:
     """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
 
     def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
-                 output_tokens, policy, mode="auto", source_headers=(),
-                 blocks=None, history_sig=()):
-        self.history_sig = tuple(history_sig)
+                 output_tokens, policy, mode="auto", source_headers=(), previous_sources=()):
+        self.previous_sources = set(previous_sources)
         self.sources, self.lengths = {}, {}
         self.dependencies = {unit.unit_id: unit.dependencies for unit in units}
         self.changed_members = False
-        self.headers = tuple(dict.fromkeys(source_address(block) for block in source_headers))
+        self.headers = tuple(source_address(block) for block in source_headers)
         self.covered_headers = {}
         self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
                             for block in source_headers)
-        resolved = blocks_for_units(units, source_blocks) if blocks is None else blocks
-        fragments = {(block.key, *block.span): block for block in resolved}
-        empty_headers = frozenset()
+        fragments = {(block.key, *block.span): block
+                     for block in blocks_for_units(units, source_blocks)}
         for unit in units:
-            by_addr = {}
-            for span in unit.source_spans:
-                block = fragments[span.source_key, span.start, span.end]
-                by_addr[source_address(block)] = block
-            self.sources[unit.unit_id] = tuple(by_addr)
-            deduped = tuple(by_addr.values())
-            if source_headers:
-                missing = with_document_headers(deduped, source_headers)[:-len(deduped)]
-                self.covered_headers[unit.unit_id] = set(self.headers)-{source_address(block) for block in missing}
-            else:
-                self.covered_headers[unit.unit_id] = empty_headers
-            if len(deduped) == 1 and unit.body_tokens > 0:
-                self.lengths[next(iter(by_addr))] = unit.body_tokens
-            else:
-                for addr, block in by_addr.items():
-                    if addr not in self.lengths:
-                        self.lengths[addr] = len(tokenizer.encode(block.text, add_special_tokens=False))
+            unit_blocks = (fragments[span.source_key, span.start, span.end]
+                           for span in unit.source_spans)
+            blocks = tuple({source_address(block): block for block in unit_blocks}.values())
+            self.sources[unit.unit_id] = tuple(source_address(block) for block in blocks)
+            missing = with_document_headers(blocks, source_headers)[:-len(blocks)]
+            self.covered_headers[unit.unit_id] = set(self.headers)-{source_address(block) for block in missing}
+            self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
+                                for block in blocks)
         self.snapshot = snapshot
         self.costs = {**policy["costs"], **snapshot["costs"]}
         self.prompt_tokens = prompt_tokens-sum(self.lengths[address] for address in self.headers)
@@ -160,20 +135,9 @@ class EvidenceCosts:
         self.mode = mode
 
     def addresses(self, ids):
-        if not self.headers:
-            return tuple(dict.fromkeys(address for identity in ids for address in self.sources[identity]))
-        covered = set().union(*(self.covered_headers[identity] for identity in ids)) if ids else set()
+        covered = set().union(*(self.covered_headers[identity] for identity in ids))
         return tuple(dict.fromkeys((*(address for address in self.headers if address not in covered),
             *(address for identity in ids for address in self.sources[identity]))))
-
-    def _evidence_history_prefix(self):
-        entry = self.snapshot.get("history_prefix")
-        if not self.history_sig or not entry or entry.get("layout") != "evidence_first":
-            return None
-        sig = tuple(entry.get("signature", ()))
-        if sig and self.history_sig[:len(sig)] == sig:
-            return entry
-        return None
 
     def _native(self, addresses, tokens):
         best = exact_cost(self.costs, tokens, 0, 0, self.output_tokens)
@@ -184,43 +148,24 @@ class EvidenceCosts:
                 price = exact_cost(self.costs, tokens, prefix["gpu_tokens"], prefix["host_tokens"], self.output_tokens)
                 if price < best:
                     best, match = price, prefix
-        hist = self._evidence_history_prefix()
-        if hist is not None and addresses == tuple(hist.get("source_ids", ())):
-            price = exact_cost(self.costs, tokens, hist["gpu_tokens"], hist["host_tokens"], self.output_tokens)
-            if price < best:
-                best, match = price, hist
         return best, match
-
-    def _history_hit(self):
-        entry = self.snapshot.get("history_prefix")
-        if not self.history_sig or not entry or entry.get("layout", "history_first") != "history_first":
-            return 0, 0, {}
-        sig = tuple(entry.get("signature", ()))
-        if sig and self.history_sig[:len(sig)] == sig:
-            return entry["gpu_tokens"], entry["host_tokens"], entry.get("unpinned_nodes", {})
-        return 0, 0, {}
 
     def reusable_units(self):
         warm = {address for address, state in self.snapshot["sources"].items()
                 if state["gpu_tokens"] + state["host_tokens"] >= self.lengths.get(address, 1)}
         for prefix in self.snapshot["prefixes"]:
             warm.update(prefix["source_ids"])
-        hist = self._evidence_history_prefix()
-        if hist is not None:
-            warm.update(hist.get("source_ids", ()))
         return {identity for identity, sources in self.sources.items() if any(source in warm for source in sources)}
 
     def order(self, ids):
         ids = tuple(ids)
-        hist = self._evidence_history_prefix()
-        prefixes = (*self.snapshot["prefixes"], *((hist,) if hist is not None else ()))
-        if not prefixes:
+        if not self.snapshot["prefixes"]:
             return ids
         best = ids
         price = self.quote(ids, preserve_order=True)["milliseconds"]
         positions = {identity: i for i, identity in enumerate(ids)}
         owners = {source: identity for identity in ids for source in self.sources[identity]}
-        for prefix in prefixes:
+        for prefix in self.snapshot["prefixes"]:
             chain = [address for address in prefix["source_ids"] if address not in self.headers]
             if all(source in owners for source in chain):
                 front = tuple(dict.fromkeys(owners[source] for source in chain))
@@ -249,30 +194,21 @@ class EvidenceCosts:
         total = input_tokens + self.output_tokens
         native_new = page_tokens(max(0, total-(prefix["gpu_tokens"] if prefix else 0)), page)
         native_pins = sum(prefix["unpinned_nodes"].values()) if prefix else 0
-        exact = {"mode": "exact", "layout": "evidence_first", "milliseconds": native,
+        exact = {"mode": "exact", "milliseconds": native,
                  "new_tokens": native_new, "pin_tokens": native_pins,
                  "gpu_tokens": prefix["gpu_tokens"] if prefix else 0,
                  "host_tokens": prefix["host_tokens"] if prefix else 0}
-        if self.history_sig:
-            h_gpu, h_host, h_nodes = self._history_hit()
-            h_price = exact_cost(self.costs, input_tokens, h_gpu, h_host, self.output_tokens)
-            ev_hit = exact["gpu_tokens"] + exact["host_tokens"]
-            if h_price < exact["milliseconds"] or (h_price == exact["milliseconds"] and ev_hit == 0):
-                exact = {"mode": "exact", "layout": "history_first", "milliseconds": h_price,
-                         "new_tokens": page_tokens(max(0, total - h_gpu), page),
-                         "pin_tokens": sum(h_nodes.values()),
-                         "gpu_tokens": h_gpu, "host_tokens": h_host}
         if self.mode == "exact" or (self.mode == "auto" and not addresses):
             return exact
         costs, cold, host, gpu = self.costs, 0, 0, 0
         pins, host_nodes, cold_pages = {}, {}, 0
-        prefix_sources = set(prefix["source_ids"]) if (prefix and exact["layout"] == "evidence_first") else set()
+        prefix_sources = set(prefix["source_ids"]) if prefix else set()
         nonprefix_opportunity = False
         for address in addresses:
             resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
             length = self.lengths[address]
             ready = resident["gpu_tokens"] + resident["host_tokens"] >= length
-            if address not in prefix_sources and ready:
+            if address not in prefix_sources and (ready or address in self.previous_sources):
                 nonprefix_opportunity = True
             if ready:
                 gpu += min(length, resident["gpu_tokens"])
@@ -285,9 +221,8 @@ class EvidenceCosts:
         if self.mode != "infoflow" and not nonprefix_opportunity:
             return exact
         infoflow = infoflow_cost(costs, prompt, body, cold, sum(host_nodes.values()), self.ratio,
-                                 self.output_tokens, self.quality_cost,
-                                 active_exact_reqs=self.snapshot.get("active_exact_reqs", 0))
-        approximate = {"mode": "infoflow", "layout": "evidence_first", "milliseconds": infoflow,
+                                 self.output_tokens, self.quality_cost)
+        approximate = {"mode": "infoflow", "milliseconds": infoflow,
             "new_tokens": cold_pages+sum(host_nodes.values())+page_tokens(prompt, page)+page_tokens(prompt+self.ratio*body+self.output_tokens, page),
             "pin_tokens": sum(pins.values()), "gpu_tokens": gpu, "host_tokens": host}
         if self.mode == "infoflow":
@@ -352,9 +287,6 @@ class CompiledRequest:
     blocks: tuple[dict, ...]
     demand: tuple[dict, ...]
     query_span: tuple[int, int] = (0, 0)
-    layout: str = "evidence_first"
-    history_end: int = 0
-    history_signature: tuple[str, ...] = ()
 
 
 def with_source_demand(request, demand):
@@ -366,13 +298,13 @@ def with_source_demand(request, demand):
         prefix.add(identity)
         if identity in wanted:
             item = {key: value for key, value in wanted[identity].items() if key != 'native_prefix_end'}
-            if request.layout != "history_first" and prefix <= wanted.keys():
+            if prefix <= wanted.keys():
                 item['native_prefix_end'] = block['end']
             aligned.append(item)
     return replace(request, demand=tuple(aligned))
 
 
-def source_body(evidence, *, message_index=1):
+def source_body(evidence):
     """Render source fragments once, sharing document headings and reference IDs."""
     body, spans, segments, references = "", [], [], []
     identities, previous, previous_end = {}, None, 0
@@ -390,7 +322,7 @@ def source_body(evidence, *, message_index=1):
         body += block.text
         end = len(body)
         body += "\n\n"
-        spans.append(EvidenceSpan(block.key, message_index, start, end, block.source_uri,
+        spans.append(EvidenceSpan(block.key, 1, start, end, block.source_uri,
                                   block.provenance, reference,
                                   source_start=source_start, source_end=source_start + len(block.text)))
         segments.append((source_address(block), start, end))
@@ -399,40 +331,18 @@ def source_body(evidence, *, message_index=1):
 
 
 def compile_request(template, question, history, evidence, *, results=(),
-                    future_sources=(), instruction=None, system_prompt=SYSTEM,
-                    layout="evidence_first"):
-    hist_msgs = history_messages(history)
-    effective_layout = "history_first" if layout == "history_first" and hist_msgs else "evidence_first"
-    body, spans, segments, references = source_body(
-        evidence, message_index=1 + len(hist_msgs) if effective_layout == "history_first" else 1)
+                    future_sources=(), instruction=None, system_prompt=SYSTEM):
+    body, spans, segments, references = source_body(evidence)
     task = answer_task(question, results)
     if instruction:
         task += "\n" + instruction
-    if effective_layout == "history_first":
-        messages = (Message("system", system_prompt), *hist_msgs, Message("user", body), Message("user", task))
-    else:
-        messages = (Message("system", system_prompt), Message("user", body), *hist_msgs, Message("user", task))
+    messages = (Message("system", system_prompt), Message("user", body),
+                *history_messages(history), Message("user", task))
     rendered = template.render(messages, with_offsets=True)
-    eos = template.tokenizer.eos_token
-    question_start = rendered.text.rindex(task, 0, rendered.text.rindex(eos))
+    question_start = rendered.text.rindex(task, 0, rendered.text.rindex(template.tokenizer.eos_token))
     query_first = next(i for i, (_, end) in enumerate(rendered.offsets) if end > question_start)
     query_last = next(i for i, (start, _) in enumerate(rendered.offsets) if start >= question_start+len(question))
-    if body:
-        body_start = (rendered.text.rindex(body, 0, question_start)
-                      if effective_layout == "history_first" else rendered.text.index(body))
-    else:
-        body_start = 0
-    history_end = 0
-    if hist_msgs:
-        if effective_layout == "history_first":
-            if body:
-                marker = rendered.text.rindex(eos, 0, body_start) + len(eos)
-            else:
-                empty_eos = rendered.text.rindex(eos, 0, question_start)
-                marker = rendered.text.rindex(eos, 0, empty_eos) + len(eos)
-        else:
-            marker = rendered.text.rindex(eos, 0, question_start) + len(eos)
-        history_end = next((i for i, (start, _) in enumerate(rendered.offsets) if start >= marker), len(rendered.offsets))
+    body_start = rendered.text.index(body) if body else 0
     blocks = []
     token_cursor = 0
     for source_id, start, end in segments:
@@ -444,7 +354,7 @@ def compile_request(template, question, history, evidence, *, results=(),
             token_cursor += 1
         blocks.append({"source_id": source_id, "start": token_start, "end": token_cursor})
     demand = []
-    common_prefix = effective_layout != "history_first"
+    common_prefix = True
     for index, block in enumerate(future_sources):
         item = {"source_id": source_address(block), "uses": 1}
         common_prefix = common_prefix and index < len(evidence) and block == evidence[index]
@@ -452,6 +362,4 @@ def compile_request(template, question, history, evidence, *, results=(),
             item["native_prefix_end"] = blocks[index]["end"]
         demand.append(item)
     return CompiledRequest(rendered.input_ids, messages, tuple(evidence), tuple(spans),
-                           tuple(references), tuple(blocks), tuple(demand), (query_first, query_last),
-                           layout=effective_layout, history_end=history_end,
-                           history_signature=history_signature(history))
+                           tuple(references), tuple(blocks), tuple(demand), (query_first, query_last))

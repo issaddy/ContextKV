@@ -140,8 +140,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         from controller.cooperative_request import source_address
         planned = {}
         answer_request = service.answer_request
-        async def capture_plan(state, snapshot):
-            request = await answer_request(state, snapshot)
+        async def capture_plan(state, snapshot, complete):
+            request = await answer_request(state, snapshot, complete)
             chosen = set(state.selected_ids)
             order = [identity for identity in state.evidence.frontier(state.pool.units)[-1] if identity in chosen]
             units = {unit.unit_id: unit for unit in state.pool.units}

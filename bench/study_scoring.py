@@ -198,7 +198,9 @@ async def _run_judge_scores(config, directory, settings, *, filename, scorer, ma
         timeout_seconds=settings.get("timeout_seconds", 180)))
     target = directory/filename
     records = load_jsonl(target) if target.exists() else []
-    finished = {record["task_id"] for record in records}
+    latest = {record["task_id"]: record for record in records}
+    finished = {key for key, record in latest.items() if record["status"] == "scored"
+                or (record["status"] == "missing_prediction" and not predictions.get(key))}
     try:
         with target.open("a") as output:
             for reference in references:
@@ -207,11 +209,12 @@ async def _run_judge_scores(config, directory, settings, *, filename, scorer, ma
                 record = await asyncio.to_thread(scorer, reference,
                     predictions.get(reference["task_id"]), client)
                 records.append(record)
+                latest[record["task_id"]] = record
                 output.write(json.dumps(record, ensure_ascii=False)+"\n")
                 output.flush()
     finally:
         client.close()
-    return records, client.manifest, _cost_totals(records)
+    return list(latest.values()), client.manifest, _cost_totals(records)
 
 
 async def _loong_scores(config, directory, settings):

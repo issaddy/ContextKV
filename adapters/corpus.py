@@ -36,17 +36,12 @@ class CorpusIndex:
                  source_metadata=None):
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
-        self.blocks = tuple(self._blocks.values())
         self.source_metadata = source_metadata or {}
-        self.has_applicability = any(meta.get("applicability") for meta in self.source_metadata.values())
         self._retrieval_texts = retrieval_texts or {}
         self._source_document_ids = source_document_ids or {}
         self._passages: dict[str, list[EvidenceKey]] = {}
         for key in self._blocks:
             self._passages.setdefault(key.passage_id, []).append(key)
-
-    def __contains__(self, key: EvidenceKey) -> bool:
-        return key in self._blocks
 
     @classmethod
     def from_jsonl(cls, path: str | Path, *, corpus_id: str, snapshot_id: str) -> CorpusIndex:
@@ -128,6 +123,10 @@ class CorpusIndex:
                    retrieval_texts=retrieval_texts,
                    source_metadata=source_metadata)
 
+    @property
+    def blocks(self) -> tuple[EvidenceBlock, ...]:
+        return tuple(self._blocks.values())
+
     def document_keys(self, anchors, legal_keys):
         """Expand located passages within their original document and version."""
         documents = {(self._source_document_ids.get(key, key.document_id), key.version)
@@ -161,6 +160,22 @@ class CorpusIndex:
             raise EvidenceError("metadata must match one exact retrieved body/version: "
                                 + context.document_id)
         return matches[0]
+
+    def contextualize(self, contexts):
+        """Attach known source/title fields to a ranking pool without adding passages.
+
+        Partial or ambiguous metadata leaves candidates unannotated. Attaching a
+        source still requires one exact body/version match.
+        Generation resolves selected evidence and its dependencies separately.
+        """
+        result = []
+        for context in contexts:
+            matches = self._context_matches(context)
+            if len(matches) == 1:
+                block = self._blocks[matches[0]]
+                context = replace(context, source=block.source_uri, title=block.title)
+            result.append(context)
+        return tuple(result)
 
 
     def resolve(self, passages: Iterable[str | EvidenceKey | EvidenceBlock]) -> tuple[EvidenceBlock, ...]:
