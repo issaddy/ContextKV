@@ -237,7 +237,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     "actual_host_loaded_tokens": response.total_host_loaded_tokens}
                 cost["new_compute_kv_pages"] = response.new_compute_kv_pages
                 cost["kv_decision"] = {key: response.native[key] for key in (
-                    "mode", "route_cost_ms", "cache_changed_members")
+                    "mode", "route_cost_ms")
                     if key in response.native}
                 record.update(status="completed", answer=response.assistant_text, cost=cost,
                     sources=to_jsonable(response.visible_evidence_manifest),

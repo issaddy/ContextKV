@@ -390,3 +390,56 @@ diff --git a/python/sglang/srt/mem_cache/l2_transfer.py b/python/sglang/srt/mem_
                  )
              )
          return prepared
+diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/srt/mem_cache/unified_radix_cache.py
+--- a/python/sglang/srt/mem_cache/unified_radix_cache.py
++++ b/python/sglang/srt/mem_cache/unified_radix_cache.py
+@@ -2,6 +2,7 @@
+
+ import atexit
+ import logging
++from contextlib import nullcontext
+ import threading
+ import time
+ from array import array
+@@ -817,12 +818,18 @@
+         tracker = {ct: 0 for ct in self.tree_components}
+
+         request_by_type = self._evict_request_by_type(params)
+-        self._evict_components(
+-            request_by_type,
+-            tracker,
+-            available_size_targets=available_size_targets,
+-            allocation_reclaim_satisfied=allocation_reclaim_satisfied,
+-        )
++        runtime = getattr(self, "contextkv_runtime", None)
++        with (
++            runtime.eviction_priorities(on_gpu=True)
++            if runtime is not None and any(count > 0 for count in request_by_type.values())
++            else nullcontext()
++        ):
++            self._evict_components(
++                request_by_type,
++                tracker,
++                available_size_targets=available_size_targets,
++                allocation_reclaim_satisfied=allocation_reclaim_satisfied,
++            )
+
+         if (
+             self.cache_controller is not None
+@@ -1438,8 +1445,14 @@
+             # The tree never holds host values in buffer mode, and staging
+             # is operation-owned (freed at each ack): nothing is evictable.
+             return 0
+-        result = self.tree_core.drive_host_eviction(component_type, num_tokens)
+-        self._apply_eviction_result(result)
++        runtime = getattr(self, "contextkv_runtime", None)
++        with (
++            runtime.eviction_priorities(on_gpu=False)
++            if runtime is not None and num_tokens > 0
++            else nullcontext()
++        ):
++            result = self.tree_core.drive_host_eviction(component_type, num_tokens)
++            self._apply_eviction_result(result)
+         return result.tracker.get(component_type, 0)
+
+     # ---- Decode retraction ----

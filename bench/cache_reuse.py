@@ -25,12 +25,13 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
     template = create_model_template(run.model)
     policy = load_kv_policy(run.cooperative)
+    configured_mode = run.cooperative.get("kv_mode", "exact")
     first = min(item["arrived"] for item in trace)
     branches, answers = [], []
     priced_evidence = [None] * len(trace)
     try:
-        for layout, mode in (("ranked", "exact"), ("priced", "auto"), ("same_order", "exact"),
-                             ("no_demand", "auto")):
+        for layout, mode in (("ranked", "exact"), ("priced", configured_mode), ("same_order", "exact"),
+                             ("no_demand", configured_mode)):
             await engine.profile_prepare()
             start = time.monotonic()
             slots, sessions = asyncio.Semaphore(concurrency), {}
@@ -38,26 +39,25 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
             async def execute(index, item):
                 arrival = item["arrived"]-first
                 await asyncio.sleep(max(0., start+arrival-time.monotonic()))
-                options = {**item["options"], "mode": mode, "cache_scope": "pair:"+mode,
+                options = {**item["options"], **policy, "mode": mode, "cache_scope": "pair:"+mode,
                            "cache_namespace": "pair:"+mode}
                 session = options["session_id"]
                 lock = sessions.setdefault(session, asyncio.Lock())
                 async with lock, slots:
                     original = item["request"]
-                    revisited = {block["source_id"] for block in original.blocks if block.get("revisited")}
                     evidence = priced_evidence[index] if layout == "same_order" else item["ranked_evidence"]
-                    if mode == "auto":
+                    if layout in ("priced", "no_demand"):
                         from controller.schema import SourceSpan
                         units = tuple(EvidenceUnit(source_address(block),
                             (SourceSpan(source_address(block), block.key, *(block.span or (0,len(block.text)))),),
                             block.text, body_tokens=len(template.tokenizer.encode(block.text,add_special_tokens=False)))
                             for block in evidence)
                         snapshot = await engine.evidence_state(tuple(unit.unit_id for unit in units),
-                            cache_scope=options["cache_scope"], cache_namespace=options["cache_namespace"])
+                            cache_scope=options["cache_scope"], cache_namespace=options["cache_namespace"], mode=mode)
                         empty = compile_request(template, original.messages[-1].content, item["history"], (),
                                                 system_prompt=original.messages[0].content)
                         costs = EvidenceCosts(units, evidence, template.tokenizer, snapshot,
-                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy, previous_sources=revisited)
+                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy, mode=mode)
                         by_id = {source_address(block): block for block in evidence}
                         evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
                         if layout == "priced":
@@ -67,8 +67,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
                         system_prompt=original.messages[0].content)
                     shift = len(request.input_ids)-len(original.input_ids)
-                    request = replace(request, query_span=tuple(position+shift for position in original.query_span),
-                        blocks=tuple({**block, "revisited": block["source_id"] in revisited} for block in request.blocks))
+                    request = replace(request, query_span=tuple(position+shift for position in original.query_span))
                     if layout == "priced":
                         from controller.cooperative_request import with_source_demand
                         request = with_source_demand(request, original.demand)
@@ -98,7 +97,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 await engine.close_session(session)
     finally:
         await engine.aclose()
-    value = {"conditions": "Same evidence members, histories and arrival offsets. Each branch starts with cold KV and greedy sampling. same_order_native replays the auto branch's exact evidence order without repeating its price lookup. no_demand keeps the auto layout and lookup but submits no future-source demand.",
+    value = {"conditions": "Same evidence members, histories and arrival offsets. Each branch starts with cold KV and greedy sampling. Cache-priced execution follows configured kv_mode. same_order_native replays its evidence order without repeating the price lookup. no_demand keeps that layout, execution mode and lookup but submits no future-source demand.",
              "branches": branches[:2], "same_order_native": branches[2], "same_order_no_demand": branches[3],
              "no_demand_identical_answers": sum(a == b for a,b in zip(answers[1], answers[3])),
              "identical_answers": sum(a == b for a,b in zip(answers[0], answers[1])),
@@ -123,6 +122,7 @@ async def compare(args):
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
     policy = load_kv_policy(run.cooperative)
+    configured_mode = run.cooperative.get("kv_mode", "exact")
     row = next(row for row in map(json.loads, Path(args.data).read_text().splitlines())
                if row["task_id"] == args.task_id)
     units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
@@ -132,11 +132,13 @@ async def compare(args):
     output_tokens = 1 if args.prefill_only else config["execution"]["output_tokens"]
     results, answers = [], []
     try:
-        for label, mode, seed_mode in (
+        branches = [
             ("Native ranked context", "exact", "exact"),
-            ("ContextKV cache-priced order", "auto", "exact"),
-            ("InfoFlow non-prefix reuse", "infoflow", "infoflow"),
-        ):
+            ("ContextKV cache-priced order", configured_mode, "exact"),
+        ]
+        if configured_mode in ("auto", "infoflow"):
+            branches.append(("InfoFlow non-prefix reuse", "infoflow", "infoflow"))
+        for label, mode, seed_mode in branches:
             await engine.profile_prepare()
             namespace = "cache-pair:"+label
             seed_sources = tuple(reversed(blocks))
@@ -146,9 +148,9 @@ async def compare(args):
                 max_new_tokens=1, mode=seed_mode, cache_scope=namespace, cache_namespace=namespace, **policy)
             started = time.monotonic()
             order, estimated = original, None
-            if mode == "auto":
+            if label == "ContextKV cache-priced order":
                 snapshot = await engine.evidence_state(tuple(source_address(block) for block in blocks),
-                    cache_scope=namespace, cache_namespace=namespace)
+                    cache_scope=namespace, cache_namespace=namespace, mode=mode)
                 empty = compile_request(template, row["question"], turns, (), instruction=ANSWER_SCOPE)
                 costs = EvidenceCosts(units, blocks, template.tokenizer, snapshot,
                     prompt_tokens=len(empty.input_ids), output_tokens=output_tokens, policy=policy, mode=mode)

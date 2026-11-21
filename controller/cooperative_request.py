@@ -106,11 +106,9 @@ class EvidenceCosts:
     """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
 
     def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
-                 output_tokens, policy, mode="auto", source_headers=(), previous_sources=()):
-        self.previous_sources = set(previous_sources)
+                 output_tokens, policy, mode="exact", source_headers=()):
         self.sources, self.lengths = {}, {}
         self.dependencies = {unit.unit_id: unit.dependencies for unit in units}
-        self.changed_members = False
         self.headers = tuple(source_address(block) for block in source_headers)
         self.covered_headers = {}
         self.lengths.update((source_address(block), len(tokenizer.encode(block.text, add_special_tokens=False)))
@@ -145,13 +143,6 @@ class EvidenceCosts:
             key=lambda prefix: prefix["gpu_tokens"] + prefix["host_tokens"], default=None)
         return (exact_cost(self.costs, tokens, match["gpu_tokens"] if match else 0,
                            match["host_tokens"] if match else 0, self.output_tokens), match)
-
-    def reusable_units(self):
-        warm = {address for address, state in self.snapshot["sources"].items()
-                if state["gpu_tokens"] + state["host_tokens"] >= self.lengths.get(address, 1)}
-        for prefix in self.snapshot["prefixes"]:
-            warm.update(prefix["source_ids"])
-        return {identity for identity, sources in self.sources.items() if any(source in warm for source in sources)}
 
     def order(self, ids):
         ids = tuple(ids)
@@ -214,7 +205,7 @@ class EvidenceCosts:
             resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
             length = self.lengths[address]
             ready = resident["gpu_tokens"] + resident["host_tokens"] >= length
-            if address not in prefix_sources and (ready or address in self.previous_sources):
+            if address not in prefix_sources and ready:
                 nonprefix_opportunity = True
             if ready:
                 gpu += min(length, resident["gpu_tokens"])
@@ -257,7 +248,7 @@ def compact_computations(results):
                                  for identity, label, value, unit in fact["fields"]]
             facts.append(row)
         records.append({name: result[name] for name in (
-            "need_id", "operation", "conditions", "complete")} | {"results": facts, "sources": references}
+            "need_id", "operation", "conditions", "complete", "records_extracted")} | {"results": facts, "sources": references}
                        | {key: result[key] for key in ("target", "by_source") if key in result})
     return {"fields": [{"id": reference, "name": key[0], "label": key[1], "unit": key[2]}
                        for key, reference in fields.items()],
@@ -274,8 +265,10 @@ def answer_task(question, results):
         return question
     return question + "\nComputed results with original-source addresses:\n" + json.dumps(
         compact_computations(results), ensure_ascii=False, separators=(",", ":")) + (
-        "\nA complete computation gives the verified answer for its target over the stated sources. Use that value and unit. Source excerpts can show only part of the total. Incomplete computations contain observations. "
-        "Use established observations and explain what remains unresolved.")
+        "\nComplete means that the declared input range was processed. Calculations apply to the supplied records "
+        "and conditions. When records_extracted is true, records were selected from prose by the model; "
+        "use the source evidence to interpret the result and any missing qualifications. "
+        "Incomplete computations contain observations.")
 
 
 @dataclass(frozen=True)

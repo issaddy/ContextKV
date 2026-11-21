@@ -15,6 +15,8 @@ from .cooperative_request import SYSTEM
 
 
 def load_kv_policy(settings):
+    if settings.get("kv_mode", "exact") == "exact":
+        return {"costs": {}, "recompute_ratio": 0.0}
     asset = json.loads(Path(settings["kv_quality_asset"]).read_text())
     return {"recompute_ratio": asset["recompute_ratio"], "quality_loss": asset["quality_loss"],
             "costs": asset["costs"],

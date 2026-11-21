@@ -5,17 +5,17 @@
 | 环节 | 当前实现 | 入口 |
 |---|---|---|
 | 查询与会话 | Qwen3-Embedding-0.6B、RCEM 表示对齐、共享任务头、范围优先混合召回 | `adapters/shared_encoding.py`、`adapters/shared_retrieval.py` |
-| 证据选择 | Jina-reranker-v3.5 共享编码、字段绑定与集合效用头 | `adapters/shared_encoding.py`、`adapters/shared_heads.py` |
+| 证据选择 | Jina-reranker-v3.5 共享编码、软来源支持与语义优先选材 | `adapters/shared_encoding.py`、`adapters/shared_heads.py` |
 | 文档计算 | 原文单元格/跨度、投影/筛选/连接/聚合、版本成对证据 | `adapters/document_compute.py`、`adapters/version_structure.py` |
-| 计算决策 | 多步继续/停止价值学习、完整总体结束条件 | `controller/value_policy.py`、`controller/cooperative.py` |
-| KV 执行 | SGLang 内部精确前缀与 InfoFlow 块复用、GPU/Host 需求调度 | `engine_patches/` |
+| 执行选择 | 先复用结果；纯表绑定计算，其余按完整原文或必要读取执行 | `controller/cooperative.py` |
+| KV 执行 | SGLang Native 精确前缀、真实容量与后续消费者需求 | `engine_patches/` |
 | 评测 | 普通文档问答、ContextKV、LlamaIndex；各 benchmark 独立评分 | `bench/study.py` |
 
-执行链：共享查询编码 → 合法范围召回 → 共享证据编码与选材 → 必要结构计算 → 一次请求编译与 SGLang 执行 → 提交回答及可复用计算。
+执行链：解析问题与范围 → 复用适用结果 → 必要证据与计算 → 编译来源与后续需求 → Native 执行 → 提交回答。纯表先绑定计算，其余固定总体全文可直接回答时跳过证据编码。
 
 训练顺序、模型目录与运行命令见[运行手册](docs/study/final_runbook.md)。机制和复用边界见[架构](docs/architecture.md)、[方法依据](docs/references.md)，GPU 部署见[部署](docs/deployment.md)。
 
-本版联合覆盖与下一批成本特征需要按运行手册重新采集监督并训练辅助头。[已有实验结果](docs/study/results.md)分别报告对应版本的质量、响应时间、资源占用及缓存配对。
+默认使用现有查询、字段与集合资产，训练保持暂停。InfoFlow 保留为显式实验路径。[已有实验结果](docs/study/results.md)对应各自代码和配置，本版清理尚未验证端到端质量或 P95 收益。
 
 ```bash
 python3 -m bench.study evaluate --split test --limit-turns 20 --concurrency 4

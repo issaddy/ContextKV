@@ -24,18 +24,22 @@ def run(args, cwd, *, check=True):
 def prepare(checkout: Path, source_only: bool):
     checkout.mkdir(parents=True, exist_ok=True)
     commit = MANIFEST['commit']
-    applied = run(['git', 'apply', '--reverse', '--check', str(PATCH)], checkout, check=False).returncode == 0
-    if not applied:
-        if source_only:
-            def fetch(rel):
-                target = checkout / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(urllib.request.urlopen(
-                    f'https://raw.githubusercontent.com/sgl-project/sglang/{commit}/{rel}', timeout=60).read())
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(fetch, MANIFEST['changed_files']))
-        run(['git', 'apply', '--check', str(PATCH)], checkout)
-        run(['git', 'apply', str(PATCH)], checkout)
+    pending = [rel for rel in MANIFEST['changed_files'] if run(
+        ['git', 'apply', '--reverse', '--check', '--include='+rel, str(PATCH)],
+        checkout, check=False).returncode != 0]
+    if source_only:
+        def fetch(rel):
+            target = checkout / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(urllib.request.urlopen(
+                f'https://raw.githubusercontent.com/sgl-project/sglang/{commit}/{rel}', timeout=60).read())
+        missing = [rel for rel in pending if not (checkout / rel).exists()]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(fetch, missing))
+    for rel in pending:
+        run(['git', 'apply', '--check', '--include='+rel, str(PATCH)], checkout)
+    for rel in pending:
+        run(['git', 'apply', '--include='+rel, str(PATCH)], checkout)
     for module in MANIFEST['modules']:
         source = ROOT / 'engine_patches' / module
         shutil.copyfile(source, checkout / 'python/sglang/srt/managers' / module)

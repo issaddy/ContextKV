@@ -45,13 +45,12 @@ class SharedEvidenceState:
     document_index: DocumentIndex
     programs: tuple = ()
     reused_claims: tuple = ()
-    pending_units: tuple = ()
     body_tokens: int = 0
-    evidence_batch: int = 24
     population_units: tuple = ()
     source_headers: tuple = ()
     version_catalogue: dict = field(default_factory=dict)
     costs: object = None
+    compiled_answer: object = None
     computations: tuple = ()
     table_parts: tuple = ()
     table_read: bool = False
@@ -65,11 +64,11 @@ class SharedEvidenceState:
     cache_scope: str = "shared"
     cache_namespace: str | None = None
     session_id: str | None = None
-    retained_sources: dict = field(default_factory=dict)
 
     @property
     def completed_needs(self):
-        return {record["need_id"] for record in self.computations if record["complete"]}
+        return {record["need_id"] for record in self.computations
+                if record["complete"] and record.get("records_extracted") is False}
 
     @property
     def needs_complete(self):
@@ -79,16 +78,8 @@ class SharedEvidenceState:
 
     @property
     def open_needs(self):
-        if self.needs_complete:
-            return ()
-        needs = self.query.task.needs
         completed = self.completed_needs
-        coverage = self.evidence.coverage(self.selected_ids, self.pool.units,
-            tuple(need.need_id for need in needs), completed)
-        supported = {need.need_id for need, value in zip(needs, coverage) if float(value) > 0}
-        return tuple(need for need in self.query.task.needs if need.need_id not in completed
-                     and (need.operation in {"count", "sum", "mean", "min", "max", "group"}
-                          or need.need_id not in supported))
+        return tuple(need for need in self.query.task.needs if need.need_id not in completed)
 
 
 class SharedEvidenceProvider:
@@ -117,7 +108,7 @@ class SharedEvidenceProvider:
     @property
     def manifest(self):
         return {"query": self.query_encoder.manifest, "evidence": self.evidence_encoder.manifest,
-                "retrieval": "scope_first_bm25_dense_rrf", "selection": "learned_utility_and_source_coverage",
+                "retrieval": "scope_first_bm25_dense_rrf", "selection": "semantic_utility_with_source_dependencies",
                 "corpus_snapshot_id": self.corpus_snapshot_id}
 
     async def retrieve(self, snapshot, query, request_id, *, facts=()):
@@ -221,7 +212,7 @@ class SharedEvidenceProvider:
             blocks = corpus.resolve(legal)
             if facts and not candidate_view:
                 state = SharedEvidenceState(query, None, EvidencePool((), blocks), (), DocumentIndex((), blocks),
-                    body_tokens=available, evidence_batch=self.evidence_batch)
+                    body_tokens=available)
                 fixed_claims = self._reuse_computations(state, facts)
                 state.reused_claims = state.computations = fixed_claims
                 if state.needs_complete:
@@ -296,6 +287,12 @@ class SharedEvidenceProvider:
             query.task = replace(query.task, effective_source_scope=tuple(block.key for block in pool.source_blocks))
         units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in units)
         by_id = {unit.unit_id: unit for unit in units}
+        if full and not candidate_view:
+            state = SharedEvidenceState(query, None, replace(pool, units=units), (), document_index,
+                body_tokens=available,
+                population_units=tuple(by_id[unit.unit_id] for unit in population_units),
+                reused_claims=fixed_claims, computations=fixed_claims)
+            return finish(state)
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
         initial_ids.update(historical_ids)
         pending_dependencies = list(initial_ids)
@@ -305,8 +302,8 @@ class SharedEvidenceProvider:
                     initial_ids.add(identity)
                     pending_dependencies.append(identity)
         initial = tuple(unit for unit in units if unit.unit_id in initial_ids)
-        pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
         if candidate_view:
+            pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
             return query, initial if candidate_view == "initial" else (*initial, *pending)
         evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
@@ -318,39 +315,19 @@ class SharedEvidenceProvider:
             anchors = tuple(span.source_key for identity in selected for span in by_id[identity].source_spans)
             population_keys = corpus.document_keys(anchors, legal)
             pool = replace(directory.full_scope(population_keys), scope_id="located_documents")
-            population_units = pool.units
             document_index = DocumentIndex.from_blocks(pool.source_blocks)
-            population_keys = {block.key for block in pool.source_blocks}
-            positions = [index for index, unit in enumerate(initial)
-                         if all(span.source_key in population_keys for span in unit.source_spans)]
-            retained = tuple(initial[index] for index in positions)
-            binding_units = document_index.binding_units()
-            outside = document_index.outside_tables(pool.units)
-            aliases = {}
-            for unit in (*binding_units, *outside):
-                original = next((prior for prior in retained if all(any(
-                    old.source_key == span.source_key and old.start <= span.start and span.end <= old.end
-                    for old in prior.source_spans) for span in unit.source_spans)), None)
-                aliases[unit.unit_id] = original.unit_id if original is not None else unit.unit_id
-            fresh = tuple(replace(unit,
-                dependencies=tuple(dict.fromkeys(aliases[dependency] for dependency in unit.dependencies)))
-                for unit in (*binding_units, *outside) if aliases[unit.unit_id] == unit.unit_id)
-            fresh = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in fresh)
-            evidence = replace(evidence, unit_ids=tuple(unit.unit_id for unit in retained),
-                embeddings=evidence.embeddings[positions], relevance=evidence.relevance[positions],
-                bindings=tuple(binding for binding in evidence.bindings
-                               if binding.source_span.source_key in population_keys))
-            if fresh:
-                extra = self.evidence_encoder.encode(query, fresh)
-                usage["input_tokens"] += extra.usage["input_tokens"]
-                evidence = evidence.merge(extra)
-            initial, pending = (*retained, *fresh), ()
-            selected = ()
+            population_units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text)))
+                                     for unit in pool.units)
             query.task = replace(query.task,
                 effective_source_scope=tuple(block.key for block in pool.source_blocks))
+            query.source_titles = tuple(block.title for block in pool.source_blocks)
+            state = SharedEvidenceState(query, None, replace(pool, units=population_units), (), document_index,
+                body_tokens=available, population_units=population_units)
+            state.reused_claims = self._reuse_computations(state, facts)
+            state.computations = state.reused_claims
+            return finish(state)
         state = SharedEvidenceState(query, evidence, replace(pool, units=tuple(initial)), selected,
-            document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units,
-            evidence_batch=self.evidence_batch)
+            document_index, body_tokens=available, population_units=population_units)
         self._finish_state(state)
         state.reused_claims = fixed_claims if full else self._reuse_computations(state, facts)
         state.computations = state.reused_claims
@@ -369,13 +346,17 @@ class SharedEvidenceProvider:
 
     @staticmethod
     def _closure(roots, by_id):
-        found, pending = {}, list(roots)
-        while pending:
-            unit = pending.pop(0)
-            if unit.unit_id not in found:
-                found[unit.unit_id] = unit
-                pending.extend(by_id[identity] for identity in unit.dependencies)
-        return tuple(found.values())
+        found, seen = [], set()
+        def add(unit):
+            if unit.unit_id in seen:
+                return
+            seen.add(unit.unit_id)
+            for identity in unit.dependencies:
+                add(by_id[identity])
+            found.append(unit)
+        for unit in roots:
+            add(unit)
+        return tuple(found)
 
     @staticmethod
     def _reuse_computations(state, history):
@@ -385,7 +366,7 @@ class SharedEvidenceProvider:
         reused = []
         for past in history:
             for computation in past["computations"]:
-                if not computation["complete"]:
+                if not computation["complete"] or computation.get("records_extracted") is not False:
                     continue
                 sources = tuple(decode(SourceSpan, source) for source in computation["sources"])
                 if any(source.source_key not in legal for source in sources):
@@ -416,27 +397,37 @@ class SharedEvidenceProvider:
                 return True
         return not query.task.needs
 
+    async def bind_tables(self, state):
+        """Bind only headers and sample rows before a required table computation."""
+        def bind():
+            from adapters.document_compute import build_programs
+            units = state.document_index.binding_units()
+            if not units:
+                return {"input_tokens": 0, "compute_ms": 0.0, "calls": 0}
+            evidence = self.evidence_encoder.encode(state.query, units)
+            state.programs = build_programs(state.query, evidence, state.document_index)
+            return evidence.usage
+        started = time.perf_counter()
+        usage = await run_retrieval_worker(bind)
+        return {**usage, "compute_ms": (time.perf_counter()-started)*1000}
+
+    async def encode_evidence(self, state, units=None):
+        """Encode original spans only when the chosen execution needs selection."""
+        def encode():
+            chosen = state.pool.units if units is None else self._closure(
+                units, {unit.unit_id: unit for unit in state.pool.units})
+            state.evidence = self.evidence_encoder.encode(state.query, chosen)
+            state.pool = replace(state.pool, units=tuple(chosen))
+            state.selected_ids, state.costs = (), None
+            return state.evidence.usage
+        started = time.perf_counter()
+        usage = await run_retrieval_worker(encode)
+        return {**usage, "compute_ms": (time.perf_counter()-started)*1000}
+
     @staticmethod
     def _finish_state(state):
         from adapters.document_compute import build_programs
         state.programs = build_programs(state.query, state.evidence, state.document_index)
-
-    async def expand(self, state):
-        return await run_retrieval_worker(self._expand_state, state)
-
-    def _expand_state(self, state):
-        existing = set(state.evidence.unit_ids)
-        all_units = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
-        fresh = tuple(unit for unit in self._closure(state.pending_units[:self.evidence_batch], all_units)
-                      if unit.unit_id not in existing)
-        new = self.evidence_encoder.encode(state.query, fresh)
-        evidence = state.evidence.merge(new)
-        units = (*state.pool.units, *fresh)
-        fresh_ids = {unit.unit_id for unit in fresh}
-        result = replace(state, evidence=evidence, pool=replace(state.pool, units=units), selected_ids=(), costs=None,
-                         pending_units=tuple(unit for unit in state.pending_units if unit.unit_id not in fresh_ids))
-        self._finish_state(result)
-        return result
 
     def close(self):
         self.query_encoder.close()

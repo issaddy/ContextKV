@@ -33,7 +33,6 @@ claims and global relationships can require full coverage without numeric arithm
 evidence does not itself require full coverage. Each Need's scope applies the same distinction to that result.
 Split independent requested results into separate Needs. query is a standalone search query for that Need.
 Give each Need one concise contiguous anchor reference; keep subjects and conditions in their own references.
-For a Need about multiple entities, give each entity its own subject reference.
 Every Need anchor must belong to current_message_id; history supplies subject, condition and history_refs.
 join means matching records across separate tables; distinct means counting or aggregating unique entities.
 conditions: [{condition_id,anchor_ref,value_refs,relation_type,update,filter_operator}].
@@ -54,10 +53,6 @@ The two zero-based boundary indices select an inclusive span, in either order.
 role: source/measure/entity/period/group/filter/unit/version.
 source marks a passage span that supports a Need. The other roles mark original column names, field names,
 entity identifiers, periods, units and constraints required to compute the requested result.
-For lookup and comparison Needs, also label the entity, period and filter bindings needed to qualify their supporting evidence.
-Label each requested entity identifier separately, together with the source evidence supporting that entity's answer.
-For each entity, source must be the smallest span containing its identifier and the facts answering this Need.
-Exclude unrelated mentions and navigation references from that source span; explicit entity headers may qualify dependent rows.
 Use condition_id to link filter/period columns to a declared query condition.
 relation_group identifies matching join keys across tables; leave it empty for non-join fields.
 Reuse the relation_group in known_join_keys when the same semantic join field occurs in another source batch.

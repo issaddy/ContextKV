@@ -58,6 +58,7 @@ class DocumentTable:
     source: SourceSpan
     caption: str = ""
     coverage: tuple[SourceSpan, ...] = ()
+    records_extracted: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,7 @@ class DocumentResult:
     covered_tables: tuple[str, ...]
     source_spans: tuple[SourceSpan, ...]
     complete: bool
+    records_extracted: bool = False
 
 
 @dataclass(frozen=True)
@@ -364,7 +366,7 @@ class DocumentIndex:
         return records
 
     def execute(self, program):
-        """Aggregate the complete bound population, retaining source lineage."""
+        """Compute over the declared records; completion describes input coverage."""
         records = self.records(program)
         used = (0, *(join.right_index for join in program.joins)) if program.joins else range(len(program.projections))
         covered = tuple(dict.fromkeys(program.projections[index].table_id for index in used))
@@ -372,6 +374,8 @@ class DocumentIndex:
             for span in (self.tables[table_id].coverage or (self.tables[table_id].source,)))
         complete = (set(program.population_table_ids) <= set(covered) | set(program.excluded_table_ids)
                     and not program.unresolved_conditions)
+        records_extracted = any(self.tables[identity].records_extracted
+                                for identity in (*covered, *program.excluded_table_ids))
         claims = []
         for index, record in enumerate(records):
             entity = " / ".join(_record_key(record, program.entity_fields)) if program.entity_fields else str(index)
@@ -388,7 +392,7 @@ class DocumentIndex:
                 qualifiers=tuple(dict.fromkeys(text for cell in record.fields.values()
                                                for text in cell.qualifier_texts))))
         if program.operation == "lookup" or not complete:
-            return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete)
+            return DocumentResult(tuple(claims), tuple(claims), covered, scope, complete, records_extracted)
         groups = {}
         for index, record in enumerate(records):
             groups.setdefault(_record_key(record, program.group_by), []).append(index)
@@ -428,7 +432,7 @@ class DocumentIndex:
                 parent_claim_ids=parents, entity=" / ".join(group), relation=" / ".join(labels) or program.value_field,
                 qualifiers=tuple(dict.fromkeys(text for record in selected for cell in record.fields.values()
                                                for text in cell.qualifier_texts))))
-        return DocumentResult(tuple(claims), tuple(conclusions), covered, scope, complete)
+        return DocumentResult(tuple(claims), tuple(conclusions), covered, scope, complete, records_extracted)
 
 
 def _binding_columns(table, binding):
@@ -643,8 +647,7 @@ def semantic_binding_schema(index, need_ids, operations=None):
             "predicates": array(local_predicate)}))
     projection = {"oneOf": projections}
     programs = {identity: obj({
-        "operation": ({"const": operations[identity]} if operations and identity in operations else
-                      {"enum": list(_PROGRAM_OPERATIONS)}),
+        **({} if operations and identity in operations else {"operation": {"enum": list(_PROGRAM_OPERATIONS)}}),
         "projections": array(projection), "value_field": string, "entity_fields": array(string),
         "predicates": array(predicate), "joins": array(obj({
             "right_index": {"type": "integer", "minimum": 1},
@@ -654,7 +657,7 @@ def semantic_binding_schema(index, need_ids, operations=None):
     return obj({"programs": obj(programs)})
 
 
-def decode_programs(text, query, index):
+def decode_programs(text, query, index, operations=None):
     needs = {need.need_id: need for need in query.task.needs}
     result = []
     fragments = {f"S{i+1}": unit for i, unit in enumerate(index.binding_units())}
@@ -677,7 +680,8 @@ def decode_programs(text, query, index):
         need = needs[identity]
         projections = tuple(projection_binding(projection) for projection in item["projections"])
         population = tuple(index.tables)
-        result.append(DocumentProgram(need.need_id, projections, population, item["operation"],
+        operation = operations[identity] if operations and identity in operations else item["operation"]
+        result.append(DocumentProgram(need.need_id, projections, population, operation,
             item["value_field"], tuple(item["entity_fields"]),
             tuple(Predicate(**predicate) for predicate in item["predicates"]),
             tuple(Join(join["right_index"], tuple(join["left_fields"]), tuple(join["right_fields"]))
@@ -689,6 +693,7 @@ def decode_programs(text, query, index):
 
 def semantic_binding(query, index, need_ids, *, operations=None):
     """Bind a document program from schema and examples, without reading all rows."""
+    operations = dict(operations or {})
     units = index.binding_units()
     blocks = _word_blocks(units)
     table_ids = {identity: f"T{i+1}" for i, identity in enumerate(index.tables)}
@@ -698,7 +703,7 @@ def semantic_binding(query, index, need_ids, *, operations=None):
     instruction = ("Bind the requested fields and conditions to the supplied table schemas. "
         "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
         "incorrect; resolve their intended meaning from the original question rather than imposing their text. "
-        "Choose the operation actually requested by the full question. "
+        "Choose the operation requested by the full question only for Needs without an accepted operation. "
         "Use lookup to return fields for semantic classification rather than forcing an arithmetic aggregate. "
         "Samples illustrate columns; the CPU will execute over every row of each selected table. "
         "Return projections and typed filters, explicit equality joins, and requested entity deduplication. "
@@ -711,11 +716,11 @@ def semantic_binding(query, index, need_ids, *, operations=None):
         "For transposed tables select the period column and filter the requested metric row. "
         "Put explicitly unrelated tables in excluded_table_ids; leave undecided tables unprojected and unexcluded. "
         "Keep conditions that cannot be bound in unresolved_conditions. Do not calculate totals.\n"
-        + json.dumps({"task": _query_description(query, need_ids), "tables": catalogue,
+        + json.dumps({"task": _query_description(query, need_ids), "accepted_operations": operations, "tables": catalogue,
                          "sources": [{"unit_id": f"S{i+1}", "table_id": table_ids[unit.table_id]} for i, unit in enumerate(units)]},
                      ensure_ascii=False, separators=(",", ":")))
     return SemanticBinding(blocks, instruction, semantic_binding_schema(index, need_ids, operations),
-                           lambda text: decode_programs(text, query, index))
+                           lambda text: decode_programs(text, query, index, operations))
 
 
 @dataclass(frozen=True)
@@ -736,17 +741,19 @@ def semantic_projection_schema(units, need_ids, operations=None):
     entity = {"oneOf": [address, {"type": "array", "prefixItems": [{"enum": unit_ids}],
                                  "minItems": 1, "items": False}]}
     optional_address = {"anyOf": [address, {"type": "null"}]}
-    return obj({"operations": obj({identity: ({"const": operations[identity]} if operations and identity in operations else
-                                  {"enum": list(_PROGRAM_OPERATIONS)})
-                                  for identity in need_ids}),
+    unresolved = [identity for identity in need_ids if not operations or identity not in operations]
+    return obj({**({"operations": obj({identity: {"enum": list(_PROGRAM_OPERATIONS)}
+                                       for identity in unresolved})} if unresolved else {}),
         "unresolved_need_ids": array({"enum": list(need_ids)}),
         "records": array(obj({"need_ids": array({"enum": list(need_ids)}), "entity": entity,
             "measure": optional_address, "unit": optional_address,
             "group": array(address), "qualifiers": array(address)}))})
 
 
-def decode_projection(text, query, units, need_ids, population_unit_ids):
+def decode_projection(text, query, units, need_ids, population_unit_ids, operations=None):
     data = json.loads(text)
+    operations = {identity: operations[identity] if operations and identity in operations
+                  else data["operations"][identity] for identity in need_ids}
     units_by_id = {f"S{index+1}": unit for index, unit in enumerate(units)}
 
     def source(address):
@@ -757,7 +764,7 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
     needs = {need.need_id: need for need in query.task.needs}
     for need_id in need_ids:
         need = needs[need_id]
-        operation = data["operations"][need_id]
+        operation = operations[need_id]
         records = [record for record in data["records"] if need_id in record["need_ids"]]
         group_count = max((len(record["group"]) for record in records), default=0)
         headers = ("entity", "measure", *(f"group:{i}" for i in range(group_count)))
@@ -785,7 +792,8 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
         for identity, rows in grouped.items():
             origin = units_by_id[identity].source_spans[0]
             table_id = f"projection:{need_id}:{units_by_id[identity].unit_id}"
-            tables.append(DocumentTable(table_id, headers, tuple(None for _ in headers), tuple(rows), origin))
+            tables.append(DocumentTable(table_id, headers, tuple(None for _ in headers), tuple(rows), origin,
+                                        records_extracted=True))
             projections.append(Projection(table_id, tuple(Field(name, column) for column, name in enumerate(headers))))
         programs.append(DocumentProgram(need_id, tuple(projections),
             tuple(f"projection:{need_id}:{identity}" for identity in population_unit_ids),
@@ -797,12 +805,13 @@ def decode_projection(text, query, units, need_ids, population_unit_ids):
             unresolved_conditions=(need_id,) if need_id in data["unresolved_need_ids"] else ()))
     blocks = tuple(EvidenceBlock(unit.source_spans[0].source_key, "", unit.heading, unit.text,
         span=(unit.source_spans[0].start, unit.source_spans[0].end)) for unit in units)
-    return SemanticProjection(DocumentIndex(tables, blocks), tuple(programs), data["operations"])
+    return SemanticProjection(DocumentIndex(tables, blocks), tuple(programs), operations)
 
 
 def semantic_projection(query, units, need_ids, *, population_unit_ids=None, operations=None):
     """Read only requested fields and eligibility once; use CPU aggregation afterwards."""
     units, need_ids = tuple(units), tuple(need_ids)
+    operations = dict(operations or {})
     population = tuple(population_unit_ids) if population_unit_ids is not None else tuple(unit.unit_id for unit in units)
     blocks = _word_blocks(units)
     instruction = ("Project only the requested document fields. For each qualifying record, return its entity, "
@@ -811,7 +820,7 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         "The CPU resolves the original text and character spans. "
         "The original question is authoritative. Auxiliary Need and condition fragments can be incomplete or "
         "incorrect; resolve their intended meaning from the original question. An incomplete auxiliary fragment "
-        "is not unresolved source information. Choose the operation requested by the full question; use lookup to "
+        "is not unresolved source information. Choose an operation only for Needs without an accepted operation; use lookup to "
         "return fields for classification or semantic comparison instead of forcing an arithmetic aggregate. "
         "When the requested entity is the document itself, use [source_id]; its identifier is shown "
         "below and the CPU binds that document identity. Otherwise use original word indices for the entity. "
@@ -822,13 +831,13 @@ def semantic_projection(query, units, need_ids, *, population_unit_ids=None, ope
         "Examine each source completely. No matching field in a window is an empty projection; other windows "
         "can supply it. Follow the question's missing-data policy. Report unresolved Need IDs for ambiguous "
         "existing values or applicability, not merely because one window contains no matching field.\n"
-        + json.dumps({"task": _query_description(query, need_ids),
+        + json.dumps({"task": _query_description(query, need_ids), "accepted_operations": operations,
             "sources": [{"unit_id": f"S{index+1}", "title": unit.heading,
                          "document": unit.source_spans[0].source_key.document_id}
                         for index, unit in enumerate(units)]}, ensure_ascii=False, separators=(",", ":")))
     return SemanticBinding(blocks, instruction,
         semantic_projection_schema(units, need_ids, operations),
-        lambda text: decode_projection(text, query, units, need_ids, population))
+        lambda text: decode_projection(text, query, units, need_ids, population, operations))
 
 
 def population_relations(index, programs):
@@ -867,7 +876,7 @@ def merge_bound_population(reads, index, programs):
             unresolved[program.need_id].update(program.unresolved_conditions)
     for identity, (rows, coverage) in additions.items():
         table = tables[identity]
-        tables[identity] = replace(table, rows=(*table.rows, *rows),
+        tables[identity] = replace(table, rows=(*table.rows, *rows), records_extracted=True,
             coverage=_unique_spans((*(table.coverage or (table.source,)), *coverage)))
     combined = DocumentIndex(tables.values(), index.blocks)
     return [(combined, replace(program, unresolved_conditions=tuple(sorted(unresolved[program.need_id]))))
@@ -1024,13 +1033,14 @@ def literal_population_projection(query, units, source_blocks, need_ids, populat
         unresolved.update(set(need_ids) - assigned - set(data["empty"]))
         if relations:
             coverage = tuple(span for unit in primary for span in unit.source_spans)
-            tables = [replace(item["table"], rows=tuple(table_rows[identity]), coverage=coverage)
+            tables = [replace(item["table"], rows=tuple(table_rows[identity]), coverage=coverage,
+                              records_extracted=True)
                       for identity, item in relations.items()]
             programs = tuple(DocumentProgram(need, (), (), operation=operations[need],
                 unresolved_conditions=(need,) if need in unresolved else ()) for need in need_ids)
             return SemanticProjection(DocumentIndex(tables, blocks), programs, operations)
-        payload = {"operations": operations, "unresolved_need_ids": sorted(unresolved), "records": rows}
-        projection = decode_projection(json.dumps(payload), query, units, need_ids, population_ids)
+        payload = {"unresolved_need_ids": sorted(unresolved), "records": rows}
+        projection = decode_projection(json.dumps(payload), query, units, need_ids, population_ids, operations)
         # A dependency can be visible before its own rows have actually been read.
         programs = tuple(replace(p, projections=tuple(item for item, unit in zip(p.projections, units)
             if unit.unit_id in primary_ids)) for p in projection.programs)
@@ -1092,7 +1102,8 @@ def combine_populations(parts):
             for span in (index.tables[identity].coverage or (index.tables[identity].source,)))
         identity = f"population:{program.need_id}:{part_index}"
         if scope:
-            tables.append(DocumentTable(identity, names, tuple(None for _ in names), tuple(rows), scope[0], coverage=scope))
+            tables.append(DocumentTable(identity, names, tuple(None for _ in names), tuple(rows), scope[0],
+                coverage=scope, records_extracted=any(index.tables[key].records_extracted for key in processed)))
         entry = grouped.setdefault(program.need_id, {"source": program, "projections": [], "population": [],
                                                     "unresolved": set()})
         if scope:

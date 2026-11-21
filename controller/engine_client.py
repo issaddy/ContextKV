@@ -19,6 +19,7 @@ class EngineInfo:
     page_size: int
     gpu_capacity_tokens: int
     host_capacity_tokens: int
+    max_input_tokens: int
 
 
 class SGLangEngineClient:
@@ -54,12 +55,12 @@ class SGLangEngineClient:
     async def close_session(self, session_id):
         return await self._post("/context/session/close", {"session_id": session_id})
 
-    async def evidence_state(self, source_ids, *, cache_scope="shared", cache_namespace=None):
+    async def evidence_state(self, source_ids, *, cache_scope="shared", cache_namespace=None, mode="exact"):
         return await self._post("/context/evidence/state", {"source_ids": list(source_ids),
-            "cache_scope": cache_scope, "cache_namespace": cache_namespace})
+            "cache_scope": cache_scope, "cache_namespace": cache_namespace, "mode": mode})
 
     async def compute(self, request, *, session_id, request_id, max_new_tokens,
-                      mode="auto", recompute_ratio=0.15, quality_loss=0.0,
+                      mode="exact", recompute_ratio=0.15, quality_loss=0.0,
                       quality_price_ms=0.0, response_schema=None, cache_namespace=None,
                       cache_scope="shared", costs=None):
         """One native submission carries the chosen input and future source demand."""

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import copy
 from array import array
+from contextlib import contextmanager
 import math
 import time
 
@@ -19,6 +20,7 @@ class ComputeRuntime:
     def __init__(self, scheduler):
         self.scheduler = scheduler
         self.cache = scheduler.tree_cache
+        self.cache.contextkv_runtime = self
         self.allocator = scheduler.token_to_kv_pool_allocator
         self.pool = self.allocator.get_kvcache()
         self.costs = {}
@@ -26,7 +28,6 @@ class ComputeRuntime:
         self.demands = {}
         self.source_nodes = {}
         self.source_prefixes = {}
-        self.prioritized_nodes = set()
         self.gpu_token_seconds = self.host_token_seconds = 0.0
         self.observed_at = time.monotonic()
         self.pool_used = self._pool_used()
@@ -58,7 +59,8 @@ class ComputeRuntime:
             sources, prefixes = {}, []
             for address in wanted:
                 source_id = scope, address
-                sources[address] = self._source_state(source_id, 'infoflow')
+                if data.get('mode', 'exact') != 'exact':
+                    sources[address] = self._source_state(source_id, 'infoflow')
                 prefix = self.source_prefixes.get(source_id)
                 if prefix is not None and prefix['namespace'] == data.get('cache_namespace') and set(prefix['sources']) <= wanted:
                     resident = self._source_state(source_id, 'exact')
@@ -74,13 +76,13 @@ class ComputeRuntime:
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':
             self.demands.pop(data['session_id'], None)
-            self._refresh_priorities()
             return {'closed': True}
         if action == 'info':
             host = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
             return dict(protocol_version='contextkv-compute-v2', engine_kind='sglang',
                 model_path=self.scheduler.server_args.model_path, page_size=self.cache.page_size,
-                gpu_capacity_tokens=self.allocator.size, host_capacity_tokens=host.size if host else 0)
+                gpu_capacity_tokens=self.allocator.size, host_capacity_tokens=host.size if host else 0,
+                max_input_tokens=self.scheduler.max_req_input_len)
         if action == 'profile_prepare':
             flushed = self.scheduler.flush_cache()
             if flushed:
@@ -88,7 +90,6 @@ class ComputeRuntime:
                 self.demands.clear()
                 self.source_nodes.clear()
                 self.source_prefixes.clear()
-                self.prioritized_nodes.clear()
                 self.gpu_token_seconds = self.host_token_seconds = 0.0
                 self.observed_at, self.pool_used = time.monotonic(), self._pool_used()
                 self.gpu_peak_used_tokens = self.pool_used[0]
@@ -142,21 +143,26 @@ class ComputeRuntime:
         scope = metadata.get('cache_scope', 'shared')
         self.costs = {**metadata.get('costs', {}), **self.costs}
         ratio = float(metadata.get('recompute_ratio', .15))
+        mode = metadata.get('mode', 'exact')
         request_demand = {(scope, item['source_id']): {**item, 'recompute_ratio': ratio}
-                          for item in metadata.get('demand', ())}
+                          for item in metadata.get('demand', ())
+                          if mode != 'exact' or 'native_prefix_end' in item}
         prefix = []
         for block in metadata.get('blocks', ()):
             prefix.append(block['source_id'])
             item = request_demand.get((scope, block['source_id']))
             if item is not None and 'native_prefix_end' in item:
                 item['native_prefix'] = req.cache_salt, tuple(prefix)
-        self.demands[session] = request_demand if metadata.get('mode') != 'exact' else {}
+        if request_demand:
+            self.demands[session] = request_demand
+        else:
+            self.demands.pop(session, None)
         ids = tuple(req.origin_input_ids)
         page = self.cache.page_size
         blocks, warm, cold, host_pages, gpu_nodes = [], 0, 0, set(), set()
         reuse_ends = []
         new_gpu_pins = resident_gpu = 0
-        for spec in metadata.get('blocks', ()):
+        for spec in metadata.get('blocks', ()) if mode != 'exact' else ():
             start = int(spec['start'])
             end = int(spec['end'])
             if end == start:
@@ -166,7 +172,7 @@ class ComputeRuntime:
             source_id = scope, spec['source_id']
             match = self._match(source_id, block_ids)
             full = match.device_prefix_len + match.host_hit_length == len(block_ids)
-            if full or spec.get("revisited"):
+            if full:
                 reuse_ends.append(end)
             warm += end - start if full else 0
             cold += 0 if full else end - start
@@ -185,14 +191,10 @@ class ComputeRuntime:
                     node = node.parent
             blocks.append((source_id, start, end, match, block_ids))
         costs = self.costs
-        prompt = len(ids) - warm - cold
         native = self.cache.match_prefix(MatchPrefixParams(key=RadixKey(
             array('q', ids), req.extra_key, cache_salt=req.cache_salt)))
         output_limit = req.sampling_params.max_new_tokens
         exact = exact_cost(costs, len(ids), native.device_prefix_len, native.host_hit_length, output_limit)
-        quality_ms = max(0.0, metadata.get('quality_loss', 0.0)) * metadata.get('quality_price_ms', 0.0)
-        approximate = infoflow_cost(costs, prompt, warm + cold, cold, len(host_pages), ratio, output_limit, quality_ms)
-        mode = metadata.get('mode', 'auto')
         beyond_prefix = any(end // page * page > native.device_prefix_len + native.host_hit_length for end in reuse_ends)
         native_pins = native_resident = 0
         node = self.cache.tree_core.node_by_id(native.last_device_node)
@@ -203,15 +205,20 @@ class ComputeRuntime:
                 if component.lock_ref == 0:
                     native_pins += len(component.value)
             node = node.parent
-        cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
-                        if match.device_prefix_len+match.host_hit_length < len(tokens))
-        work = infoflow_work(cold_work, prompt, warm+cold, ratio, page)
         exact_route = {"mode": "exact", "milliseconds": exact, "work_tokens": len(ids),
                        "new_tokens": page_tokens(max(0, len(ids)+output_limit-native.device_prefix_len), page),
                        "pin_tokens": native_pins, "resident_tokens": native_resident}
-        approximate_route = {"mode": "infoflow", "milliseconds": approximate, "work_tokens": work,
-                             "new_tokens": page_tokens(work+output_limit, page)+len(host_pages),
-                             "pin_tokens": new_gpu_pins, "resident_tokens": resident_gpu}
+        approximate_route = None
+        if mode != 'exact':
+            prompt = len(ids) - warm - cold
+            quality_ms = max(0.0, metadata.get('quality_loss', 0.0)) * metadata.get('quality_price_ms', 0.0)
+            approximate = infoflow_cost(costs, prompt, warm+cold, cold, len(host_pages), ratio, output_limit, quality_ms)
+            cold_work = sum(len(tokens) for _, _, _, match, tokens in blocks
+                            if match.device_prefix_len+match.host_hit_length < len(tokens))
+            work = infoflow_work(cold_work, prompt, warm+cold, ratio, page)
+            approximate_route = {"mode": "infoflow", "milliseconds": approximate, "work_tokens": work,
+                                 "new_tokens": page_tokens(work+output_limit, page)+len(host_pages),
+                                 "pin_tokens": new_gpu_pins, "resident_tokens": resident_gpu}
         available = self.allocator.available_size()+self.cache.evictable_size()
         wait_ms = costs.get('admission_wait_ms', 0.0)
         route = select_route(exact_route,
@@ -223,8 +230,9 @@ class ComputeRuntime:
         mode = route['mode']
         state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool)
         state.route_costs = {"exact": route_cost(exact_route, available, wait_ms),
-                            "infoflow": route_cost(approximate_route, available, wait_ms),
                             "nonprefix_opportunity": beyond_prefix}
+        if approximate_route is not None:
+            state.route_costs['infoflow'] = route_cost(approximate_route, available, wait_ms)
         state.runtime = self
         state.events = []
         state.published = False
@@ -274,7 +282,6 @@ class ComputeRuntime:
             # Source addresses and global positions remain in state.input_ids.
             req.origin_input_ids = array('q', work)
             req.full_untruncated_fill_ids = array('q', work)
-        self._refresh_priorities()
         return state
 
     def pin(self, state):
@@ -368,46 +375,43 @@ class ComputeRuntime:
                     values[session, consumer] = (float(item['uses'])/len(identities), item['recompute_ratio'])
         return values
 
-    def _refresh_priorities(self):
+    @contextmanager
+    def eviction_priorities(self, *, on_gpu):
+        """Price known consumers only while the native allocator reclaims capacity."""
+        if not self.demands:
+            yield
+            return
         started = time.perf_counter()
-        self.demands = {session: scope for session, scope in self.demands.items() if scope}
-        for node_id in self.prioritized_nodes:
-            node = self.cache.tree_core._node_arena.get(node_id)
-            if node is not None:
-                node.priority = 0
-        self.prioritized_nodes.clear()
         nodes = {}
-        for identity, node_id in tuple(self.source_nodes.items()):
-            source_id, mode = identity
-            node = self.cache.tree_core._node_arena.get(node_id)
-            if node is None:
-                del self.source_nodes[identity]
-                if mode == 'exact':
-                    self.source_prefixes.pop(source_id, None)
-            else:
+        sources = {source for demand in self.demands.values() for source in demand}
+        for source_id in sources:
+            for mode in ('exact', 'infoflow'):
+                node = self.cache.tree_core._node_arena.get(self.source_nodes.get((source_id, mode)))
+                if node is None:
+                    continue
                 consumers = self._consumers(source_id, mode)
                 if not consumers:
                     continue
                 while node.parent is not None:
-                    values = nodes.setdefault(node.id, {})
                     component = node.component_data[0]
-                    on_gpu = component.value is not None
                     host_copy = component.host_value is not None and node.write_through_pending_id is None
-                    # Priorities retain existing pages. New construction and transfers
-                    # are priced at admission, rather than charged again here.
-                    for consumer, (uses, ratio) in consumers.items():
-                        value = uses * retention_value(self.costs, mode=mode,
-                            on_gpu=on_gpu, host_copy=host_copy, ratio=ratio)
-                        key = consumer, mode
-                        values[key] = max(values.get(key, 0.0), value)
+                    # A duplicate Host page has no marginal value while its GPU
+                    # copy remains resident; native duplicate reclaim stays free.
+                    resident = component.value is not None if on_gpu else host_copy and component.value is None
+                    if resident:
+                        values = nodes.setdefault(node.id, {})
+                        for consumer, (uses, ratio) in consumers.items():
+                            value = uses * retention_value(self.costs, mode=mode,
+                                on_gpu=on_gpu, host_copy=host_copy, ratio=ratio)
+                            key = consumer, mode
+                            values[key] = max(values.get(key, 0.0), value)
                     node = node.parent
         benefits = {}
         for node_id, consumers in nodes.items():
             component = self.cache.tree_core.node_by_id(node_id).component_data[0]
-            pages = component.value if component.value is not None else component.host_value
-            tokens = len(pages) if pages is not None else 0
+            pages = component.value if on_gpu else component.host_value
             for key, value in consumers.items():
-                benefits[key] = benefits.get(key, 0.0) + tokens * value
+                benefits[key] = benefits.get(key, 0.0) + len(pages) * value
         chosen = {}
         for (consumer, mode), value in benefits.items():
             previous = chosen.get(consumer)
@@ -416,14 +420,23 @@ class ComputeRuntime:
                 chosen[consumer] = mode
         benefit = sum(benefits[consumer, mode] for consumer, mode in chosen.items())
         net = max(0.0, benefit-self.costs.get('retention_control_ms', 0.0)) / benefit if benefit else 0.0
+        previous = {}
         for node_id, consumers in nodes.items():
             priority = int(1000 * net * sum(value for (consumer, mode), value in consumers.items()
                                       if chosen[consumer] == mode))
-            self.cache.tree_core.node_by_id(node_id).priority = priority
             if priority:
-                self.prioritized_nodes.add(node_id)
+                node = self.cache.tree_core.node_by_id(node_id)
+                previous[node_id] = node.priority
+                node.priority += priority
         elapsed = (time.perf_counter()-started)*1000
         self.costs['retention_control_ms'] = .8*self.costs.get('retention_control_ms', elapsed)+.2*elapsed
+        try:
+            yield
+        finally:
+            for node_id, priority in previous.items():
+                node = self.cache.tree_core._node_arena.get(node_id)
+                if node is not None:
+                    node.priority = priority
 
     def ready_tokens(self, state):
         from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
@@ -491,7 +504,6 @@ class ComputeRuntime:
                     source_id = scope, item['source_id']
                     self.source_nodes[source_id, 'exact'] = match.best_match_node
                     self.source_prefixes[source_id] = dict(sources=tuple(prefix), tokens=item['end'], namespace=req.cache_salt)
-        self._refresh_priorities()
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, route_cost_ms=state.route_costs, input_tokens=len(state.input_ids),
             output_tokens=output_count, elapsed_ms=elapsed,
