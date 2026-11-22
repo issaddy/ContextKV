@@ -1,6 +1,187 @@
 {
   "baseline": "6243615",
   "candidate": "d8ea49e",
+  "capacity_screening": {
+    "candidate": "26f2acd",
+    "model": "Qwen3-32B BF16",
+    "concurrency": 4,
+    "hardware": "H200",
+    "protocol": "P1",
+    "kv_pool_4gib": {
+      "development": {
+        "n": 20,
+        "cohort": "paper subset of the 40-task cohort below",
+        "note_only": {
+          "completed": 20,
+          "scored": 20,
+          "quality": 68.75,
+          "p95_ms": 36870.2,
+          "wait_p95_ms": 30144.63,
+          "aux_p95_ms": 8934.2,
+          "engine_p95_ms": 4328.51,
+          "after_admission_p95_ms": 12443.5,
+          "prefill": 114238,
+          "output_tokens": 1329,
+          "lost_relations": 5
+        },
+        "retain_witnesses": {
+          "completed": 20,
+          "scored": 20,
+          "quality": 74.25,
+          "p95_ms": 37568.16,
+          "wait_p95_ms": 30677.52,
+          "aux_p95_ms": 9039.04,
+          "engine_p95_ms": 4922.75,
+          "after_admission_p95_ms": 13071.89,
+          "prefill": 109687,
+          "output_tokens": 1567,
+          "lost_relations": 0
+        },
+        "preselect_with_nominal_capacity": {
+          "scored": 20,
+          "quality": 73.75,
+          "p95_ms": 30197.17,
+          "prefill": 79608,
+          "output_tokens": 1481,
+          "wait_p95_ms": 23249.98,
+          "aux_p95_ms": 6622.09,
+          "engine_p95_ms": 3780.22
+        },
+        "preselect_with_early_free_capacity": {
+          "completed": 20,
+          "scored": 20,
+          "quality": 70.5,
+          "p95_ms": 26976.06,
+          "wait_p95_ms": 22931.7,
+          "aux_p95_ms": 6665.77,
+          "engine_p95_ms": 4276.48,
+          "after_admission_p95_ms": 10015.87,
+          "prefill": 69185,
+          "output_tokens": 1630,
+          "lost_relations": 0,
+          "screened_tasks": 19,
+          "initial_windows": 3912,
+          "retained_windows": 1436,
+          "early_vs_last_min_med_max": [
+            [
+              4352,
+              13184,
+              16384
+            ],
+            [
+              2752,
+              11200,
+              16384
+            ]
+          ],
+          "early_greater_than_last": 9,
+          "early_less_than_last": 9
+        }
+      },
+      "disjoint": {
+        "n": 20,
+        "task_ids": [
+          "74df278b-9320-46dc-8c71-0aea2419aafa",
+          "71d0fb39-d315-4e33-beec-c53271663f7f",
+          "427e9ff9-c027-4b84-bb8b-d1f78c0d9b21",
+          "7b104919-2fba-44d2-91dd-a56bd2f30e91",
+          "5d482043-88d2-4246-8191-e603b7bf6ed4",
+          "2d98ef9d-dc95-40cd-b613-5aec5366d36b",
+          "db2e44e2-6407-43c7-aca3-d0ba0d627b11",
+          "59804366-0f40-4da6-838c-bbccec774e42",
+          "8c052189-328d-4f98-909d-c3ff31b77dad",
+          "651ab044-51e3-44e4-a3f2-0e672bbecba8",
+          "2fb7e717-7267-4727-832f-384483046ff3",
+          "9f29f552-c817-4c2a-8910-b5e8ae7c014f",
+          "ad6d0a53-1f8a-46b5-9738-a34d0a3cafaf",
+          "ecded47a-3741-4458-ba61-c04271c33651",
+          "1c08e97c-75b6-4b3b-bc16-2ea5c1b91e92",
+          "38014959-d599-4de6-ba9e-c5a8f599ed28",
+          "31ee8539-2e9e-40e2-adc3-082c872698f7",
+          "c8d80aee-3b85-434f-a348-2b40bb7d12dd",
+          "d18ec54d-383e-4203-adf1-c38319cfdd3e",
+          "17539923-dd06-4712-becd-68fb8d68614d"
+        ],
+        "main": {
+          "scored": 20,
+          "quality": 44.5,
+          "p95_ms": 42735.58,
+          "prefill": 107746,
+          "output_tokens": 1496,
+          "wait_p95_ms": 33699.29,
+          "aux_p95_ms": 9236.01,
+          "engine_p95_ms": 5573.17
+        },
+        "early": {
+          "scored": 20,
+          "quality": 69.25,
+          "p95_ms": 26477.09,
+          "prefill": 60235,
+          "output_tokens": 1439,
+          "wait_p95_ms": 22403.26,
+          "aux_p95_ms": 7814.38,
+          "engine_p95_ms": 4423.64
+        },
+        "score_up_equal_down": [
+          12,
+          5,
+          3
+        ],
+        "encoding": {
+          "screened": 18,
+          "original_windows": 3730,
+          "retained": 1363
+        }
+      }
+    },
+    "kv_pool_8gib": {
+      "cohort": "same 40-task mixed queue listed below",
+      "formal_candidate": {
+        "all": {
+          "n": 40,
+          "quality": 74.75,
+          "complete_p95_ms": 87312.92,
+          "aux_p95_ms": 11975.39,
+          "wait_p95_ms": 79681.76,
+          "prefill": 299073,
+          "output_tokens": 4003
+        },
+        "paper": {
+          "n": 20,
+          "quality": 68,
+          "complete_p95_ms": 87708.39,
+          "aux_p95_ms": 7580.28,
+          "wait_p95_ms": 82873.12,
+          "prefill": 94453,
+          "output_tokens": 1540
+        },
+        "legal": {
+          "n": 10,
+          "quality": 77,
+          "complete_p95_ms": 80045.46,
+          "aux_p95_ms": 8498.8,
+          "wait_p95_ms": 72858.78,
+          "prefill": 34752,
+          "output_tokens": 459
+        },
+        "financial": {
+          "n": 10,
+          "quality": 86,
+          "complete_p95_ms": 84987.58,
+          "aux_p95_ms": 15125.39,
+          "wait_p95_ms": 62269.09,
+          "prefill": 169868,
+          "output_tokens": 2004
+        }
+      }
+    },
+    "verification": {
+      "source_sets": 117,
+      "replayed_selections": 37,
+      "identical_retained_window_ids": 2799
+    },
+    "comparison": "Each arm was generated and officially scored once. The 4 GiB implementation used experiment instrumentation. The 8 GiB candidate used serving code. Timings include admission wait."
+  },
   "generator": "Qwen3-32B BF16",
   "concurrency": 4,
   "devices": "H200 4,5",
