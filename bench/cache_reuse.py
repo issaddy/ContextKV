@@ -18,7 +18,43 @@ from controller.serialization import decode
 from training.collect_shared_values import history, score_answers, source_blocks
 
 
-async def replay_requests(run, trace, output, *, concurrency, references, metric):
+def prior_source_use(trace, page_size):
+    """Compare already returned source spans with each request's measured Native prefix."""
+    completed = sorted((item for item in trace if "finished" in item), key=lambda item: item["finished"])
+    counts = {}
+    for policy in ("every_source", "declared_demand"):
+        available, used = {}, set()
+        turns = blocks = tokens = routable_turns = routable_tokens = 0
+        for item in completed:
+            request, receipt = item["request"], item["receipt"]
+            wanted = {d["source_id"] for d in request.demand}
+            hit = receipt["device_hit_tokens"] + receipt["host_loaded_tokens"]
+            gained = 0
+            beyond_page = False
+            for block in request.blocks:
+                left, right = block["start"], block["end"]
+                key = (item["options"]["cache_scope"], block["source_id"], request.input_ids[left:right])
+                if (receipt["mode"] == "exact" and right > hit
+                        and available.get(key, float("inf")) <= item["arrived"]):
+                    gained += right - max(left, hit)
+                    beyond_page |= right // page_size * page_size > hit
+                    blocks += 1
+                    used.add(key)
+                if policy == "every_source" or block["source_id"] in wanted:
+                    available.setdefault(key, item["finished"])
+            turns += bool(gained)
+            tokens += gained
+            if beyond_page:
+                routable_turns += 1
+                routable_tokens += gained
+        counts[policy] = dict(turns_with_repeats=turns, blocks_beyond_hit=blocks, body_tokens_beyond_hit=tokens,
+                              routable_turns=routable_turns, routable_body_tokens=routable_tokens,
+                              distinct_body_tokens=sum(len(key[2]) for key in available),
+                              distinct_reused_body_tokens=sum(len(key[2]) for key in used))
+    return counts
+
+
+async def replay_requests(run, trace, output, *, concurrency, references, metric, page_size):
     """Pair semantic order and cache-priced order on the same actual evidence sets."""
     from controller.sampling import SamplingRecipe
     from bench.study_metrics import _quantile
@@ -101,7 +137,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
              "no_demand_identical_answers": sum(a == b for a,b in zip(answers[1], answers[3])),
              "identical_answers": sum(a == b for a,b in zip(answers[0], answers[1])),
              "same_order_identical_answers": sum(a == b for a,b in zip(answers[1], answers[2])),
-             "questions": len(trace)}
+             "questions": len(trace), "prior_source_use": prior_source_use(trace, page_size)}
     Path(output).write_text(json.dumps(value, ensure_ascii=False, indent=2)+"\n")
     return value
 

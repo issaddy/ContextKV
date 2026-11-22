@@ -156,10 +156,15 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
         service.answer_request = capture_plan
         compute = service.engine.compute
         async def capture(request, **options):
-            if options["request_id"].endswith(":answer"):
-                trace.append({"arrived": time.monotonic(), "request": request, "options": options,
-                              **planned.pop(id(request))})
-            return await compute(request, **options)
+            if not options["request_id"].endswith(":answer"):
+                return await compute(request, **options)
+            item = {"arrived": time.monotonic(), "request": request, "options": options,
+                    **planned.pop(id(request))}
+            trace.append(item)
+            result = await compute(request, **options)
+            item["finished"] = time.monotonic()
+            item["receipt"] = result["meta"]["contextkv_compute"]
+            return result
         service.engine.compute = capture
     if record_answer is not None:
         build_request = service.answer_request
@@ -291,7 +296,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     if trace:
         from bench.cache_reuse import replay_requests
         await replay_requests(run, trace, directory/"cache_pair.json", concurrency=concurrency,
-                              references=list(references.values()), metric=spec["primary_metric"])
+                              references=list(references.values()), metric=spec["primary_metric"],
+                              page_size=service.engine_info.page_size)
     return ordered
 
 

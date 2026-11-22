@@ -1,0 +1,268 @@
+{
+  "waves": [
+    {
+      "long": [
+        "49f46b79-898c-45de-a19d-f25d17c216b1",
+        "9f29f552-c817-4c2a-8910-b5e8ae7c014f",
+        "b9fe5b23-43d7-49da-8e73-861bcf93b76f",
+        "41523348-9ee6-40b2-9660-e11859571bdf"
+      ],
+      "short": [],
+      "source_tokens": 6144
+    },
+    {
+      "long": [
+        "b182ad6a-5c78-414e-af32-5cd27b91d064",
+        "55fa764d-367e-4be9-aa93-7fb9233cd354",
+        "5d482043-88d2-4246-8191-e603b7bf6ed4",
+        "9b78667b-b80b-475b-a574-6748d8668a77"
+      ],
+      "short": [],
+      "source_tokens": 6144
+    },
+    {
+      "long": [
+        "528cd19a-a842-44e2-af9b-33a4d2b19eb4",
+        "a8fa7aa1-2198-419b-a0de-6ba4d1c1f160",
+        "3de47098-2658-446f-899a-7f662bb276c4",
+        "2fb7e717-7267-4727-832f-384483046ff3"
+      ],
+      "short": [],
+      "source_tokens": 6144
+    },
+    {
+      "long": [
+        "d20f30d2-7f6b-481a-bd0f-0c050bacde5d",
+        "a780dc25-81d8-4e0f-b344-5086b8055e04",
+        "de1b3c88-6d88-4d7d-a5cf-e65d225562fa",
+        "946f6301-070d-415e-9f90-06b412eecc4d"
+      ],
+      "short": [],
+      "source_tokens": 6144
+    },
+    {
+      "long": [
+        "edc6d95f-02ba-4835-bff6-853cb7d61f6b",
+        "7434e41f-46e4-4d74-bbbb-8cd477337040",
+        "1cd24ded-c112-46a9-816a-ebf40e7a6163",
+        "d9d95e48-f25f-445f-a111-4b2bfe468d06"
+      ],
+      "short": [],
+      "source_tokens": 6144
+    }
+  ],
+  "setup": {
+    "generator": "Qwen3-32B BF16",
+    "hardware": "H200",
+    "concurrency": 4,
+    "page_tokens": 64,
+    "kv_pool_gib": 8,
+    "protocol": "Same Loong questions, histories and document excerpts in both arms. First visit reads the documents in reverse order for one token. Revisit restores the forward order. The fixed output is one token; natural answers use the Loong rubric. Each arm starts with a cold KV pool.",
+    "timing": "Milliseconds. All four requests share the wave's first-visit duration. Revisit measures submission to answer; full also includes the first visit. Inclusive P95."
+  },
+  "two_visit": {
+    "auto_then_auto_one_token": {
+      "n": 20,
+      "seed_counts": {
+        "exact": 20
+      },
+      "final_counts": {
+        "exact": 20
+      },
+      "opportunities": 0,
+      "quality": null,
+      "prefill": 132623,
+      "reused": 0,
+      "cold": 0,
+      "output": 20,
+      "revisit_p95_ms": 3071.46,
+      "full_p95_ms": 6102.42,
+      "wave_first_visit_p95_ms": 3047.93
+    },
+    "infoflow_then_infoflow_one_token": {
+      "n": 20,
+      "seed_counts": {
+        "infoflow": 20
+      },
+      "final_counts": {
+        "infoflow": 20
+      },
+      "opportunities": 20,
+      "quality": null,
+      "prefill": 45341,
+      "reused": 120256,
+      "cold": 0,
+      "output": 20,
+      "revisit_p95_ms": 7205.67,
+      "full_p95_ms": 15855.47,
+      "wave_first_visit_p95_ms": 8649.8
+    },
+    "infoflow_then_native_one_token": {
+      "n": 20,
+      "seed_counts": {
+        "infoflow": 20
+      },
+      "final_counts": {
+        "exact": 20
+      },
+      "opportunities": 20,
+      "quality": null,
+      "prefill": 133903,
+      "reused": 0,
+      "cold": 0,
+      "output": 20,
+      "revisit_p95_ms": 3068.88,
+      "full_p95_ms": 10431.25,
+      "wave_first_visit_p95_ms": 7721.15
+    },
+    "infoflow_then_auto_one_token": {
+      "n": 20,
+      "seed_counts": {
+        "infoflow": 20
+      },
+      "final_counts": {
+        "exact": 20
+      },
+      "opportunities": 15,
+      "quality": null,
+      "prefill": 133903,
+      "reused": 0,
+      "cold": 0,
+      "output": 20,
+      "revisit_p95_ms": 3046.11,
+      "full_p95_ms": 10466,
+      "wave_first_visit_p95_ms": 7752.53
+    },
+    "auto_then_auto_natural": {
+      "n": 20,
+      "seed_counts": {
+        "exact": 20
+      },
+      "final_counts": {
+        "exact": 20
+      },
+      "opportunities": 0,
+      "quality": 45.25,
+      "prefill": 132623,
+      "reused": 0,
+      "cold": 0,
+      "output": 2051,
+      "revisit_p95_ms": 8293.82,
+      "full_p95_ms": 11158.38,
+      "wave_first_visit_p95_ms": 2952.16
+    },
+    "infoflow_then_auto_natural": {
+      "n": 20,
+      "seed_counts": {
+        "infoflow": 20
+      },
+      "final_counts": {
+        "exact": 14,
+        "infoflow": 6
+      },
+      "opportunities": 17,
+      "quality": 42.5,
+      "prefill": 104798,
+      "reused": 36864,
+      "cold": 0,
+      "output": 2044,
+      "revisit_p95_ms": 8643.97,
+      "full_p95_ms": 14777.19,
+      "wave_first_visit_p95_ms": 7765.05
+    }
+  },
+  "same_built_seed": {
+    "questions": 20,
+    "infoflow_faster_revisits_at_one_token": 0
+  },
+  "default_repeat": {
+    "requests": 20,
+    "native_first_visits": 20,
+    "native_revisits": 20,
+    "opportunities": 0,
+    "full_p95_ms": 6112.87
+  },
+  "real_dialogues": {
+    "protocol": "P3, C=4, 8 GiB. Original serving answers. Compare identical scope, source address and exact source token sequence against answers returned before submission. Count the portion beyond the measured Native GPU+Host hit. Keep all eligible prior spans indefinitely in the counterfactual. A routable turn must have a repeated source whose end rounded down to full pages exceeds the Native hit (end // page_size * page_size > hit). Counts exclude partial source matches, in-flight requests and other scopes.",
+    "multidoc2dial_120": {
+      "requests": 120,
+      "prefill": 67442,
+      "native": 120,
+      "observed_opportunities": 0,
+      "every_source": {
+        "turns_with_repeats": 25,
+        "blocks_beyond_hit": 25,
+        "body_tokens_beyond_hit": 823,
+        "routable_turns": 0,
+        "routable_body_tokens": 0,
+        "distinct_body_tokens": 17603,
+        "distinct_reused_body_tokens": 3934
+      },
+      "declared_demand": {
+        "turns_with_repeats": 25,
+        "blocks_beyond_hit": 25,
+        "body_tokens_beyond_hit": 823,
+        "routable_turns": 0,
+        "routable_body_tokens": 0,
+        "distinct_body_tokens": 17068,
+        "distinct_reused_body_tokens": 3934
+      }
+    },
+    "mtrag_20": {
+      "requests": 20,
+      "prefill": 14312,
+      "native": 20,
+      "observed_opportunities": 0,
+      "every_source": {
+        "turns_with_repeats": 1,
+        "blocks_beyond_hit": 1,
+        "body_tokens_beyond_hit": 40,
+        "routable_turns": 0,
+        "routable_body_tokens": 0,
+        "distinct_body_tokens": 8769,
+        "distinct_reused_body_tokens": 422
+      },
+      "declared_demand": {
+        "turns_with_repeats": 1,
+        "blocks_beyond_hit": 1,
+        "body_tokens_beyond_hit": 40,
+        "routable_turns": 0,
+        "routable_body_tokens": 0,
+        "distinct_body_tokens": 7956,
+        "distinct_reused_body_tokens": 422
+      }
+    }
+  },
+  "reverse_layout_positive_control": {
+    "turns_with_repeats": 20,
+    "blocks_beyond_hit": 122,
+    "body_tokens_beyond_hit": 120256,
+    "routable_turns": 20,
+    "routable_body_tokens": 120256,
+    "distinct_body_tokens": 120256,
+    "distinct_reused_body_tokens": 120256
+  },
+  "first_trace_totals": {
+    "protocol": "Separate P3 runs, before applying the whole-page admission test. Fields are turns with repeated spans / source tokens beyond the actual Native hit.",
+    "multidoc2dial_120": {
+      "all": [
+        29,
+        1465
+      ],
+      "demand": [
+        28,
+        931
+      ]
+    },
+    "mtrag_20": {
+      "all": [
+        1,
+        40
+      ],
+      "demand": [
+        1,
+        40
+      ]
+    }
+  }
+}

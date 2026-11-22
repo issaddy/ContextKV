@@ -58,15 +58,18 @@ async def replay(args):
         await engine.profile_prepare()
         for wave in waves:
             start = monotonic()
-            seed_mode = args.seed_route or ("exact" if args.route == "exact" else "infoflow")
-            await asyncio.gather(*(submit(k, "-seed", seeds[k], seed_mode, 1) for k in wave["long"]))
+            seed_mode = args.seed_route or args.route
+            seeded = await asyncio.gather(*(submit(k, "-seed", seeds[k], seed_mode, 1) for k in wave["long"]))
+            seed_routes = {key: reply["meta"]["contextkv_compute"]["mode"]
+                           for key, reply in zip(wave["long"], seeded)}
             issued = monotonic()
             async def answer(key):
                 mode = args.route if key in seeds else "exact"
                 reply = await submit(key, "-read", requests[key], mode, args.fixed_tokens or run.context.max_new_tokens)
                 end = monotonic()
                 r = reply["meta"]["contextkv_compute"]
-                return dict(task_id=key, long=key in seeds, mode=r["mode"], input_tokens=reply["meta"]["prompt_tokens"],
+                return dict(task_id=key, long=key in seeds, seed_mode=seed_routes.get(key), mode=r["mode"],
+                    input_tokens=reply["meta"]["prompt_tokens"],
                     output=reply["meta"]["completion_tokens"], elapsed_ms=1000*(end-issued),
                     seed_to_answer_ms=1000*(end-start), prefill=r["actual_prefill_tokens"],
                     cold=r["cold_tokens"], reused=r["reused_tokens"], score_tokens=r["score_tokens"],
@@ -108,7 +111,7 @@ if __name__ == "__main__":
     parser.add_argument("--documents", required=True)
     parser.add_argument("--dialogues", required=True)
     parser.add_argument("--route", choices=("auto", "exact", "infoflow"), required=True)
-    parser.add_argument("--seed-route", choices=("exact", "infoflow"), help="KV layout built before the revisit")
+    parser.add_argument("--seed-route", choices=("auto", "exact", "infoflow"), help="Routing policy for the first visit")
     parser.add_argument("--fixed-tokens", type=int)
     parser.add_argument("--output", required=True)
     asyncio.run(replay(parser.parse_args()))
