@@ -275,4 +275,6 @@ python3 -m bench.cache_reuse \
 - `scoring/manifest.json`：实际评分协议和评分成本。
 - `summary.json`、`report.md`：各 benchmark 的方法对比与差值。
 
+MT-RAG 出现缺失分数时，对原生成目录运行 `python3 -m bench.study_scoring --config "$EVAL_RUN/study.yaml" --matrix "$EVAL_RUN/P3.yaml" --dataset mtrag --split test --generation-dir <原生成目录>`。评分器复用已有数值，只对缺失的题目和指标调用裁判。
+
 Qwen token 统计生成模型的调用。辅助编码计入完整响应、辅助耗时与物理占用。训练所用的逐事实和停止监督见本手册的辅助训练部分。 [实测结果](results.md)

@@ -24,6 +24,7 @@ from typing import Mapping, Sequence
 from types import SimpleNamespace
 
 from adapters.mtrag import DATASET_COMMIT
+from bench.study_metrics import _number
 
 
 def load_jsonl(path):
@@ -335,20 +336,22 @@ def score_http_stages(official, model, input_path, output_directory, *, answerab
         source, generated = Path(temporary)/"input.jsonl", Path(temporary)/"output.jsonl"
         for name, metric, operation in stages:
             target = output / f"{name}.jsonl"
-            if target.exists():
-                stage_rows = load_jsonl(target)
-            else:
-                source.write_text("".join(json.dumps(row, ensure_ascii=False)+"\n"
-                                          for row in scored_by_id.values()))
+            saved = load_jsonl(target) if target.exists() else ()
+            values = {row["task_id"]: row["metrics"][metric] for row in saved}
+            pending = [tid for tid in task_ids if _number(values.get(tid)) is None]
+            if pending:
+                source.write_text("".join(json.dumps(scored_by_id[tid], ensure_ascii=False)+"\n"
+                                          for tid in pending))
                 operation("vllm", model, str(source), str(generated))
                 stage_rows = load_jsonl(generated)
-                if sorted(row["task_id"] for row in stage_rows) != sorted(task_ids):
+                if sorted(row["task_id"] for row in stage_rows) != sorted(pending):
                     raise ValueError(f"official {name} output changed the task cohort")
-            stage_rows = [{"task_id": row["task_id"], "metrics": {metric: row["metrics"][metric]}}
-                          for row in stage_rows]
-            target.write_text("".join(json.dumps(row)+"\n" for row in stage_rows))
-            for row in stage_rows:
-                scored_by_id[row["task_id"]].setdefault("metrics", {})[metric] = row["metrics"][metric]
+                values.update((row["task_id"], row["metrics"][metric]) for row in stage_rows)
+                generated.write_text("".join(json.dumps({"task_id": tid, "metrics": {metric: values[tid]}})+"\n"
+                                             for tid in task_ids))
+                generated.replace(target)
+            for tid, value in values.items():
+                scored_by_id[tid].setdefault("metrics", {})[metric] = value
     scored = list(scored_by_id.values())
     suffix = condition_metrics(official, scored, metrics) if answerability_adjustment else None
     target = output / "scores.jsonl"
