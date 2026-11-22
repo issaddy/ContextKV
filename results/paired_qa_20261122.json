@@ -26,7 +26,8 @@
       "batch_prefill": "3214c3d",
       "layout_retention": "6ccaa20",
       "queued_prefix": "ab7b942",
-      "native_prefill_calibrated": "e6a01e7"
+      "native_prefill_calibrated": "e6a01e7",
+      "dense_scan": "f7b1e3e"
     },
     "loong_reference_commit": "fc8c3b5"
   },
@@ -281,6 +282,29 @@
           "gpu_gib_seconds": 1682.36,
           "host_gib_seconds": 501.72,
           "active_kv_peak_tokens": 3520,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
+        },
+        "dense_scan": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 17.983,
+          "complete_p95_ms": 9158.548,
+          "wait_p95_ms": 2864.092,
+          "auxiliary_p95_ms": 3758.893,
+          "engine_p95_ms": 6379.401,
+          "prefill_tokens": 11302,
+          "output_tokens": 2616,
+          "gpu_hit_tokens": 1088,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 12390,
+          "gpu_gib_seconds": 1901.05,
+          "host_gib_seconds": 555.41,
+          "active_kv_peak_tokens": 3328,
           "online_routes": {
             "exact": 20,
             "nonprefix": 0
@@ -542,6 +566,29 @@
             "exact": 20,
             "nonprefix": 0
           }
+        },
+        "dense_scan": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 60.375,
+          "complete_p95_ms": 7535.546,
+          "wait_p95_ms": 2926.719,
+          "auxiliary_p95_ms": 5136.62,
+          "engine_p95_ms": 3426.348,
+          "prefill_tokens": 14270,
+          "output_tokens": 2104,
+          "gpu_hit_tokens": 1216,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 15486,
+          "gpu_gib_seconds": 1809.84,
+          "host_gib_seconds": 545.78,
+          "active_kv_peak_tokens": 4032,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
         }
       }
     },
@@ -794,6 +841,29 @@
           "total_input_tokens": 16522,
           "gpu_gib_seconds": 1321.11,
           "host_gib_seconds": 391.41,
+          "active_kv_peak_tokens": 4096,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
+        },
+        "dense_scan": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16977.794,
+          "wait_p95_ms": 13683.025,
+          "auxiliary_p95_ms": 4045.132,
+          "engine_p95_ms": 3012.479,
+          "prefill_tokens": 14474,
+          "output_tokens": 1483,
+          "gpu_hit_tokens": 2048,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 16522,
+          "gpu_gib_seconds": 1320.95,
+          "host_gib_seconds": 382.58,
           "active_kv_peak_tokens": 4096,
           "online_routes": {
             "exact": 20,
@@ -1056,6 +1126,29 @@
             "exact": 20,
             "nonprefix": 0
           }
+        },
+        "dense_scan": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 72.75,
+          "complete_p95_ms": 29466.369,
+          "wait_p95_ms": 24325.105,
+          "auxiliary_p95_ms": 5716.538,
+          "engine_p95_ms": 6849.555,
+          "prefill_tokens": 86500,
+          "output_tokens": 1803,
+          "gpu_hit_tokens": 768,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 87268,
+          "gpu_gib_seconds": 2363.37,
+          "host_gib_seconds": 662.1,
+          "active_kv_peak_tokens": 17408,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
         }
       }
     }
@@ -1313,6 +1406,130 @@
         "windows": 706,
         "expanded": 10,
         "encoded_batches": 59
+      }
+    }
+  },
+  "dense_retrieval": {
+    "control": "1acf660",
+    "implementation": "f7b1e3e",
+    "fixed_inputs": {
+      "protocol": "20 alternating comparisons per corpus and scope. Query triplet i uses index rows 5i+1 through 5i+3 (zero based). Scope is either all passage IDs or every third ID, starting at zero. Each arm returns top 50 separately for each vector. Times are median milliseconds per call.",
+      "dimensions": 1024,
+      "multidoc2dial": {
+        "rows": 4110,
+        "full": [
+          6.48,
+          2.73
+        ],
+        "every_third": [
+          2.76,
+          1.87
+        ],
+        "identical_rankings_and_scores": [
+          20,
+          20
+        ]
+      },
+      "mtrag": {
+        "rows": 72442,
+        "full": [
+          550.79,
+          77.14
+        ],
+        "every_third": [
+          46.27,
+          28.44
+        ],
+        "identical_rankings_and_scores": [
+          20,
+          20
+        ]
+      }
+    },
+    "queue_search": {
+      "mtrag": {
+        "scan-control": {
+          "calls": 20,
+          "query_vectors": 52,
+          "full_scope": 20,
+          "cumulative_ms": 11744.83
+        },
+        "scan-view": {
+          "calls": 20,
+          "query_vectors": 50,
+          "full_scope": 20,
+          "cumulative_ms": 2622.26
+        }
+      },
+      "multidoc2dial": {
+        "scan-control": {
+          "calls": 20,
+          "query_vectors": 66,
+          "full_scope": 20,
+          "cumulative_ms": 1039.3
+        },
+        "scan-view": {
+          "calls": 20,
+          "query_vectors": 65,
+          "full_scope": 20,
+          "cumulative_ms": 457.79
+        }
+      },
+      "loong": {
+        "scan-view": {
+          "calls": 1,
+          "query_vectors": 26,
+          "full_scope": 1,
+          "cumulative_ms": 3.76
+        }
+      },
+      "versionqa": {
+        "scan-view": {
+          "calls": 20,
+          "query_vectors": 76,
+          "full_scope": 0,
+          "cumulative_ms": 16.86
+        }
+      }
+    },
+    "contemporaneous_controls": {
+      "mtrag": {
+        "protocol": "P3",
+        "declared": 20,
+        "completed": 20,
+        "scored": 20,
+        "quality": 60.377,
+        "complete_p95_ms": 10524.34,
+        "wait_p95_ms": 2563.939,
+        "auxiliary_p95_ms": 5184.448,
+        "engine_p95_ms": 5174.506,
+        "prefill_tokens": 15834,
+        "output_tokens": 2858,
+        "gpu_hit_tokens": 1600,
+        "host_loaded_tokens": 0,
+        "total_input_tokens": 17434,
+        "gpu_gib_seconds": 2535.93,
+        "host_gib_seconds": 769.63,
+        "active_kv_peak_tokens": 5696
+      },
+      "multidoc2dial": {
+        "protocol": "P3",
+        "declared": 20,
+        "completed": 20,
+        "scored": 20,
+        "quality": 18.118,
+        "complete_p95_ms": 9254.537,
+        "wait_p95_ms": 2867.254,
+        "auxiliary_p95_ms": 4203.602,
+        "engine_p95_ms": 5589.714,
+        "prefill_tokens": 11109,
+        "output_tokens": 2517,
+        "gpu_hit_tokens": 1088,
+        "host_loaded_tokens": 0,
+        "total_input_tokens": 12197,
+        "gpu_gib_seconds": 1633.68,
+        "host_gib_seconds": 476.96,
+        "active_kv_peak_tokens": 3456
       }
     }
   },
