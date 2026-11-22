@@ -7,7 +7,7 @@ from math import log1p
 import time
 
 from adapters.corpus import CorpusIndex
-from adapters.document_compute import DocumentIndex
+from adapters.document_compute import DocumentIndex, numeric_field_units
 from adapters.evidence_pool import SourceDirectory
 from adapters.hybrid_retrieval import DenseIndex, reciprocal_rank_fusion
 from adapters.retrieval import BM25SRetriever, run_retrieval_worker
@@ -243,14 +243,19 @@ class SharedEvidenceProvider:
         query.task = replace(query.task, effective_source_scope=legal,
             coverage_scope="all_supplied_documents" if complete_population else "selected_sources")
         full = complete_population and declared
+        available, screen_tokens = self._body_budgets(snapshot, query, available_kv_tokens)
         population_units = ()
         historical_ids = ()
         if full:
             document_blocks = corpus.resolve(legal)
             pool = directory.full_scope(legal)
             population_units = pool.units
+            if supplied_blocks is not None and sum(unit.body_tokens for unit in pool.units) > screen_tokens:
+                rows = numeric_field_units(question, pool, self.template.tokenizer)
+                if rows and sum(unit.body_tokens for unit in rows) <= screen_tokens:
+                    population_units = rows
             query.source_titles = tuple(block.title for block in pool.source_blocks)
-            units = pool.units
+            units = population_units
         else:
             if supplied_blocks is not None:
                 if "dense" not in cached:
@@ -318,7 +323,6 @@ class SharedEvidenceProvider:
                           else DocumentIndex.from_blocks(document_blocks))
         units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in units)
         usage = dict(query.usage)
-        available = self._body_budget(snapshot, query)
         by_id = {unit.unit_id: unit for unit in units}
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
         if supplied_blocks is not None:
@@ -328,11 +332,8 @@ class SharedEvidenceProvider:
             note, witnesses = source_title_mentions(documents, titles)
             if full and witnesses:
                 headers += witnesses
-                budget = available
-                if available_kv_tokens is not None:
-                    budget = min(budget, available_kv_tokens - self.config["execution"]["output_tokens"])
-                if sum(unit.body_tokens for unit in units) > budget:
-                    initial_ids = ranked_population_windows(units, question, budget, self.template.tokenizer, witnesses)
+                if sum(unit.body_tokens for unit in units) > screen_tokens:
+                    initial_ids = ranked_population_windows(units, question, screen_tokens, self.template.tokenizer, witnesses)
         initial_ids.update(historical_ids)
         pending_dependencies = list(initial_ids)
         while pending_dependencies:
@@ -403,7 +404,7 @@ class SharedEvidenceProvider:
         usage["compute_ms"] = (time.perf_counter()-started)*1000
         return EvidenceSelection(pool.source_blocks, context, auxiliary_usage=usage, shared_state=state)
 
-    def _body_budget(self, snapshot, query):
+    def _body_budgets(self, snapshot, query, available_kv_tokens):
         from controller.schema import Message
         from controller.cooperative_request import SYSTEM, working_history
         settings = self.config.get("execution", {})
@@ -411,8 +412,11 @@ class SharedEvidenceProvider:
         messages = (Message("system", system), Message("user", ""),
                     *history_messages(working_history(query, snapshot.raw_history)), Message("user", query.task.raw_question))
         prompt = self.template.render(messages)
-        reserved = len(prompt.input_ids) + settings.get("output_tokens", 1024)
-        return min(self.config.get("selection", {}).get("body_tokens", 8192), settings.get("window_tokens", 32768)-reserved)
+        output = settings.get("output_tokens", 1024)
+        available = min(self.config.get("selection", {}).get("body_tokens", 8192),
+                        settings.get("window_tokens", 32768) - len(prompt.input_ids) - output)
+        screen = available if available_kv_tokens is None else min(available, available_kv_tokens - output)
+        return available, screen
 
     @staticmethod
     def _closure(roots, by_id):

@@ -6,9 +6,10 @@ from decimal import Decimal
 import json
 import operator
 import re
+import unicodedata
 from typing import Any
 
-from adapters.table_relations import extract_table_relations
+from adapters.table_relations import _SEPARATOR, extract_table_relations
 from controller.schema import EvidenceBlock, EvidenceClaim, EvidenceUnit, SourceSpan
 from controller.source_windows import numbered_text
 
@@ -133,6 +134,7 @@ _COMPARISONS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt,
 _NUMERIC_AGGREGATES = ("sum", "mean", "min", "max")
 _PROGRAM_OPERATIONS = ("lookup", "group", "count", *_NUMERIC_AGGREGATES)
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
+_RANGE_MARKER = re.compile(r"以上|以下|[<>≤≥]|\b(?:above|below|between)\b|\d\s*[-–]\s*\d", re.I)
 
 
 def quantity(cell):
@@ -172,6 +174,48 @@ def _span(block, start, end):
     key = block.key
     identity = f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{base+start}:{base+end}"
     return SourceSpan(identity, key, base+start, base+end)
+
+
+def numeric_field_units(question, pool, tokenizer):
+    """Project a named row across supplied documents for an explicit range classification."""
+    question = unicodedata.normalize("NFKC", question)
+    quoted = re.findall(r"""“([^”]+)”|‘([^’]+)’|"([^"]+)"|'([^']+)'|`([^`]+)`""", question)
+    fields = {value.strip().casefold() for group in quoted for value in group if value}
+    ranges = re.findall(r"\(([^()]*\d[^()]*)\)", question)
+    if len(fields) != 1 or sum(1 for clause in ranges if _RANGE_MARKER.search(clause)) < 2:
+        return ()
+    field, = fields
+    prototypes = {unit.source_spans[0].source_key: unit for unit in pool.units}
+    projected = {}
+    for block in pool.source_blocks:
+        previous = header = None
+        offsets = {}
+        for line in re.finditer(r"^.*$", block.text, re.MULTILINE):
+            text = line.group().strip()
+            if not text.startswith("|"):
+                previous = header = None
+                continue
+            cells = [cell.strip() for cell in text.strip("|").split("|")]
+            if all(_SEPARATOR.fullmatch(value) for value in cells):
+                header = previous
+            label = unicodedata.normalize("NFKC", cells[0]).casefold()
+            label = re.sub(r"^(?:\(\w{1,4}\)|\w{1,4}[、.])\s*", "", label)
+            if field in (label, re.sub(r"\s*\([^()]*\)\s*$", "", label)) and any(
+                    _NUMBER.fullmatch(value) for value in cells[1:]):
+                if header is not None:
+                    offsets[header.start()] = header.end()
+                offsets[line.start()] = line.end()
+            previous = line
+        if not offsets:
+            return ()
+        bounds = sorted(offsets.items())
+        spans = tuple(_span(block, start, end) for start, end in bounds)
+        body = "\n".join(block.text[start:end] for start, end in bounds)
+        projected[block.key] = replace(prototypes[block.key], unit_id=f"{spans[0].span_id}/field/{field}",
+            source_spans=spans, text=body, heading=block.title, table_id=None,
+            body_tokens=len(tokenizer.encode(body, add_special_tokens=False)))
+    return tuple(replace(projected[block.key], dependencies=tuple(projected[key].unit_id for key in block.dependencies))
+                 for block in pool.source_blocks)
 
 
 def _unique_spans(spans):
