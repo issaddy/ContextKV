@@ -7,7 +7,6 @@
     "concurrency": 4,
     "kv_pool_gib": 8,
     "page_tokens": 64,
-    "runs_per_fixed_arm": 1,
     "quality_scale": "0–100",
     "history": {
       "P3": "Actual system replies within each session",
@@ -27,9 +26,11 @@
       "layout_retention": "6ccaa20",
       "queued_prefix": "ab7b942",
       "native_prefill_calibrated": "e6a01e7",
-      "dense_scan": "f7b1e3e"
+      "dense_scan": "f7b1e3e",
+      "shared_tokenizer": "27155ec"
     },
-    "loong_reference_commit": "fc8c3b5"
+    "loong_reference_commit": "fc8c3b5",
+    "fixed20_statistic": "first completed run for each configuration"
   },
   "fixed20": {
     "multidoc2dial": {
@@ -95,34 +96,38 @@
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 11.798,
-          "complete_p95_ms": 16267.6,
-          "prefill_tokens": 30992,
-          "output_tokens": 5999,
-          "wait_p95_ms": 2969.72,
-          "auxiliary_p95_ms": 3715.83,
-          "engine_p95_ms": 15158.53,
-          "total_input_tokens": 36112,
-          "gpu_gib_seconds": 3952.01,
-          "host_gib_seconds": 1116.61,
-          "active_kv_peak_tokens": 9280
+          "quality": 12.354,
+          "complete_p95_ms": 14666.2,
+          "wait_p95_ms": 2234.974,
+          "auxiliary_p95_ms": 1706.832,
+          "engine_p95_ms": 14133.148,
+          "prefill_tokens": 30766,
+          "output_tokens": 5441,
+          "gpu_hit_tokens": 4992,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 35758,
+          "gpu_gib_seconds": 3562.55,
+          "host_gib_seconds": 981.03,
+          "active_kv_peak_tokens": 9152
         },
         "llamaindex": {
           "protocol": "P3",
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 11.055,
-          "complete_p95_ms": 17385.58,
-          "prefill_tokens": 26502,
-          "output_tokens": 6211,
-          "wait_p95_ms": 3628.4,
-          "auxiliary_p95_ms": 4274.56,
-          "engine_p95_ms": 14510.78,
-          "total_input_tokens": 37062,
-          "gpu_gib_seconds": 3643.86,
-          "host_gib_seconds": 1034.22,
-          "active_kv_peak_tokens": 7168
+          "quality": 12.208,
+          "complete_p95_ms": 15444.78,
+          "wait_p95_ms": 4131.422,
+          "auxiliary_p95_ms": 1753.031,
+          "engine_p95_ms": 14743.72,
+          "prefill_tokens": 27877,
+          "output_tokens": 6278,
+          "gpu_hit_tokens": 9152,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 37029,
+          "gpu_gib_seconds": 3161.53,
+          "host_gib_seconds": 881.33,
+          "active_kv_peak_tokens": 7552
         },
         "resident": {
           "protocol": "P3",
@@ -309,6 +314,29 @@
             "exact": 20,
             "nonprefix": 0
           }
+        },
+        "shared_tokenizer": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 18.203,
+          "complete_p95_ms": 6879.497,
+          "wait_p95_ms": 2319.505,
+          "auxiliary_p95_ms": 1688.314,
+          "engine_p95_ms": 5630.181,
+          "prefill_tokens": 11093,
+          "output_tokens": 2597,
+          "gpu_hit_tokens": 1344,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 12437,
+          "gpu_gib_seconds": 1561.7,
+          "host_gib_seconds": 438.44,
+          "active_kv_peak_tokens": 3584,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
         }
       }
     },
@@ -375,34 +403,38 @@
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 55.478,
-          "complete_p95_ms": 29850.64,
-          "prefill_tokens": 91254,
-          "output_tokens": 8086,
-          "wait_p95_ms": 9359.05,
-          "auxiliary_p95_ms": 5294.75,
-          "engine_p95_ms": 24128.29,
-          "total_input_tokens": 98038,
-          "gpu_gib_seconds": 6408.25,
-          "host_gib_seconds": 1818.62,
-          "active_kv_peak_tokens": 21440
+          "quality": 56.99,
+          "complete_p95_ms": 25499.734,
+          "wait_p95_ms": 6694.889,
+          "auxiliary_p95_ms": 2644.454,
+          "engine_p95_ms": 20970.7,
+          "prefill_tokens": 92403,
+          "output_tokens": 8673,
+          "gpu_hit_tokens": 6656,
+          "host_loaded_tokens": 192,
+          "total_input_tokens": 99251,
+          "gpu_gib_seconds": 5854.81,
+          "host_gib_seconds": 1628.55,
+          "active_kv_peak_tokens": 22656
         },
         "llamaindex": {
           "protocol": "P3",
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 58.789,
-          "complete_p95_ms": 21461.6,
-          "prefill_tokens": 93416,
-          "output_tokens": 7941,
-          "wait_p95_ms": 7204.59,
-          "auxiliary_p95_ms": 5452.67,
-          "engine_p95_ms": 18398.71,
-          "total_input_tokens": 97832,
-          "gpu_gib_seconds": 5426.44,
-          "host_gib_seconds": 1539.27,
-          "active_kv_peak_tokens": 18304
+          "quality": 56.991,
+          "complete_p95_ms": 23189.111,
+          "wait_p95_ms": 5341.632,
+          "auxiliary_p95_ms": 2666.676,
+          "engine_p95_ms": 18505.484,
+          "prefill_tokens": 92583,
+          "output_tokens": 8384,
+          "gpu_hit_tokens": 4224,
+          "host_loaded_tokens": 1472,
+          "total_input_tokens": 98279,
+          "gpu_gib_seconds": 5032.56,
+          "host_gib_seconds": 1413.09,
+          "active_kv_peak_tokens": 18496
         },
         "resident": {
           "protocol": "P3",
@@ -589,6 +621,29 @@
             "exact": 20,
             "nonprefix": 0
           }
+        },
+        "shared_tokenizer": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 61.282,
+          "complete_p95_ms": 8032.082,
+          "wait_p95_ms": 3041.968,
+          "auxiliary_p95_ms": 3033.381,
+          "engine_p95_ms": 4811.659,
+          "prefill_tokens": 14425,
+          "output_tokens": 2516,
+          "gpu_hit_tokens": 1600,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 16025,
+          "gpu_gib_seconds": 1885.8,
+          "host_gib_seconds": 551.03,
+          "active_kv_peak_tokens": 4672,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
         }
       }
     },
@@ -656,32 +711,36 @@
           "completed": 20,
           "scored": 20,
           "quality": 85,
-          "complete_p95_ms": 22467.97,
-          "prefill_tokens": 50541,
-          "output_tokens": 1797,
-          "wait_p95_ms": 18392.99,
-          "auxiliary_p95_ms": 4586.91,
-          "engine_p95_ms": 3828.48,
-          "total_input_tokens": 51565,
-          "gpu_gib_seconds": 1811.16,
-          "host_gib_seconds": 503.24,
-          "active_kv_peak_tokens": 11712
+          "complete_p95_ms": 20383.431,
+          "wait_p95_ms": 17896.022,
+          "auxiliary_p95_ms": 2873.459,
+          "engine_p95_ms": 4696.312,
+          "prefill_tokens": 50543,
+          "output_tokens": 1876,
+          "gpu_hit_tokens": 1024,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 51567,
+          "gpu_gib_seconds": 1883.86,
+          "host_gib_seconds": 505.28,
+          "active_kv_peak_tokens": 11904
         },
         "llamaindex": {
           "protocol": "P1",
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 85,
-          "complete_p95_ms": 22815.25,
-          "prefill_tokens": 51004,
-          "output_tokens": 1791,
-          "wait_p95_ms": 19348.37,
-          "auxiliary_p95_ms": 5032.66,
-          "engine_p95_ms": 4679.31,
-          "total_input_tokens": 52220,
-          "gpu_gib_seconds": 2078.07,
-          "host_gib_seconds": 573.19,
+          "quality": 80,
+          "complete_p95_ms": 19554.44,
+          "wait_p95_ms": 16608.118,
+          "auxiliary_p95_ms": 2846.2,
+          "engine_p95_ms": 4688.65,
+          "prefill_tokens": 51005,
+          "output_tokens": 1852,
+          "gpu_hit_tokens": 1216,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 52221,
+          "gpu_gib_seconds": 1868.2,
+          "host_gib_seconds": 510.24,
           "active_kv_peak_tokens": 11776
         },
         "resident": {
@@ -869,6 +928,29 @@
             "exact": 20,
             "nonprefix": 0
           }
+        },
+        "shared_tokenizer": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 13921.587,
+          "wait_p95_ms": 11058.833,
+          "auxiliary_p95_ms": 1895.735,
+          "engine_p95_ms": 2970.01,
+          "prefill_tokens": 14474,
+          "output_tokens": 1547,
+          "gpu_hit_tokens": 2048,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 16522,
+          "gpu_gib_seconds": 1124.85,
+          "host_gib_seconds": 313.97,
+          "active_kv_peak_tokens": 4224,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
         }
       }
     },
@@ -935,34 +1017,38 @@
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 33.5,
-          "complete_p95_ms": 39640.5,
-          "prefill_tokens": 100634,
-          "output_tokens": 1886,
-          "wait_p95_ms": 32685.08,
-          "auxiliary_p95_ms": 9196.97,
-          "engine_p95_ms": 6226.37,
-          "total_input_tokens": 101850,
-          "gpu_gib_seconds": 3253.96,
-          "host_gib_seconds": 898.61,
-          "active_kv_peak_tokens": 22720
+          "quality": 29.5,
+          "complete_p95_ms": 42038.826,
+          "wait_p95_ms": 31093.484,
+          "auxiliary_p95_ms": 8246.362,
+          "engine_p95_ms": 7095.424,
+          "prefill_tokens": 100178,
+          "output_tokens": 2274,
+          "gpu_hit_tokens": 1216,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 101394,
+          "gpu_gib_seconds": 3704.1,
+          "host_gib_seconds": 1011.87,
+          "active_kv_peak_tokens": 21952
         },
         "llamaindex": {
           "protocol": "P1",
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 47,
-          "complete_p95_ms": 38617.15,
-          "prefill_tokens": 95259,
-          "output_tokens": 1979,
-          "wait_p95_ms": 32528.09,
-          "auxiliary_p95_ms": 9405.15,
-          "engine_p95_ms": 9023.06,
-          "total_input_tokens": 96475,
-          "gpu_gib_seconds": 3194.47,
-          "host_gib_seconds": 884.56,
-          "active_kv_peak_tokens": 21952
+          "quality": 46,
+          "complete_p95_ms": 41327.119,
+          "wait_p95_ms": 32041.464,
+          "auxiliary_p95_ms": 8738.447,
+          "engine_p95_ms": 8677.426,
+          "prefill_tokens": 94829,
+          "output_tokens": 2055,
+          "gpu_hit_tokens": 1216,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 96045,
+          "gpu_gib_seconds": 3478.98,
+          "host_gib_seconds": 955.07,
+          "active_kv_peak_tokens": 20864
         },
         "resident": {
           "protocol": "P1",
@@ -1145,6 +1231,29 @@
           "gpu_gib_seconds": 2363.37,
           "host_gib_seconds": 662.1,
           "active_kv_peak_tokens": 17408,
+          "online_routes": {
+            "exact": 20,
+            "nonprefix": 0
+          }
+        },
+        "shared_tokenizer": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 77.25,
+          "complete_p95_ms": 28314.298,
+          "wait_p95_ms": 23975.379,
+          "auxiliary_p95_ms": 4925.299,
+          "engine_p95_ms": 6859.093,
+          "prefill_tokens": 86705,
+          "output_tokens": 1770,
+          "gpu_hit_tokens": 768,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 87473,
+          "gpu_gib_seconds": 2251.82,
+          "host_gib_seconds": 615.28,
+          "active_kv_peak_tokens": 17728,
           "online_routes": {
             "exact": 20,
             "nonprefix": 0
@@ -2012,6 +2121,114 @@
         "slot_wait_p95_ms": 71189,
         "prefill_tokens": 228616,
         "output_tokens": 4040
+      }
+    }
+  },
+  "tokenizer_runtime": {
+    "control": "78eb059",
+    "implementation": "27155ec",
+    "measurement": "One record per question from each of the four fixed queues. Four concurrent threads tokenize the delivered text and answer using plain encoding, padded truncated batches and original-character offsets. Seconds are per pass across 80 pairs.",
+    "matching_inputs_per_tokenizer": 80,
+    "tokenizer_seconds": {
+      "generator": {
+        "control": {
+          "first": 1.601,
+          "repeat": 0.159
+        },
+        "shared": {
+          "first": 0.179,
+          "repeat": 0.166
+        }
+      },
+      "query": {
+        "control": {
+          "first": 1.446,
+          "repeat": 0.158
+        },
+        "shared": {
+          "first": 0.189,
+          "repeat": 0.175
+        }
+      },
+      "evidence": {
+        "control": {
+          "first": 1.433,
+          "repeat": 0.155
+        },
+        "shared": {
+          "first": 0.179,
+          "repeat": 0.168
+        }
+      }
+    },
+    "fixed_repeats": {
+      "multidoc2dial": [
+        {
+          "quality": 18.639,
+          "complete_p95_ms": 7236.835,
+          "auxiliary_p95_ms": 1693.296,
+          "output_tokens": 2470
+        }
+      ],
+      "mtrag": [
+        {
+          "quality": 60.631,
+          "complete_p95_ms": 6901.933,
+          "auxiliary_p95_ms": 2820.99,
+          "output_tokens": 2196
+        },
+        {
+          "quality": 59.68,
+          "complete_p95_ms": 6938.11,
+          "auxiliary_p95_ms": 2848.818,
+          "output_tokens": 2311
+        }
+      ],
+      "versionqa": [
+        {
+          "quality": 85,
+          "complete_p95_ms": 13897.636,
+          "auxiliary_p95_ms": 1723.167,
+          "output_tokens": 1541
+        }
+      ],
+      "loong": [
+        {
+          "quality": 76.75,
+          "complete_p95_ms": 28576.299,
+          "auxiliary_p95_ms": 4187.054,
+          "output_tokens": 1799
+        }
+      ]
+    },
+    "contemporaneous_controls": {
+      "multidoc2dial": {
+        "quality": 18.13,
+        "complete_p95_ms": 9222.404,
+        "auxiliary_p95_ms": 3768.391,
+        "output_tokens": 2525
+      },
+      "mtrag": {
+        "quality": 61.612,
+        "complete_p95_ms": 7556.828,
+        "auxiliary_p95_ms": 5104.993,
+        "output_tokens": 2235
+      }
+    },
+    "expanded_multidoc2dial": {
+      "questions": 120,
+      "conversations": 20,
+      "control": {
+        "quality": 26.675,
+        "complete_p95_ms": 13391.512,
+        "auxiliary_p95_ms": 996.498,
+        "output_tokens": 9432
+      },
+      "shared": {
+        "quality": 26.788,
+        "complete_p95_ms": 11608.235,
+        "auxiliary_p95_ms": 928.851,
+        "output_tokens": 8981
       }
     }
   }
