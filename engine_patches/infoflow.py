@@ -251,13 +251,14 @@ class QwenInfoFlow:
         return self.decode_many((state,), input_id.reshape(1), position.reshape(1))[0]
 
     @torch.inference_mode()
-    def decode_many(self, states, input_ids, positions):
+    def decode_many(self, states, input_ids, positions, native=None):
         """Batch projections, MLPs and paged attention across ready requests."""
         count = len(states)
         bucket = 1 << (max(len(state.row) for state in states)-1).bit_length()
         segments = 1 << (max(len(state.decode_lengths) for state in states)-1).bit_length()
         graphs, state = states[0].runtime.decode_graphs, states[0]
-        key = count, bucket, segments
+        native_count = native.batch_size if native is not None else 0
+        key = count, bucket, segments, native_count
         if key not in graphs:
             width = self.layers[0].self_attn.rotary_emb.cos_sin_cache.shape[1]//2
             graphs[key] = SimpleNamespace(pool=state.pool,
@@ -268,6 +269,7 @@ class QwenInfoFlow:
                 position_cosine=torch.ones((count*segments, width), device=input_ids.device, dtype=torch.float32),
                 position_sine=torch.zeros((count*segments, width), device=input_ids.device, dtype=torch.float32), attention_workspace={},
                 input=input_ids.clone(), position=positions.clone(),
+                native_slots=state.row.new_empty(native_count),
                 batch_indices=torch.arange(count, device=input_ids.device),
                 owners=[None]*count, graph=None)
         fixed = graphs[key]
@@ -299,29 +301,81 @@ class QwenInfoFlow:
             fixed.attention_workspace['lse'].fill_(-torch.inf)
         fixed.input.copy_(input_ids)
         fixed.position.copy_(positions)
+        if native is not None:
+            from sglang.srt.model_executor.forward_context import get_attn_backend
+            backend = get_attn_backend()
+            fixed.native_slots.copy_(self.forward_batch.contextkv_translator.write_ids(native))
+            sizes = state.runtime.scheduler.tp_worker.model_runner.decode_cuda_graph_capture_bs
+            if not sizes or native_count > sizes[-1]:
+                backend.init_forward_metadata(native)
+                return self._decode(fixed, fixed.input, fixed.position, native)
         if fixed.graph is None:
-            self._decode(fixed, fixed.input, fixed.position)
+            if native is not None:
+                backend.init_forward_metadata_out_graph(native, in_capture=True)
+            self._decode(fixed, fixed.input, fixed.position, native)
             fixed.graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(fixed.graph):
-                fixed.output = self._decode(fixed, fixed.input, fixed.position)
+                fixed.output = self._decode(fixed, fixed.input, fixed.position, native)
+        if native is not None:
+            backend.init_forward_metadata_out_graph(native)
         fixed.graph.replay()
         return fixed.output
 
-    def _decode(self, state, input_id, position):
-        hidden = self.model.embed_tokens(input_id)
+    def _decode(self, state, input_id, positions, native=None):
+        native_count = native.batch_size if native is not None else 0
+        position = positions[native_count:]
         lengths = state.lengths.clone()
         lengths[:, 0] += (position+1-state.input_lengths).to(lengths.dtype)
         indptr = torch.cat((lengths.new_zeros(1), lengths.flatten().cumsum(0, dtype=torch.int32)))
         indices = pack_decode_rows(state.row, state.order, position, indptr, state.input_lengths,
                                    state.lengths, lengths.shape[1])
+        slots = state.row[state.batch_indices, position]
+        if native is not None:
+            slots = torch.cat((state.native_slots, slots))
+
+        def attend(attn, q, k, v):
+            q = q.reshape(-1, attn.num_heads, attn.head_dim)
+            k = k.reshape(-1, attn.num_kv_heads, attn.head_dim)
+            keys, values = state.pool.get_kv_buffer(attn.attn.layer_id)
+            keys[slots], values[slots] = k, v.reshape_as(k)
+            shared = segmented_decode(q[native_count:], keys, values, indptr, indices, state.position_cosine,
+                state.position_sine, lengths.shape[1], attn.rotary_emb, state.attention_workspace)
+            if native is None:
+                return shared
+            exact = attn.attn(q[:native_count].flatten(1), None, None, native, save_kv_cache=False)
+            return torch.cat((exact.reshape(native_count, *shared.shape[1:]), shared))
+
+        hidden = self.model.embed_tokens(input_id)
+        if native is None:
+            for layer in self.layers:
+                q, k, v = self._qkv(layer, hidden, position)
+                hidden = self._finish_layer(layer, hidden, attend(layer.self_attn, q, k, v))
+            return self.model.norm(hidden)
+
+        from sglang.srt.layers.layer_boundary.residual import batch as residual_batch
+        from sglang.srt.distributed import tensor_model_parallel_all_reduce
+        from sglang.srt.runtime_context import get_parallel
+        native_hidden, shared_hidden = hidden[:native_count], hidden[native_count:]
+        # The two paths keep their original residual arithmetic around shared projections.
+        residual_batch.start(native)
         for layer in self.layers:
-            layer_id = layer.self_attn.attn.layer_id
-            q, k, v = self._qkv(layer, hidden, position)
-            keys, values = state.pool.get_kv_buffer(layer_id)
-            slots = state.row[state.batch_indices, position]
-            keys[slots], values[slots] = k, v
-            attention = segmented_decode(q, keys, values, indptr, indices,
-                state.position_cosine, state.position_sine, lengths.shape[1],
-                layer.self_attn.rotary_emb, state.attention_workspace)
-            hidden = self._finish_layer(layer, hidden, attention)
-        return self.model.norm(hidden)
+            normalized = torch.cat((layer.attn_boundary.prepare(native_hidden, native),
+                                    layer.input_layernorm(shared_hidden)))
+            attn = layer.self_attn
+            q, k, v = attn.forward_prepare_native(positions, normalized)
+            projected, _ = attn.o_proj(attend(attn, q, k, v).flatten(1))
+            native_hidden = layer.attn_boundary.finish(projected[:native_count], native)
+            native_hidden = layer.ffn_boundary.prepare(native_hidden, native)
+            delta = projected[native_count:]
+            if get_parallel().attn_tp_size > 1:
+                delta = tensor_model_parallel_all_reduce(delta)
+            shared_hidden = shared_hidden + delta
+            normalized = torch.cat((native_hidden, layer.post_attention_layernorm(shared_hidden)))
+            ffn = layer.mlp(normalized, forward_batch=self.forward_batch)
+            native_hidden = layer.ffn_boundary.finish(ffn[:native_count], native)
+            delta = ffn[native_count:]
+            if get_parallel().tp_size > 1:
+                delta = tensor_model_parallel_all_reduce(delta)
+            shared_hidden = shared_hidden + delta
+        native_hidden = residual_batch.final_norm(native_hidden, native, self.model.norm, skip_empty=True)
+        return torch.cat((native_hidden, self.model.norm(shared_hidden)))

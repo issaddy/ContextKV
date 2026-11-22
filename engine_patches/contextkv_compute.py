@@ -650,7 +650,6 @@ def _single_batch(batch, index, offset, length):
 
 def _native_decode_batch(batch, indices):
     """Keep the Native members of a mixed decode batch together."""
-    from sglang.srt.model_executor.forward_context import get_attn_backend
     result = copy(batch)
     result.batch_size = len(indices)
     for name in ('input_ids', 'positions', 'req_pool_indices', 'seq_lens', 'orig_seq_lens', 'seq_lens_cpu'):
@@ -661,7 +660,6 @@ def _native_decode_batch(batch, indices):
     result.out_cache_loc = batch.kv_loc_plan.virtual_write_ids(cols=batch.kv_loc_cols)[indices]
     translator = batch.contextkv_translator
     translator.own_plan(result).bind(result, translator)
-    get_attn_backend().init_forward_metadata(result)
     return result
 
 
@@ -772,13 +770,13 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
                     result[offset + local] = driver.decode(state, input_ids[offset + local], global_position)
         offset += length
     if decode_states:
-        indices = torch.tensor(decode_offsets, device=input_ids.device)
-        result[indices] = driver.decode_many(decode_states, input_ids[indices], torch.stack(decode_positions))
-    if native_decode:
-        from sglang.srt.model_executor.forward_context import forward_context, get_forward_context
-        native = _native_decode_batch(batch, native_decode)
-        with forward_context(get_forward_context(), forward_batch=native):
-            result[native_decode] = native_forward(native.input_ids, native.positions, native, None, pp_proxy_tensors)
+        active_positions = torch.stack(decode_positions)
+        native = None
+        if native_decode:
+            native = _native_decode_batch(batch, native_decode)
+            active_positions = torch.cat((native.positions, active_positions))
+        indices = torch.tensor(native_decode + decode_offsets, device=input_ids.device)
+        result[indices] = driver.decode_many(decode_states, input_ids[indices], active_positions, native)
     return result
 
 
