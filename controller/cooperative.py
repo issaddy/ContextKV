@@ -173,7 +173,6 @@ class CooperativeController:
                 if scope != reuse["scope"]:
                     reuse["sources"].clear()
                     reuse["scope"] = scope
-                state.session_id = session_id
                 state.retained_sources = reuse["sources"]
                 state.totals = totals
                 snapshot = replace(snapshot, raw_history=working_history(state.query, snapshot.raw_history))
@@ -519,8 +518,7 @@ class CooperativeController:
         available_sources = {source_address(block) for block in (*state.source_headers, *blocks)}
         native = (state.costs.snapshot if state.costs is not None else
             await self.engine.evidence_state(tuple(available_sources),
-                cache_scope=state.cache_scope, cache_namespace=state.cache_namespace,
-                session_id=state.session_id, retained_sources=state.retained_sources))
+                cache_scope=state.cache_scope, cache_namespace=state.cache_namespace))
         def select():
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,

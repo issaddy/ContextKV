@@ -272,7 +272,7 @@ async def collect(args, *, answer_plans=None):
                 windows[encode_id] = first, time.monotonic()
                 if request is not None and args.seed_tier == "host":
                     released = time.monotonic()
-                    await engine.close_session(branch_id)
+                    await engine.close_session(branch_id, host_scope=branch_id)
                     windows[branch_id+":release"] = released, time.monotonic()
                 preparing = time.monotonic()
                 await controller.prepare_state(state, snapshot, complete)

@@ -69,7 +69,6 @@ class SharedEvidenceState:
     budget_exhausted: bool = False
     cache_scope: str = "shared"
     cache_namespace: str | None = None
-    session_id: str | None = None
     retained_sources: dict = field(default_factory=dict)
 
     @property
