@@ -154,6 +154,8 @@ python3 -m training.collect_shared_values sets --config configs/study.yaml \
 
 容器 `data/training/shared/aux_supervision/inscit-wide-sets.jsonl` 保存 24 段候选池的段落 ID、集合特征和回答标签，可直接作为集合头的 `--data`。同目录的 `inscit-orders.jsonl` 按题记录两种文章顺序的答案得分、事实覆盖率、输出长度和引擎计数。每种顺序先用上一轮作者引用的证据做一次单 token 预填充，再用实际历史回答当前问题。文件中的 `ms` 是本次生成调用耗时。
 
+顺序实验的逐事实文件每题有四个 `trials`。`evidence_order` 和 `reference_order` 分别索引同一行的 `orders`，前者决定段落在提示中的位置，后者决定从 S1 开始的来源编号。`covered_facts` 与 `reference_facts` 逐项对应，交换答案展示顺序后两次判定有分歧的记为 `null`。每次测量先清空引擎缓存，再预填充上一轮原文。并发为 1；`first_token_ms` 从调度器接收到预填充完成，`decode_ms` 为随后至生成结束的时长。开发题的 `matched_output` 保存等长输出时的引擎耗时；`primed_articles` 中的两组各预热一篇文章，组内两侧仍使用相同的问题、历史和证据。每组的两个测量值按 `orders` 排列。[顺序实验数据](../../training/assets/inscit-order-facts.jsonl)
+
 逐事实配对文件可直接传入集合头训练的 `--data`。每行包含只给历史的对照和两个等长证据集。`sets[].quality` 是该条参考事实被回答且有可见材料支持的二值标签，`answer_quality` 保留整题得分，`covered_facts` 记录回答是否命中该事实。`fact_witness` 的字符区间为左闭右开，可按题号和来源回到 `inscit-sets.jsonl` 的原段落或历史发言核查。[逐事实配对文件](../../training/assets/inscit-supported-swaps.jsonl)
 
 集合采集使用线上首批可见证据，比较当前选择、相邻集合与空集合。固定教师先根据参考答案拆分必要事实，再匿名评判各答案。每个集合保存答案质量、逐事实覆盖标记、输出长度和选择特征。MultiDoc2Dial 用参考答案 F1，其余训练来源用固定教师对照参考答案评分。开发报告中的 `dev_chosen_quality` 和 `dev_chosen_fact_recall` 取自有标签的干预集合中效用最高的一项。线上选择还要考虑完整候选集合、KV 报价和容量。字段损失只使用与标注对齐的子需求。范围头的开发指标使用与服务一致的整题和子需求联合路由。
