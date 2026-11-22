@@ -162,7 +162,7 @@ python3 -m bench.kv_layouts --config "$TRAIN_RUN/study.yaml" \
   --output "$TRAIN_RUN/kv-layouts.json"
 ```
 
-同一入口可孤立验证需求如何影响下一轮的选择。将命令加上 `--exchange-demand --source-tokens 4096`，两次都预热两种完整布局，只交换哪种布局带有未来需求。再并发写入相同的四个 2,048-token 冷前缀，获取两种布局的报价后执行重访。单 token 输出把解码长度固定，结果记录两条路径分别驻留的 GPU/Host token、报价和 agent 最终选择。
+同一入口可孤立验证需求如何影响下一轮的选择。将命令加上 `--exchange-demand --source-tokens 4096`，两次都预热两种完整布局，只交换哪种布局带有未来需求。再并发写入相同的四个 2,048-token 冷前缀，获取两种布局的报价后执行重访。单 token 输出把解码长度固定，结果记录两条路径分别驻留的 GPU/Host token、报价和 agent 最终选择。将 `--cohort` 切到 `results/kv_admission_20261122.json` 可复现不重叠的 20 题。结果中的 `ms` 是重访请求耗时，`seed_to_answer_ms` 从首次提交预热请求计至重访返回，包含中间分配、报价与编译。
 
 InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及在被移除段落的原位置等量填入历史段落的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)
 

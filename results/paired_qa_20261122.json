@@ -24,7 +24,8 @@
       "field": "fc8c3b5",
       "semantic_stop": "fdca33b",
       "batch_prefill": "3214c3d",
-      "layout_retention": "6ccaa20"
+      "layout_retention": "6ccaa20",
+      "queued_prefix": "ab7b942"
     },
     "loong_reference_commit": "fc8c3b5"
   },
@@ -241,6 +242,25 @@
           "gpu_gib_seconds": 1793.34,
           "host_gib_seconds": 523.91,
           "active_kv_peak_tokens": 3136
+        },
+        "queued_prefix": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 18.348,
+          "complete_p95_ms": 9197.030963934958,
+          "wait_p95_ms": 2875.41,
+          "auxiliary_p95_ms": 4168.51,
+          "engine_p95_ms": 5587.07,
+          "prefill_tokens": 11412,
+          "output_tokens": 2448,
+          "gpu_hit_tokens": 1088,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 12500,
+          "gpu_gib_seconds": 1714.98,
+          "host_gib_seconds": 500.62,
+          "active_kv_peak_tokens": 3584
         }
       }
     },
@@ -456,6 +476,25 @@
           "gpu_gib_seconds": 2447.61,
           "host_gib_seconds": 742.03,
           "active_kv_peak_tokens": 5568
+        },
+        "queued_prefix": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 62.255,
+          "complete_p95_ms": 8473.487616935747,
+          "wait_p95_ms": 3331.89,
+          "auxiliary_p95_ms": 5544.52,
+          "engine_p95_ms": 4305.72,
+          "prefill_tokens": 14830,
+          "output_tokens": 2397,
+          "gpu_hit_tokens": 1600,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 16430,
+          "gpu_gib_seconds": 2180.28,
+          "host_gib_seconds": 660.79,
+          "active_kv_peak_tokens": 4544
         }
       }
     },
@@ -670,6 +709,25 @@
           "total_input_tokens": 16522,
           "gpu_gib_seconds": 1303.92,
           "host_gib_seconds": 377.31,
+          "active_kv_peak_tokens": 4096
+        },
+        "queued_prefix": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16504.53549743397,
+          "wait_p95_ms": 13650.37,
+          "auxiliary_p95_ms": 4076.08,
+          "engine_p95_ms": 2927.24,
+          "prefill_tokens": 14474,
+          "output_tokens": 1524,
+          "gpu_hit_tokens": 2048,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 16522,
+          "gpu_gib_seconds": 1288.9,
+          "host_gib_seconds": 373.57,
           "active_kv_peak_tokens": 4096
         }
       }
@@ -886,12 +944,50 @@
           "gpu_gib_seconds": 2344.38,
           "host_gib_seconds": 659.15,
           "active_kv_peak_tokens": 17088
+        },
+        "queued_prefix": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 75.75,
+          "complete_p95_ms": 29710.71873685578,
+          "wait_p95_ms": 24825.41,
+          "auxiliary_p95_ms": 6008.74,
+          "engine_p95_ms": 6551.52,
+          "prefill_tokens": 83492,
+          "output_tokens": 1806,
+          "gpu_hit_tokens": 768,
+          "host_loaded_tokens": 0,
+          "total_input_tokens": 84260,
+          "gpu_gib_seconds": 2398.44,
+          "host_gib_seconds": 674.57,
+          "active_kv_peak_tokens": 17344
         }
       }
     }
   },
   "expanded": {
     "multidoc2dial": {
+      "queued_prefix": {
+        "protocol": "P3",
+        "declared": 120,
+        "completed": 120,
+        "scored": 120,
+        "quality": 26.877,
+        "complete_p95_ms": 12741.040566284208,
+        "wait_p95_ms": 10044.59,
+        "auxiliary_p95_ms": 875.72,
+        "engine_p95_ms": 3212.76,
+        "prefill_tokens": 66584,
+        "output_tokens": 9361,
+        "gpu_hit_tokens": 11584,
+        "host_loaded_tokens": 0,
+        "total_input_tokens": 78168,
+        "gpu_gib_seconds": 5359.54,
+        "host_gib_seconds": 1573.8,
+        "active_kv_peak_tokens": 5248
+      },
       "layout_retention": {
         "previous": {
           "protocol": "P3",

@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+from time import monotonic
 
 import yaml
 
@@ -63,21 +64,24 @@ async def replay(args):
                 record[label+"_indexed"] = any(tuple(p["source_ids"]) == layout for p in snapshot["prefixes"])
         return request, record
 
-    async def read(request, record, output):
+    async def read(request, record, output, started):
         reply = await submit(request, record["id"], "-read", output)
         r = reply["meta"]["contextkv_compute"]
         record.update(gpu=r["device_hit_tokens"], host=r["host_loaded_tokens"], prefill=r["actual_prefill_tokens"],
-                      output=reply["meta"]["completion_tokens"], ms=reply["elapsed_ms"], text=reply["text"])
+                      output=reply["meta"]["completion_tokens"], ms=reply["elapsed_ms"], text=reply["text"],
+                      seed_to_answer_ms=(monotonic()-started)*1000)
         return record
 
     async def revisit(case):
+        started = monotonic()
         task, _, blocks, _, _ = case
         for evidence, stage in ((blocks, "-full"), (blocks[1:], "-suffix")):
             await submit(seed(evidence, evidence), task, stage, 1)
         request, record = await plan(case, run.context.max_new_tokens)
-        return await read(request, record, run.context.max_new_tokens)
+        return await read(request, record, run.context.max_new_tokens, started)
 
     async def exchange(wave, target):
+        started = monotonic()
         for label in ("original", "rotate"):
             jobs = []
             for task, _, blocks, _, _ in wave:
@@ -92,7 +96,7 @@ async def replay(args):
             jobs.append(submit(filler, task+"fill", "pressure", 1))
         await asyncio.gather(*jobs)
         plans = await asyncio.gather(*(plan(case, 1) for case in wave))
-        results = await asyncio.gather(*(read(request, record, 1) for request, record in plans))
+        results = await asyncio.gather(*(read(request, record, 1, started) for request, record in plans))
         for result in results:
             result["target"] = target
         return results

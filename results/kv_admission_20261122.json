@@ -1,0 +1,287 @@
+{
+  "interference_ids": [
+    "49f46b79-898c-45de-a19d-f25d17c216b1",
+    "9f29f552-c817-4c2a-8910-b5e8ae7c014f",
+    "b9fe5b23-43d7-49da-8e73-861bcf93b76f",
+    "41523348-9ee6-40b2-9660-e11859571bdf",
+    "b182ad6a-5c78-414e-af32-5cd27b91d064",
+    "55fa764d-367e-4be9-aa93-7fb9233cd354",
+    "5d482043-88d2-4246-8191-e603b7bf6ed4",
+    "9b78667b-b80b-475b-a574-6748d8668a77",
+    "528cd19a-a842-44e2-af9b-33a4d2b19eb4",
+    "a8fa7aa1-2198-419b-a0de-6ba4d1c1f160",
+    "3de47098-2658-446f-899a-7f662bb276c4",
+    "2fb7e717-7267-4727-832f-384483046ff3",
+    "d20f30d2-7f6b-481a-bd0f-0c050bacde5d",
+    "a780dc25-81d8-4e0f-b344-5086b8055e04",
+    "de1b3c88-6d88-4d7d-a5cf-e65d225562fa",
+    "946f6301-070d-415e-9f90-06b412eecc4d",
+    "edc6d95f-02ba-4835-bff6-853cb7d61f6b",
+    "7434e41f-46e4-4d74-bbbb-8cd477337040",
+    "1cd24ded-c112-46a9-816a-ebf40e7a6163",
+    "d9d95e48-f25f-445f-a111-4b2bfe468d06"
+  ],
+  "hardware": "H200",
+  "generator": "Qwen3-32B BF16",
+  "generation_gpu": 4,
+  "concurrency": 4,
+  "kv_gib": 6,
+  "selection": "Seed 20261122. Sample without replacement from Loong Set1-v2 outside the original 20 IDs, matching the original domain counts and domain order.",
+  "original_cohort": "kv_residency_20261122.json",
+  "trace_protocol": "At the source quote, recover the token path from the radix node. At scheduler admission, compare the chosen token input, the original node residency and the native prefix match. Compare this match with the completed request receipt. Count physical eviction events between quote and admission.",
+  "instrumented_fixed20": {
+    "previous": {
+      "original": {
+        "gpu_quote": 57600,
+        "gpu_at_quote": 57600,
+        "gpu_at_admit": 10944,
+        "gpu_receipt": 10944,
+        "host": 76608,
+        "prefill": 5246,
+        "follows": 8,
+        "stale": 12,
+        "match_complete": 20,
+        "stale_with_eviction": 12,
+        "admit_matches_page_walk": 20,
+        "admit_matches_receipt": 20,
+        "p95_ms": 313.92,
+        "median_quote_to_admit_ms": 109.5
+      },
+      "rotate": {
+        "gpu_quote": 79104,
+        "gpu_at_quote": 79104,
+        "gpu_at_admit": 79104,
+        "gpu_receipt": 79104,
+        "host": 8448,
+        "prefill": 5246,
+        "follows": 20,
+        "stale": 0,
+        "match_complete": 20,
+        "stale_with_eviction": 0,
+        "admit_matches_page_walk": 20,
+        "admit_matches_receipt": 20,
+        "p95_ms": 215.32,
+        "median_quote_to_admit_ms": 111.33
+      }
+    },
+    "queued": {
+      "original": {
+        "gpu_quote": 57216,
+        "gpu_at_quote": 57600,
+        "gpu_at_admit": 42368,
+        "gpu_receipt": 42368,
+        "host": 45184,
+        "prefill": 5246,
+        "follows": 8,
+        "stale": 7,
+        "match_complete": 20,
+        "stale_with_eviction": 7,
+        "admit_matches_page_walk": 20,
+        "admit_matches_receipt": 20,
+        "p95_ms": 272.58,
+        "median_quote_to_admit_ms": 107.53
+      },
+      "rotate": {
+        "gpu_quote": 78720,
+        "gpu_at_quote": 79104,
+        "gpu_at_admit": 79104,
+        "gpu_receipt": 79104,
+        "host": 8448,
+        "prefill": 5246,
+        "follows": 20,
+        "stale": 0,
+        "match_complete": 20,
+        "stale_with_eviction": 0,
+        "admit_matches_page_walk": 20,
+        "admit_matches_receipt": 20,
+        "p95_ms": 214.45,
+        "median_quote_to_admit_ms": 109.84
+      }
+    }
+  },
+  "release_comparison": {
+    "protocol": "Reverse order for the release-code comparison (candidate then previous); 6 GiB, concurrency 4. \"fixed\" uses the original IDs, \"exchange\" uses the held-out IDs. \"natural\" warms the full layout and then its suffix with 6144 source tokens before natural generation with a 1024-token maximum. seed_to_answer_p95_ms includes both seeds, any interference, quotes, prompt compilation and the revisit; judge execution is separate.",
+    "arms": {
+      "main": {
+        "fixed": {
+          "original": {
+            "questions": 20,
+            "actual_gpu": 10944,
+            "actual_host": 76608,
+            "prefill": 5246,
+            "output": 20,
+            "revisit_p95_ms": 232.59,
+            "seed_to_answer_p95_ms": 5166.03,
+            "quoted_gpu": 57216,
+            "both_options_only": 20,
+            "chosen_target": 8
+          },
+          "rotate": {
+            "questions": 20,
+            "actual_gpu": 79104,
+            "actual_host": 8448,
+            "prefill": 5246,
+            "output": 20,
+            "revisit_p95_ms": 213.32,
+            "seed_to_answer_p95_ms": 5126.93,
+            "quoted_gpu": 78720,
+            "both_options_only": 20,
+            "chosen_target": 20
+          }
+        },
+        "exchange": {
+          "original": {
+            "questions": 20,
+            "actual_gpu": 9280,
+            "actual_host": 80640,
+            "prefill": 5114,
+            "output": 20,
+            "revisit_p95_ms": 200.75,
+            "seed_to_answer_p95_ms": 5543.6,
+            "quoted_gpu": 56704,
+            "both_options_only": 20,
+            "chosen_target": 7
+          },
+          "rotate": {
+            "questions": 20,
+            "actual_gpu": 79104,
+            "actual_host": 10816,
+            "prefill": 5114,
+            "output": 20,
+            "revisit_p95_ms": 181.06,
+            "seed_to_answer_p95_ms": 5477.05,
+            "quoted_gpu": 78784,
+            "both_options_only": 20,
+            "chosen_target": 20
+          }
+        },
+        "natural": {
+          "natural": {
+            "questions": 20,
+            "actual_gpu": 16640,
+            "actual_host": 110656,
+            "prefill": 6607,
+            "output": 2283,
+            "revisit_p95_ms": 5967.57,
+            "seed_to_answer_p95_ms": 10883.17,
+            "quality": 43.75,
+            "scored": 20
+          }
+        }
+      },
+      "queued": {
+        "fixed": {
+          "original": {
+            "questions": 20,
+            "actual_gpu": 42368,
+            "actual_host": 45184,
+            "prefill": 5246,
+            "output": 20,
+            "revisit_p95_ms": 228.67,
+            "seed_to_answer_p95_ms": 5145.3,
+            "quoted_gpu": 57216,
+            "both_options_only": 20,
+            "chosen_target": 8
+          },
+          "rotate": {
+            "questions": 20,
+            "actual_gpu": 79104,
+            "actual_host": 8448,
+            "prefill": 5246,
+            "output": 20,
+            "revisit_p95_ms": 211.89,
+            "seed_to_answer_p95_ms": 5138.18,
+            "quoted_gpu": 78720,
+            "both_options_only": 20,
+            "chosen_target": 20
+          }
+        },
+        "exchange": {
+          "original": {
+            "questions": 20,
+            "actual_gpu": 40256,
+            "actual_host": 49664,
+            "prefill": 5114,
+            "output": 20,
+            "revisit_p95_ms": 193.47,
+            "seed_to_answer_p95_ms": 5540.87,
+            "quoted_gpu": 56704,
+            "both_options_only": 20,
+            "chosen_target": 7
+          },
+          "rotate": {
+            "questions": 20,
+            "actual_gpu": 79104,
+            "actual_host": 10816,
+            "prefill": 5114,
+            "output": 20,
+            "revisit_p95_ms": 183.03,
+            "seed_to_answer_p95_ms": 5482.83,
+            "quoted_gpu": 78784,
+            "both_options_only": 20,
+            "chosen_target": 20
+          }
+        },
+        "natural": {
+          "natural": {
+            "questions": 20,
+            "actual_gpu": 18688,
+            "actual_host": 108608,
+            "prefill": 6607,
+            "output": 2283,
+            "revisit_p95_ms": 5966.13,
+            "seed_to_answer_p95_ms": 10948.32,
+            "quality": 43.75,
+            "scored": 20
+          }
+        }
+      }
+    },
+    "paired": {
+      "fixed_rotate": {
+        "questions": 20,
+        "same_final_order": 20,
+        "gpu_gain": 0,
+        "gpu_loss": 0,
+        "same_prefill": 20
+      },
+      "fixed_original": {
+        "questions": 20,
+        "same_final_order": 20,
+        "gpu_gain": 10,
+        "gpu_loss": 0,
+        "same_prefill": 20
+      },
+      "exchange_rotate": {
+        "questions": 20,
+        "same_final_order": 20,
+        "gpu_gain": 0,
+        "gpu_loss": 0,
+        "same_prefill": 20
+      },
+      "exchange_original": {
+        "questions": 20,
+        "same_final_order": 20,
+        "gpu_gain": 9,
+        "gpu_loss": 0,
+        "same_prefill": 20
+      },
+      "natural_natural": {
+        "questions": 20,
+        "same_final_order": 20,
+        "gpu_gain": 1,
+        "gpu_loss": 0,
+        "same_prefill": 20,
+        "quality_up": 0,
+        "quality_tied": 20,
+        "quality_down": 0,
+        "same_output_length": 20
+      }
+    }
+  },
+  "queued_arrival": {
+    "stale_requests_original_demand": 7,
+    "with_eviction_before_scheduler_receive": 7,
+    "with_all_intervening_evictions_before_scheduler_receive": 2
+  }
+}
