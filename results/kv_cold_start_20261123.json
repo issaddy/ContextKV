@@ -264,5 +264,50 @@
         40
       ]
     }
+  },
+  "full_mtrag_source_revisits": {
+    "implementation": "27155ec",
+    "protocol": "P3",
+    "requests": 205,
+    "page_tokens": 64,
+    "input_lengths_and_visible_source_offsets_reproduced": 205,
+    "actual_native_routes": 205,
+    "actual_nonprefix_opportunities": 0,
+    "match": "Identical original source address and Qwen body token sequence. Subtract the measured GPU plus Host Native prefix for each request.",
+    "earlier_turn_in_same_dialogue": {
+      "turns_beyond_prefix": 34,
+      "tokens_beyond_prefix": 3255,
+      "turns_beyond_whole_page": 5,
+      "body_tokens_beyond_hit_on_those_turns": 2258
+    },
+    "shared_pool": {
+      "availability_bounds": "Earlier than the preceding return in this dialogue, or at latest earlier than the current return, using completion order in official.jsonl.",
+      "turns_beyond_prefix": [
+        34,
+        38
+      ],
+      "tokens_beyond_prefix": [
+        3255,
+        3355
+      ],
+      "turns_beyond_whole_page": [
+        5,
+        5
+      ],
+      "body_tokens_beyond_hit_on_those_turns": [
+        2258,
+        2258
+      ]
+    },
+    "separate_build_estimate": {
+      "distinct_repeated_blocks": 6,
+      "source_tokens_to_build_once": 2273,
+      "native_prefill_ms_per_token": 0.10842554047257119,
+      "build_ms_per_token": 0.19593644486284095,
+      "displaced_prefill_ms": 244.825,
+      "build_ms": 445.364,
+      "blocks_with_positive_net": 1,
+      "positive_net_ms_with_hindsight": 7.676
+    }
   }
 }
