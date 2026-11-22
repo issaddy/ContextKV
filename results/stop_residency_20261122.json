@@ -1,0 +1,160 @@
+{
+  "weights": "models/shared-stop-sections.pt",
+  "setup": "Qwen3-32B BF16, H200, C4, 8 GiB pool, physical GPUs 4/5, P3",
+  "fixed20": {
+    "multidoc2dial": {
+      "coupled_quality": {
+        "quality": 18.63893962803424,
+        "complete_p95_ms": 8995.90594532201,
+        "prefill_tokens": 12688,
+        "output_tokens": 2529,
+        "extensions": 4
+      },
+      "finish_first": {
+        "quality": 19.11995737447986,
+        "complete_p95_ms": 9305.590420635417,
+        "prefill_tokens": 11278,
+        "output_tokens": 2646,
+        "extensions": 0
+      },
+      "semantic_quality": {
+        "quality": 19.236210702973917,
+        "complete_p95_ms": 9373.54036498582,
+        "prefill_tokens": 11130,
+        "output_tokens": 2527,
+        "extensions": 3
+      }
+    },
+    "mtrag": {
+      "coupled_quality": {
+        "quality": 59.39339176374827,
+        "complete_p95_ms": 9286.851816193668,
+        "prefill_tokens": 15026,
+        "output_tokens": 2454,
+        "extensions": 3
+      },
+      "finish_first": {
+        "quality": 61.793928231602344,
+        "complete_p95_ms": 10917.215250222947,
+        "prefill_tokens": 17541,
+        "output_tokens": 3091,
+        "extensions": 0
+      },
+      "semantic_quality": {
+        "quality": 60.789347697273065,
+        "complete_p95_ms": 9209.409530600535,
+        "prefill_tokens": 14397,
+        "output_tokens": 2386,
+        "extensions": 24
+      }
+    }
+  },
+  "complete_multidoc2dial_conversations": {
+    "sessions": [
+      "026b8bca1fba07a086d2b3a7d88c9b16",
+      "05d1233e323f975fe059cf5f94bd5bf1",
+      "20c54f2ec6fe8fefe74058e5164fc314",
+      "3555f3d0214bead869ae94e54bb1c94c",
+      "387e84b84298dc73576f1fee8c34e53f",
+      "3de23bb1299107cfa9f1c8fe93a9ce6c",
+      "5b06dfd1c57d848921ce230a11f9ef9a",
+      "82ce8b2f012e056d4d91feece01c7507",
+      "90740ea8e6f3e4afaad9fafa0efc1869",
+      "92755cdf967eac9f5aeeda531b3aa8f7",
+      "9a1657631445dade9db616c29d2a3de2",
+      "c6faab8a9e3ae56c138c4343e4cbbbde",
+      "d2030db011b9a5c806051552302754bd",
+      "d7f18eae2e179bcf3efc5a0a5b091970",
+      "dd624d36979de0498ad1d0a2e4c268a7",
+      "e0939b86b6f621211e52deec88dd9040",
+      "e3fc746c88493c749914d1e69d5b0673",
+      "f46b71551f7c27698fe80d4834c02028",
+      "f6760f292c057be5f1bbdc9d34d0b524",
+      "fe5f6b43660cf342e0b72cc216714828"
+    ],
+    "coupled_quality": {
+      "questions": 120,
+      "sessions": 20,
+      "quality": 27.166026396943206,
+      "complete_p95_ms": 13164.90666208556,
+      "auxiliary_p95_ms": 791.35,
+      "wait_p95_ms": 9727.68,
+      "engine_p95_ms": 3392.47,
+      "prefill_tokens": 65788,
+      "output_tokens": 9383,
+      "extensions": 17
+    },
+    "semantic_quality": {
+      "questions": 120,
+      "sessions": 20,
+      "quality": 26.918648468857814,
+      "complete_p95_ms": 13508.080349781083,
+      "auxiliary_p95_ms": 887.31,
+      "wait_p95_ms": 10668.93,
+      "engine_p95_ms": 3499.65,
+      "prefill_tokens": 67594,
+      "output_tokens": 9515,
+      "extensions": 37
+    }
+  },
+  "native_transfer": {
+    "gpu": {
+      "questions": [
+        "e4a72c6929c792b520f6c54a1876b42c_8",
+        "e4a72c6929c792b520f6c54a1876b42c_12",
+        "03a4925e04a5c8ab3e2fb28a562afd99_10",
+        "03a4925e04a5c8ab3e2fb28a562afd99_14"
+      ],
+      "loaded": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "acks": 0,
+      "kv_tokens": 0,
+      "transfer_ms": 0,
+      "rate": null,
+      "quoted_rate": 0.016563475213552614,
+      "from_counters": null
+    },
+    "host": {
+      "questions": [
+        "e4a72c6929c792b520f6c54a1876b42c_8",
+        "e4a72c6929c792b520f6c54a1876b42c_12",
+        "03a4925e04a5c8ab3e2fb28a562afd99_10",
+        "03a4925e04a5c8ab3e2fb28a562afd99_14"
+      ],
+      "loaded": [
+        256,
+        128,
+        128,
+        128
+      ],
+      "acks": 2,
+      "kv_tokens": 640,
+      "transfer_ms": 9.218784093856812,
+      "rate": 0.014404350146651267,
+      "quoted_rate": 0.014404350146651267,
+      "from_counters": 0.014404350146651267
+    }
+  },
+  "paired_quality": {
+    "dev_questions": 24,
+    "eligible_nonterminal_pairs": 96,
+    "equal_compiled_input_and_mode": 90,
+    "intervention": "Hold 21 semantic features fixed and exchange the seven measured system features between the GPU/Host trajectories.",
+    "coupled": {
+      "action_flips": 13,
+      "flips_reproduced_by_quality_alone": 13,
+      "flips_reproduced_by_cost_alone": 1,
+      "max_abs_quality_change": 0.1782679111,
+      "max_abs_seconds_change": 1.1844263
+    },
+    "semantic": {
+      "action_flips": 0,
+      "max_abs_quality_change": 0,
+      "max_abs_seconds_change": 1.1844263
+    }
+  }
+}
