@@ -129,7 +129,7 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
 
-实际多轮停止轨迹来自 MultiDoc2Dial 官方训练会话。按声明题单运行正常 P3 问答，用上一轮提交给引擎的提示预热，分别保留 GPU 需求或释放到 Host。每次扩展 12 段，记录当前实际回答的 F1、引擎回执及继续一步的费用。同一条轨迹中，输入 token 和执行路径均相同的状态共用平均质量标签，各自保留实测费用。
+实际多轮停止轨迹来自 MultiDoc2Dial 官方训练会话。按声明题单运行正常 P3 问答，用上一轮提交给引擎的提示预热，GPU 组保留需求，Host 组显式把该采样分支的已备份页降至 Host。每次扩展 12 段，记录当前实际回答的 F1、引擎回执及继续一步的费用。同一条轨迹中，输入 token 和执行路径均相同的状态共用平均质量标签，各自保留实测费用。
 
 ```bash
 asset=training/assets/multidoc2dial-stop-dialogues.jsonl.gz
@@ -144,6 +144,25 @@ done
 python3 -m training.stop_value "$asset" --output "$TRAIN_RUN/stop.pt" \
   --seconds-price 0.001 --tail-price 0.001 --seed 42
 ```
+
+缓存容量干预使用 20 个实际提交过的多轮提示。14.7 KB 的压缩输入包含 task ID、引擎 token、来源边界、需求和问题区间，可直接重放。在引擎启动时分别设置 16,384、24,576、32,768 个 GPU KV token，保持页大小 64 和并发 4。每四题先预填充上一轮提示，再运行四个独立的长文请求，最后用相同提示各生成一个 token。每组交换一次原始来源需求和空需求的运行次序；回收使用引擎实际分配，原文与干扰请求由题单决定。
+
+```bash
+gzip -dc bench/assets/kv-revisit-inputs.jsonl.gz > "$TRAIN_RUN/kv-inputs.jsonl"
+python3 -m bench.kv_residency --config "$TRAIN_RUN/study.yaml" \
+  --cohort results/kv_residency_20261122.json --histories "$TRAIN_RUN/kv-inputs.jsonl" \
+  --documents data/loong/set1-v2/tasks.jsonl --output "$TRAIN_RUN/kv-revisits.json"
+```
+
+长文前缀布局对照在 6 GiB 池上使用同一题单中的 20 道 Loong 题。每题在各文档首部均分 6,144 个来源 token，先提交完整布局，再提交去掉第一份文档后的后缀。重访时，初始顺序为后缀接第一份文档，选材器根据引擎报价排列同一组证据。每四题从冷池开始。记录重访请求的引擎时长、实际计算及回载，并用项目的 Loong rubric 评分。分别启动待比较版本的引擎，运行同一条命令。
+
+```bash
+python3 -m bench.kv_layouts --config "$TRAIN_RUN/study.yaml" \
+  --cohort results/kv_residency_20261122.json --documents data/loong/set1-v2/tasks.jsonl \
+  --output "$TRAIN_RUN/kv-layouts.json"
+```
+
+同一入口可孤立验证需求如何影响下一轮的选择。将命令加上 `--exchange-demand --source-tokens 4096`，两次都预热两种完整布局，只交换哪种布局带有未来需求。再并发写入相同的四个 2,048-token 冷前缀，获取两种布局的报价后执行重访。单 token 输出把解码长度固定，结果记录两条路径分别驻留的 GPU/Host token、报价和 agent 最终选择。
 
 InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及在被移除段落的原位置等量填入历史段落的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)
 

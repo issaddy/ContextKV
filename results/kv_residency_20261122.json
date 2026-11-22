@@ -1,0 +1,575 @@
+{
+  "revisit_ids": [
+    "e4a72c6929c792b520f6c54a1876b42c_8",
+    "e4a72c6929c792b520f6c54a1876b42c_12",
+    "03a4925e04a5c8ab3e2fb28a562afd99_10",
+    "03a4925e04a5c8ab3e2fb28a562afd99_14",
+    "d0090553cee169c4d9b9b64fcaf1424c_9",
+    "d0090553cee169c4d9b9b64fcaf1424c_16",
+    "28714129e77152a3e0e6059ec07dd056_7",
+    "28714129e77152a3e0e6059ec07dd056_11",
+    "359c1fae078bdf15b4ede69672cf67cf_10",
+    "359c1fae078bdf15b4ede69672cf67cf_14",
+    "bd2485350a2eb2815436fc0104f504eb_8",
+    "bd2485350a2eb2815436fc0104f504eb_12",
+    "b154331dc3fa8bc3eefe0713e92b03f8_5",
+    "b154331dc3fa8bc3eefe0713e92b03f8_9",
+    "bd98d67dd19bd3756ace246d77700ccc_7",
+    "bd98d67dd19bd3756ace246d77700ccc_13",
+    "d39a4f697f2a8b6fe36b9face6c5d9b4_11",
+    "d39a4f697f2a8b6fe36b9face6c5d9b4_19",
+    "581ed05ceb21198768a262690df6cd32_5",
+    "581ed05ceb21198768a262690df6cd32_9"
+  ],
+  "interference_ids": [
+    "8aac94a9-c2fd-4911-b460-9a85bc029ffa",
+    "a5075845-053d-4570-a282-cc74baf7e284",
+    "0b7cb5be-ffa4-4f8b-983d-dc18e68d7e05",
+    "4d6cd4f8-57d2-4a28-9522-6e4cd8bfbbc7",
+    "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+    "b04fddff-35bf-47e1-944c-76276a8008c4",
+    "89ff6383-652f-4efd-8ff4-c23617eef20a",
+    "854f18da-ec84-40dd-87c5-5820a06e80ea",
+    "beb996a0-6642-4c03-b3fe-43256b1228ee",
+    "b7405d8e-13f0-4750-a25d-df3a67ffd39a",
+    "3be2ed94-317f-4921-bcc4-118c3917ff00",
+    "c6666dc5-f286-4359-ac6f-511737d9b3d6",
+    "0efa49bf-4fa1-4d42-9e0d-685d2d5fd7d9",
+    "4efcb525-bf7a-442e-b767-d3fc30aa1305",
+    "198e64ea-2591-42a5-82d8-fffd32951298",
+    "21964f26-f5f5-49f2-9b8c-216c606bc61e",
+    "c4a4e642-fa00-4377-a756-40f2f7ea7a74",
+    "e0007015-e0b3-4a25-a3c2-38715f07f430",
+    "4532c375-ba50-40bf-9a72-98abbb7663cd",
+    "b9f53701-4f2f-4dc9-9df5-d40aca186028"
+  ],
+  "generator": "Qwen3-32B BF16",
+  "hardware": "H200",
+  "concurrency": 4,
+  "page_tokens": 64,
+  "pressure_protocol": "Seed previous P3 prompts, run four intervening supplied-document prompts separately scoped at 5120 source tokens each, then revisit the exact seed input for one output token. Alternate the real demand and no-demand arm within each wave. Elapsed time covers the revisit engine request; the seed and intervening requests are outside it.",
+  "short_layout_ids": [
+    "bfee2cc8a7a12942da399284708ac067_1",
+    "0a50d649091a802f4ebe322ed5dab897_3",
+    "f0cf3f069bf264c852bf0baf2647a96b_1",
+    "d93da3a62ffa4af2c0a1e16fc3eb8e66_1",
+    "000903bfebe95a9185e6eff850694ab3_1",
+    "88b001050f59872313efaf99faf5f35c_1",
+    "579d66414de6b1c38cab1916b9c2675a_1",
+    "0a50d649091a802f4ebe322ed5dab897_7",
+    "263294e20897e70b0f00e09c17bb80fd_3",
+    "bfee2cc8a7a12942da399284708ac067_3",
+    "000903bfebe95a9185e6eff850694ab3_5",
+    "f0cf3f069bf264c852bf0baf2647a96b_3",
+    "579d66414de6b1c38cab1916b9c2675a_3",
+    "d93da3a62ffa4af2c0a1e16fc3eb8e66_3",
+    "88b001050f59872313efaf99faf5f35c_4",
+    "0a50d649091a802f4ebe322ed5dab897_5",
+    "bfee2cc8a7a12942da399284708ac067_5",
+    "01a066fc921fcf50074c9ecab21f0276_1",
+    "28714129e77152a3e0e6059ec07dd056_1",
+    "0a50d649091a802f4ebe322ed5dab897_1"
+  ],
+  "short_layout": {
+    "previous": {
+      "1": {
+        "cases": 20,
+        "visible_full_prefix": 0,
+        "chosen_full_prefix": 1,
+        "prefill": 4451,
+        "device_hit": 4160,
+        "host_loaded": 64,
+        "output": 20,
+        "revisit_p95_ms": 167.14
+      },
+      "1024": {
+        "cases": 20,
+        "visible_full_prefix": 0,
+        "chosen_full_prefix": 1,
+        "prefill": 4451,
+        "device_hit": 4160,
+        "host_loaded": 64,
+        "output": 1935,
+        "revisit_p95_ms": 4963.01,
+        "f1": 20.117
+      }
+    },
+    "directory": {
+      "1": {
+        "cases": 20,
+        "visible_full_prefix": 20,
+        "chosen_full_prefix": 17,
+        "prefill": 2659,
+        "device_hit": 6016,
+        "host_loaded": 0,
+        "output": 20,
+        "revisit_p95_ms": 100.94
+      },
+      "1024": {
+        "cases": 20,
+        "visible_full_prefix": 20,
+        "chosen_full_prefix": 17,
+        "prefill": 2659,
+        "device_hit": 6016,
+        "host_loaded": 0,
+        "output": 1873,
+        "revisit_p95_ms": 5188.44,
+        "f1": 21.402
+      }
+    }
+  },
+  "short_layout_protocol": "First 20 development questions in the MultiDoc2Dial fact-coverage set; A and B are the first representatives of two documents if available, otherwise the first two candidates, shorter first. Seed [A,B] then [B]. Price semantic order [B,A] using the same two passages, history and question in both arms. Separate cold starts for capped and natural answers.",
+  "host_intervention": {
+    "gpu": {
+      "questions": [
+        "e4a72c6929c792b520f6c54a1876b42c_8",
+        "e4a72c6929c792b520f6c54a1876b42c_12",
+        "03a4925e04a5c8ab3e2fb28a562afd99_10",
+        "03a4925e04a5c8ab3e2fb28a562afd99_14"
+      ],
+      "loaded": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "acks": 0,
+      "kv_tokens": 0,
+      "transfer_ms": 0,
+      "rate": null,
+      "quoted_rate": 0.005244198612232305,
+      "from_counters": null
+    },
+    "half_host": {
+      "questions": [
+        "e4a72c6929c792b520f6c54a1876b42c_8",
+        "e4a72c6929c792b520f6c54a1876b42c_12",
+        "03a4925e04a5c8ab3e2fb28a562afd99_10",
+        "03a4925e04a5c8ab3e2fb28a562afd99_14"
+      ],
+      "loaded": [
+        256,
+        128,
+        0,
+        0
+      ],
+      "acks": 2,
+      "kv_tokens": 384,
+      "transfer_ms": 5.1984641551971436,
+      "rate": 0.013537667070825895,
+      "quoted_rate": 0.013537667070825895,
+      "from_counters": 0.013537667070825895
+    }
+  },
+  "mtrag_confirmation": {
+    "protocol": "Two 20-question P3 runs per configuration on the same MT-RAG manifest. First measurement used each complete four-benchmark panel. Confirmation ran the candidate before the previous engine. Only the confirmation recorded per-decision features.",
+    "example_task": "b4614daadceeecb400f7baf0aa48dcb8<::>3",
+    "runs": {
+      "previous_1": {
+        "scored": 20,
+        "quality": 62.117,
+        "complete_p95_ms": 8560.91,
+        "output": 2447,
+        "case_output": 258,
+        "case_prefill": 1257,
+        "case_gpu": 64,
+        "case_host": 0,
+        "case_sources": [
+          "ibmcld_13297-4312-5935",
+          "ibmcld_13297-2974-4856",
+          "ibmcld_13779-3555-3945"
+        ]
+      },
+      "joint_1": {
+        "scored": 20,
+        "quality": 60.913,
+        "complete_p95_ms": 11443.77,
+        "output": 2604,
+        "case_output": 513,
+        "case_prefill": 977,
+        "case_gpu": 64,
+        "case_host": 0,
+        "case_sources": [
+          "ibmcld_13297-4312-5935",
+          "ibmcld_13779-3555-3945",
+          "ibmcld_13455-26115-26611"
+        ]
+      },
+      "joint_2": {
+        "scored": 20,
+        "quality": 60.406,
+        "complete_p95_ms": 8436.95,
+        "output": 2354,
+        "case_output": 256,
+        "case_prefill": 1257,
+        "case_gpu": 64,
+        "case_host": 0,
+        "case_sources": [
+          "ibmcld_13297-4312-5935",
+          "ibmcld_13297-2974-4856",
+          "ibmcld_13779-3555-3945"
+        ],
+        "selected_alternative": 1,
+        "extensions": 32,
+        "case_steps": [
+          {
+            "encoded": 13,
+            "chosen": 4,
+            "cache_set": false,
+            "action": "continue",
+            "quoted_gpu": 0
+          },
+          {
+            "encoded": 25,
+            "chosen": 1,
+            "cache_set": false,
+            "action": "continue",
+            "quoted_gpu": 0
+          },
+          {
+            "encoded": 37,
+            "chosen": 1,
+            "cache_set": false,
+            "action": "continue",
+            "quoted_gpu": 0
+          },
+          {
+            "encoded": 49,
+            "chosen": 3,
+            "cache_set": false,
+            "action": "finish",
+            "quoted_gpu": 0
+          }
+        ]
+      },
+      "previous_2": {
+        "scored": 20,
+        "quality": 59.955,
+        "complete_p95_ms": 8528.5,
+        "output": 2290,
+        "case_output": 179,
+        "case_prefill": 378,
+        "case_gpu": 384,
+        "case_host": 0,
+        "case_sources": [
+          "ibmcld_13790-7-1700"
+        ],
+        "selected_alternative": 1,
+        "extensions": 25,
+        "case_steps": [
+          {
+            "encoded": 13,
+            "chosen": 1,
+            "cache_set": false,
+            "action": "finish",
+            "quoted_gpu": 384
+          }
+        ]
+      }
+    },
+    "actual_history_equal_to_previous_1": {
+      "joint_1": true,
+      "joint_2": true,
+      "previous_2": false
+    }
+  },
+  "long_layout": {
+    "pool_gib": 6,
+    "cohort_key": "interference_ids",
+    "source_budget": 6144,
+    "protocol": "Same Loong task and evidence spans cut from every supplied document, ordered as the compiler emits them. Warm full layout then its suffix without the first document. Price the suffix followed by that document. P95 is for the revisit engine request, excludes seeding, quote and compilation. Score the natural answer with the project Loong rubric.",
+    "arms": {
+      "base": {
+        "questions": 20,
+        "scored": 20,
+        "mean_quality": 41,
+        "full_prefix_visible": 0,
+        "full_order_used": 0,
+        "gpu_hit": 88896,
+        "host_loaded": 3584,
+        "prefill": 38610,
+        "output": 1463,
+        "revisit_p95_ms": 8241.75
+      },
+      "allocation": {
+        "questions": 20,
+        "scored": 20,
+        "mean_quality": 41,
+        "full_prefix_visible": 0,
+        "full_order_used": 0,
+        "gpu_hit": 88896,
+        "host_loaded": 3584,
+        "prefill": 38610,
+        "output": 1463,
+        "revisit_p95_ms": 8252.3
+      },
+      "directory": {
+        "questions": 20,
+        "scored": 20,
+        "mean_quality": 55.75,
+        "full_prefix_visible": 20,
+        "full_order_used": 18,
+        "gpu_hit": 13312,
+        "host_loaded": 111424,
+        "prefill": 6354,
+        "output": 1406,
+        "revisit_p95_ms": 6814.71
+      },
+      "joint": {
+        "questions": 20,
+        "scored": 20,
+        "mean_quality": 56.25,
+        "full_prefix_visible": 20,
+        "full_order_used": 18,
+        "gpu_hit": 13312,
+        "host_loaded": 111424,
+        "prefill": 6354,
+        "output": 1406,
+        "revisit_p95_ms": 6704.74
+      }
+    },
+    "paired_comparisons": {
+      "base_allocation": {
+        "questions": 20,
+        "up": 0,
+        "tie": 20,
+        "down": 0,
+        "less_prefill": 0,
+        "faster": 10,
+        "prefill_delta": 0
+      },
+      "base_directory": {
+        "questions": 20,
+        "up": 8,
+        "tie": 9,
+        "down": 3,
+        "less_prefill": 18,
+        "faster": 19,
+        "prefill_delta": -32256
+      },
+      "base_joint": {
+        "questions": 20,
+        "up": 8,
+        "tie": 9,
+        "down": 3,
+        "less_prefill": 18,
+        "faster": 19,
+        "prefill_delta": -32256
+      },
+      "directory_joint": {
+        "questions": 20,
+        "up": 1,
+        "tie": 19,
+        "down": 0,
+        "less_prefill": 0,
+        "faster": 15,
+        "prefill_delta": 0
+      }
+    }
+  },
+  "demand_crossover": {
+    "pool_gib": 6,
+    "questions": 20,
+    "source_tokens": 4096,
+    "intervening_tokens_per_request": 2048,
+    "protocol": "Warm both complete source permutations in the same order in both arms. Assign future demand exclusively to one permutation or the other. Four competing fresh allocations precede the identical downstream selection. Obtain all quotes before issuing single-token revisits.",
+    "arms": {
+      "allocation": {
+        "questions": 20,
+        "source_directory_both_full": 0,
+        "order_flips": 0,
+        "both_follow_demand": 0,
+        "reversed": 0,
+        "gpu_advantage_changes_sign": 0,
+        "mean_change_in_original_minus_rotated_gpu_tokens": 0,
+        "physical_prefill_sum": 10492,
+        "physical_gpu_hits": 158208,
+        "physical_host_loaded": 16896,
+        "chosen_future_layouts": 20
+      },
+      "directory": {
+        "questions": 20,
+        "source_directory_both_full": 20,
+        "order_flips": 20,
+        "both_follow_demand": 20,
+        "reversed": 0,
+        "gpu_advantage_changes_sign": 20,
+        "mean_change_in_original_minus_rotated_gpu_tokens": 5424,
+        "physical_prefill_sum": 10492,
+        "physical_gpu_hits": 110656,
+        "physical_host_loaded": 64448,
+        "chosen_future_layouts": 40
+      },
+      "joint": {
+        "questions": 20,
+        "source_directory_both_full": 20,
+        "order_flips": 8,
+        "both_follow_demand": 8,
+        "reversed": 0,
+        "gpu_advantage_changes_sign": 8,
+        "mean_change_in_original_minus_rotated_gpu_tokens": 3072,
+        "physical_prefill_sum": 10492,
+        "physical_gpu_hits": 90048,
+        "physical_host_loaded": 85056,
+        "chosen_future_layouts": 28
+      }
+    },
+    "joint_original_demand": {
+      "quoted_gpu_tokens_on_chosen_orders": 56832,
+      "actual_gpu_hit_tokens": 10944,
+      "quoted_host_tokens_on_chosen_orders": 29632,
+      "actual_host_loaded_tokens": 76608
+    }
+  },
+  "pressure_arms": {
+    "previous": "6c77aa3",
+    "allocation": "Only the reclaim policy changes; the source directory stays at 6c77aa3.",
+    "joint": "Allocation-driven reclamation and the per-layout source directory."
+  },
+  "pressure": {
+    "4": {
+      "previous": {
+        "identical_output": 20,
+        "without_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 0,
+          "host_loaded_tokens": 6208,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 366.15,
+          "mean_revisit_ms": 188.65,
+          "peak_active_kv_tokens": 16192,
+          "peak_observed_gpu_tokens_before_revisit": 16064
+        },
+        "actual_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 960,
+          "host_loaded_tokens": 5248,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 375.76,
+          "mean_revisit_ms": 186.6,
+          "peak_active_kv_tokens": 16192,
+          "peak_observed_gpu_tokens_before_revisit": 16128
+        }
+      },
+      "allocation": {
+        "identical_output": 20,
+        "without_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 0,
+          "host_loaded_tokens": 6208,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 370.67,
+          "mean_revisit_ms": 188.04,
+          "peak_active_kv_tokens": 16192,
+          "peak_observed_gpu_tokens_before_revisit": 16064
+        },
+        "actual_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 960,
+          "host_loaded_tokens": 5248,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 373.46,
+          "mean_revisit_ms": 186.24,
+          "peak_active_kv_tokens": 16192,
+          "peak_observed_gpu_tokens_before_revisit": 16128
+        }
+      }
+    },
+    "6": {
+      "previous": {
+        "identical_output": 20,
+        "without_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 0,
+          "host_loaded_tokens": 6208,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 366.71,
+          "mean_revisit_ms": 195.7,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 21312
+        },
+        "actual_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 5952,
+          "host_loaded_tokens": 256,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 363.85,
+          "mean_revisit_ms": 197.33,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 22720
+        }
+      },
+      "joint": {
+        "identical_output": 20,
+        "without_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 6208,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 358.62,
+          "mean_revisit_ms": 186.14,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 23808
+        },
+        "actual_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 6208,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 360.54,
+          "mean_revisit_ms": 188.73,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 23808
+        }
+      }
+    },
+    "8": {
+      "previous": {
+        "identical_output": 20,
+        "without_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 0,
+          "host_loaded_tokens": 6208,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 368.22,
+          "mean_revisit_ms": 199.07,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 21312
+        },
+        "actual_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 5952,
+          "host_loaded_tokens": 256,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 366.19,
+          "mean_revisit_ms": 193.85,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 22720
+        }
+      },
+      "allocation": {
+        "identical_output": 20,
+        "without_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 6208,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 360.78,
+          "mean_revisit_ms": 189.74,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 23808
+        },
+        "actual_demand": {
+          "cases": 20,
+          "gpu_hit_tokens": 6208,
+          "host_loaded_tokens": 0,
+          "prefill_tokens": 9785,
+          "revisit_p95_ms": 361.79,
+          "mean_revisit_ms": 190.38,
+          "peak_active_kv_tokens": 21888,
+          "peak_observed_gpu_tokens_before_revisit": 23808
+        }
+      }
+    }
+  }
+}

@@ -28,7 +28,7 @@
 - `infoflow_attention.py` 把页读取、位置恢复和因果 attention 融入同一 Triton 算子，按 GQA 组共享读取。就绪请求合批解码，不复制完整 KV。
 - `contextkv_compute.py` 把冷建、打分和重算编成内部工作段，交给原生 chunked prefill 分批执行。共享块使用同一套 Radix/HiCache 页，打分和重算结果使用请求私有页；请求释放时，共享块页继续归原生缓存管理。
 - 精确请求沿原生执行；非前缀请求的生成 KV 不登记为精确前缀。`auto` 先取得原生费用观测，再按当前命中、Host 搬运、冷建、打分、重算和质量损失选择执行方式。
-- `auto` 的 Native checkpoint 保留稳定原文，私有问题/回答尾部在请求结束时归还。需求对应的前缀留在 GPU，其他已有 Host 副本的原文通过 HiCache 原生 demote 归还 GPU 页；重访时可回载。`exact` 保持普通 Native 缓存行为。InfoFlow 的打分页在重算完成后归还，独立块与私有覆盖继续服务解码。
+- `auto` 的 Native checkpoint 保留稳定原文，私有问题/回答尾部在请求结束时归还。同一来源的多个有序前缀分别关联到 Radix 节点。读取驻留状态只查询页表；分配出现缺口时，HiCache 按节点优先级回收，已备份的页可从 Host 回载。`exact` 保持普通 Native 缓存行为。InfoFlow 的打分页在重算完成后归还，独立块与私有覆盖继续服务解码。
 - 后续独立块复用按相对 Native 的边际 prefill 收益估值：每 token 的正收益为 `max(0, native_prefill_ms − recompute_ratio × replay_ms)`。Native 精确前缀按节省的 prefill 计价。同一未来消费者只选择收益较高的一种表示，共享页容量按实际 GPU 或 Host 页计一次，保留优先级随实测成本更新。GPU/Host 容量、搬运和淘汰仍由原生缓存管理。
 - agent 和引擎共用 `kv_cost.py`。自动执行先检查 Native 前缀以外是否有完整驻留的独立块，再按当前请求的成本决定是否复用。未来来源需求影响分层保留。两条路径共用的输出长度估计取自正常结束的生成。
 - Native 预填充在模型执行器上计时，每个纯 Native 扩展批累计一次 CUDA 耗时和实际执行的 token 数，覆盖 CUDA Graph 与 eager 路径。HiCache 回载按已完成的搬运时间和 KV token 数计价。选材与停止决策共用这两项单价，冷启动评测时清空累计值。
