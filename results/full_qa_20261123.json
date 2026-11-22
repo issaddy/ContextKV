@@ -1,0 +1,192 @@
+{
+  "setup": {
+    "generator": "Qwen3-32B BF16",
+    "hardware": "H200",
+    "concurrency": 4,
+    "gpu_kv_pool_gib": 8,
+    "quality_scale": "0–100",
+    "complete_p95": "Includes slot waiting",
+    "original": "cda1d04",
+    "contextkv": "27155ec",
+    "prefill_ms_per_token": {
+      "original": 0.4485829087078329,
+      "contextkv": 0.10842554047257119
+    },
+    "seeds": {
+      "P1": 42,
+      "P3": 20261119
+    }
+  },
+  "benchmarks": {
+    "versionqa": {
+      "original": {
+        "protocol": "P1",
+        "declared": 100,
+        "completed": 100,
+        "scored": 100,
+        "quality": 67,
+        "complete_p95_ms": 96423.54,
+        "wait_p95_ms": 92047.974,
+        "auxiliary_p95_ms": 2733.046,
+        "engine_p95_ms": 6088.469,
+        "prefill_tokens": 100972,
+        "output_tokens": 8936,
+        "gpu_hit_tokens": 3392,
+        "host_loaded_tokens": 21696,
+        "total_input_tokens": 126060,
+        "gpu_gib_seconds": 8040.75,
+        "host_gib_seconds": 2335.33,
+        "active_kv_peak_tokens": 19712,
+        "online_routes": {
+          "exact": 100,
+          "nonprefix": 0
+        }
+      },
+      "contextkv": {
+        "protocol": "P1",
+        "declared": 100,
+        "completed": 100,
+        "scored": 100,
+        "quality": 73,
+        "complete_p95_ms": 72562.954,
+        "wait_p95_ms": 67696.22,
+        "auxiliary_p95_ms": 1727.759,
+        "engine_p95_ms": 4469.839,
+        "prefill_tokens": 89253,
+        "output_tokens": 8568,
+        "gpu_hit_tokens": 19200,
+        "host_loaded_tokens": 5120,
+        "total_input_tokens": 113573,
+        "gpu_gib_seconds": 5912.78,
+        "host_gib_seconds": 1654.5,
+        "active_kv_peak_tokens": 20544,
+        "online_routes": {
+          "exact": 100,
+          "nonprefix": 0
+        }
+      },
+      "ordinary_rag": {
+        "protocol": "P1",
+        "declared": 100,
+        "completed": 100,
+        "scored": 100,
+        "quality": 75,
+        "complete_p95_ms": 96528.864,
+        "wait_p95_ms": 92094.765,
+        "auxiliary_p95_ms": 1508.298,
+        "engine_p95_ms": 7980.732,
+        "prefill_tokens": 252766,
+        "output_tokens": 11024,
+        "gpu_hit_tokens": 7040,
+        "host_loaded_tokens": 2432,
+        "total_input_tokens": 262238,
+        "gpu_gib_seconds": 8396.43,
+        "host_gib_seconds": 2234.09,
+        "active_kv_peak_tokens": 12416,
+        "online_routes": {
+          "exact": 100,
+          "nonprefix": 0
+        }
+      },
+      "llamaindex": {
+        "protocol": "P1",
+        "declared": 100,
+        "completed": 100,
+        "scored": 100,
+        "quality": 74,
+        "complete_p95_ms": 96573.206,
+        "wait_p95_ms": 93082.765,
+        "auxiliary_p95_ms": 1625.391,
+        "engine_p95_ms": 7117.162,
+        "prefill_tokens": 254635,
+        "output_tokens": 10742,
+        "gpu_hit_tokens": 8704,
+        "host_loaded_tokens": 2176,
+        "total_input_tokens": 265515,
+        "gpu_gib_seconds": 8581.08,
+        "host_gib_seconds": 2308.85,
+        "active_kv_peak_tokens": 12288,
+        "online_routes": {
+          "exact": 100,
+          "nonprefix": 0
+        }
+      }
+    }
+  },
+  "versionqa_by_category": {
+    "Version-Specific Content Retrieval": {
+      "n": 20,
+      "correct": {
+        "original": 10,
+        "contextkv": 14,
+        "ordinary_rag": 15,
+        "llamaindex": 14
+      },
+      "gained": [
+        "versionqa-046<::>1",
+        "versionqa-052<::>1",
+        "versionqa-044<::>1",
+        "versionqa-054<::>1"
+      ],
+      "lost": []
+    },
+    "Change Retrieval (e)": {
+      "n": 10,
+      "correct": {
+        "original": 9,
+        "contextkv": 9,
+        "ordinary_rag": 10,
+        "llamaindex": 9
+      },
+      "gained": [],
+      "lost": []
+    },
+    "Content Retrieval": {
+      "n": 20,
+      "correct": {
+        "original": 13,
+        "contextkv": 13,
+        "ordinary_rag": 17,
+        "llamaindex": 17
+      },
+      "gained": [],
+      "lost": []
+    },
+    "Version Listing & Inquiry": {
+      "n": 20,
+      "correct": {
+        "original": 17,
+        "contextkv": 19,
+        "ordinary_rag": 13,
+        "llamaindex": 14
+      },
+      "gained": [
+        "versionqa-072<::>1",
+        "versionqa-065<::>1"
+      ],
+      "lost": []
+    },
+    "Content Retrieval Complex": {
+      "n": 20,
+      "correct": {
+        "original": 17,
+        "contextkv": 17,
+        "ordinary_rag": 17,
+        "llamaindex": 18
+      },
+      "gained": [],
+      "lost": []
+    },
+    "Change Retrieval (i)": {
+      "n": 10,
+      "correct": {
+        "original": 1,
+        "contextkv": 1,
+        "ordinary_rag": 3,
+        "llamaindex": 2
+      },
+      "gained": [],
+      "lost": []
+    }
+  }
+}

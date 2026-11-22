@@ -205,11 +205,13 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 标签集按会话分离 train/dev，包含公开训练来源和新构造的关系/版本训练资料。查询监督轮转覆盖早期和后续轮次。仅更新任务头时仍训练 Need 与冻结检索空间的对齐。集合拟合直接读取采集时保存的特征。集合/停止采集共用线上读取、状态准备、回答编译和预算执行器；最终质量来自实际结论与原文组成的回答，扩展费用包含新增编码、读取和计算。含空集的样本以空集质量为基准；只有增读前后两种回答时，按同题预测与质量各自减去组内均值，拟合两种选择的差值。训练只使用至少两种选择已有质量标签的题。容器中的 `data/training/shared/aux_supervision/inscit-marginal-evidence.jsonl` 可直接作为 `training.shared_training evidence --data` 的输入。停止样本保存紧凑表示与多步回报费用，使用线上相同的 auto 缓存选择。必须完成的数值总体由覆盖规则执行，不学习提前停止。
 
-## 少量端到端评测
+## 端到端评测
 
 已发布的四项固定题单按数据集使用独立的历史协议。MultiDoc2Dial、MT-RAG 使用 P3 和种子 20261119，VersionQA、Loong 使用 P1 和种子 42。复现时将结果文件中的 `task_ids` 写入相应 matrix 的 `cohorts.test.<dataset>`，并使用该组种子。
 
 默认每个 benchmark、每种方法 20 题。会话内按轮号的数值排序，每次从各会话依次取相邻两轮，最后用 `--limit-turns` 截断整套队列。使用预先选定的题单时，该值应至少等于题数最多的 benchmark，否则只会评测部分题目。各方法使用同一题单和生成条件，按 benchmark 分别报告质量和完整 P95。
+
+全量对照沿用各题集的历史协议和种子。在 matrix 中移除 `cohorts`，逐题集使用测试集行数作为 `--limit-turns`。MultiDoc2Dial、MT-RAG、VersionQA 和 Loong 分别为 4,094、205、100 和 323 题。原配置与当前配置各使用对应提交的 controller、SGLang 补丁和 KV 单价资产。H200 对照的原始及校准单价见[全量配置与结果](../../results/full_qa_20261123.json)。
 
 ```bash
 python3 -m bench.study evaluate \
