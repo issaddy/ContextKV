@@ -74,9 +74,10 @@ class DenseIndex:
         import numpy as np
         positions = np.asarray([index for index, context in enumerate(self.contexts)
                                 if legal_ids is None or context.document_id in legal_ids], dtype=int)
+        matrix = self.vectors if len(positions) == len(self.contexts) else self.vectors[positions]
         result = []
         for vector in vectors:
-            scores = np.asarray(self.vectors[positions] @ vector)
+            scores = np.asarray(matrix @ vector)
             order = deterministic_top_k(scores, top_k, np)
             result.append(tuple(replace(self.contexts[int(positions[i])], score=float(scores[i])) for i in order))
         return result
