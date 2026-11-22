@@ -17,7 +17,8 @@
       "main": "cda1d04",
       "combined": "4d1f23a",
       "ordinary_rag": "Ordinary RAG",
-      "llamaindex": "LlamaIndex core 0.14.25"
+      "llamaindex": "LlamaIndex core 0.14.25",
+      "resident": "9600e47"
     }
   },
   "fixed20": {
@@ -112,6 +113,23 @@
           "gpu_gib_seconds": 3643.86,
           "host_gib_seconds": 1034.22,
           "active_kv_peak_tokens": 7168
+        },
+        "resident": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 19.016,
+          "complete_p95_ms": 9223.46,
+          "prefill_tokens": 11779,
+          "output_tokens": 2559,
+          "wait_p95_ms": 2950.21,
+          "auxiliary_p95_ms": 3697.91,
+          "engine_p95_ms": 5671.1,
+          "total_input_tokens": 12995,
+          "gpu_gib_seconds": 1768.27,
+          "host_gib_seconds": 527.38,
+          "active_kv_peak_tokens": 3328
         }
       }
     },
@@ -206,6 +224,23 @@
           "gpu_gib_seconds": 5426.44,
           "host_gib_seconds": 1539.27,
           "active_kv_peak_tokens": 18304
+        },
+        "resident": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 61.946,
+          "complete_p95_ms": 9747.96,
+          "prefill_tokens": 14452,
+          "output_tokens": 2544,
+          "wait_p95_ms": 3901.87,
+          "auxiliary_p95_ms": 5118.74,
+          "engine_p95_ms": 4472.69,
+          "total_input_tokens": 15988,
+          "gpu_gib_seconds": 2097.66,
+          "host_gib_seconds": 648.76,
+          "active_kv_peak_tokens": 4928
         }
       }
     },
@@ -300,6 +335,23 @@
           "gpu_gib_seconds": 2078.07,
           "host_gib_seconds": 573.19,
           "active_kv_peak_tokens": 11776
+        },
+        "resident": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16759.31,
+          "prefill_tokens": 14473,
+          "output_tokens": 1632,
+          "wait_p95_ms": 13673.06,
+          "auxiliary_p95_ms": 4558.32,
+          "engine_p95_ms": 4398.65,
+          "total_input_tokens": 16521,
+          "gpu_gib_seconds": 1307.63,
+          "host_gib_seconds": 387.89,
+          "active_kv_peak_tokens": 4160
         }
       }
     },
@@ -394,6 +446,23 @@
           "gpu_gib_seconds": 4361.5,
           "host_gib_seconds": 1210.55,
           "active_kv_peak_tokens": 21824
+        },
+        "resident": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 68.25,
+          "complete_p95_ms": 39381.32,
+          "prefill_tokens": 133321,
+          "output_tokens": 2290,
+          "wait_p95_ms": 33236.39,
+          "auxiliary_p95_ms": 7131.07,
+          "engine_p95_ms": 11725.1,
+          "total_input_tokens": 134281,
+          "gpu_gib_seconds": 3321.49,
+          "host_gib_seconds": 955.78,
+          "active_kv_peak_tokens": 28800
         }
       }
     }
@@ -565,6 +634,95 @@
     "slowest_question_seconds": [
       6.91,
       3.47
+    ]
+  },
+  "residency_replay": {
+    "commit": "9600e47",
+    "dataset": "MT-RAG",
+    "concurrency": 4,
+    "preparation": "Reverse the same sources before each answer, warm separately with Native or InfoFlow, retain historical revisit markers on both arms.",
+    "metrics": "ready counts resident independent tokens from the snapshot; opportunity counts a complete resident block beyond the native prefix.",
+    "requests": [
+      {
+        "id": "b4614daadceeecb400f7baf0aa48dcb8<::>2",
+        "seed_mode": "exact",
+        "ready": 0,
+        "mode": "exact",
+        "opportunity": false,
+        "prefill": 1354,
+        "out": 187,
+        "engine_ms": 4681.1
+      },
+      {
+        "id": "b4614daadceeecb400f7baf0aa48dcb8<::>3",
+        "seed_mode": "exact",
+        "ready": 0,
+        "mode": "exact",
+        "opportunity": false,
+        "prefill": 1834,
+        "out": 246,
+        "engine_ms": 5772
+      },
+      {
+        "id": "b4614daadceeecb400f7baf0aa48dcb8<::>4",
+        "seed_mode": "exact",
+        "ready": 0,
+        "mode": "exact",
+        "opportunity": false,
+        "prefill": 4278,
+        "out": 138,
+        "engine_ms": 3568.1
+      },
+      {
+        "id": "fdee20f7fd677e420742b09989623d68<::>4",
+        "seed_mode": "exact",
+        "ready": 0,
+        "mode": "exact",
+        "opportunity": false,
+        "prefill": 1798,
+        "out": 170,
+        "engine_ms": 4196.3
+      },
+      {
+        "id": "b4614daadceeecb400f7baf0aa48dcb8<::>2",
+        "seed_mode": "infoflow",
+        "ready": 1216,
+        "mode": "exact",
+        "opportunity": true,
+        "prefill": 1418,
+        "out": 190,
+        "engine_ms": 4706.2
+      },
+      {
+        "id": "b4614daadceeecb400f7baf0aa48dcb8<::>3",
+        "seed_mode": "infoflow",
+        "ready": 1600,
+        "mode": "exact",
+        "opportunity": true,
+        "prefill": 1898,
+        "out": 246,
+        "engine_ms": 5743.6
+      },
+      {
+        "id": "b4614daadceeecb400f7baf0aa48dcb8<::>4",
+        "seed_mode": "infoflow",
+        "ready": 3776,
+        "mode": "exact",
+        "opportunity": true,
+        "prefill": 4342,
+        "out": 138,
+        "engine_ms": 3712.9
+      },
+      {
+        "id": "fdee20f7fd677e420742b09989623d68<::>4",
+        "seed_mode": "infoflow",
+        "ready": 1280,
+        "mode": "exact",
+        "opportunity": true,
+        "prefill": 1862,
+        "out": 170,
+        "engine_ms": 4308.6
+      }
     ]
   }
 }
