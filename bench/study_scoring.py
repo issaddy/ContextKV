@@ -170,10 +170,31 @@ async def _official_scores(config, spec, directory, settings):
     return records, identity, call_cost
 
 
-def _overlap_scores(directory):
+def _visible_reference_span(span, sources):
+    end = span["start"]
+    for left, right in sorted((s["source_start"], s["source_end"]) for s in sources
+                              if s["key"]["document_id"] == span["passage_id"]):
+        if left > end:
+            break
+        end = max(end, right)
+        if end >= span["end"]:
+            return True
+    return False
+
+
+def _overlap_scores(directory, rows):
     started = time.perf_counter()
-    report = reference_overlap(load_jsonl(directory.parent/"references.jsonl"),
-                               load_jsonl(directory.parent/"official.jsonl"))
+    references = load_jsonl(directory.parent/"references.jsonl")
+    report = reference_overlap(references, load_jsonl(directory.parent/"official.jsonl"))
+    delivered = {r["task_id"]: r.get("sources") for r in rows if r["status"] == "completed"}
+    for reference in references:
+        task_id = reference["task_id"]
+        grounding, sources = reference.get("grounding"), delivered.get(task_id)
+        if grounding and sources is not None and all(
+            s.get("source_start") is not None and s.get("source_end") is not None for s in sources
+        ):
+            report["tasks"][task_id]["grounding_span_recall"] = statistics.fmean(
+                _visible_reference_span(span, sources) for span in grounding)
     records = [{"task_id": task_id, "metrics": metrics,
         "judge_cost": {"input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0}}
         for task_id, metrics in report["tasks"].items()]
@@ -279,7 +300,7 @@ async def score_dataset(config, dataset_spec, rows, generation_dir, *, expected_
         identity = {"protocol": primary, "generated_answers": 0}
         judge_cost = {"model_calls": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_ms": 0}
     elif primary == "f1":
-        records, identity, judge_cost = _overlap_scores(directory)
+        records, identity, judge_cost = _overlap_scores(directory, rows)
     elif primary in {"RB_llm", "mtrageval_harmonic"}:
         records, identity, judge_cost = await _official_scores(config, dataset_spec, directory, settings)
     elif primary == "loong_reference_score":

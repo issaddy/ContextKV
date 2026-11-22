@@ -1533,6 +1533,85 @@
       }
     }
   },
+  "reference_window_intervention": {
+    "scope": "Qwen3-32B BF16, C=4. Candidate pools and first batches replayed on saved P3 histories. Delivered spans use actual selected source ranges.",
+    "fixed20": {
+      "questions": 20,
+      "unchanged_f1_and_em": 20,
+      "reference_spans": 29,
+      "retrieved_pool": 22,
+      "initial_batch": 17,
+      "delivered": 13,
+      "mean_task_span_recall": 0.5
+    },
+    "full_conversations_120": {
+      "questions": 120,
+      "unchanged_f1_and_em": 120,
+      "reference_spans": 188,
+      "retrieved_pool": 162,
+      "initial_batch": 132,
+      "delivered": 83,
+      "mean_task_span_recall": 0.40833
+    },
+    "source_pair": {
+      "protocol": "All 34 turns in the 120-turn queue with one delivered source, no read or reduce call, no full reference span delivered, and at least one first-batch window containing a full reference span. Substitute the window covering the most reference spans; ties use frozen Jina relevance. Recompile both branches with the same preceding actual conversation, question, answer instruction and one source. Alternate arm order by wave of up to four; flush KV per arm; Native, natural completion. Engine timing begins at submission; excludes retrieval and scoring.",
+      "delivered": {
+        "questions": 34,
+        "mean_f1": 23.338,
+        "prefill_tokens": 20156,
+        "output_tokens": 2627,
+        "engine_p95_ms": 2860.07
+      },
+      "reference": {
+        "questions": 34,
+        "mean_f1": 29.545,
+        "prefill_tokens": 19043,
+        "output_tokens": 2712,
+        "engine_p95_ms": 3268.35
+      },
+      "higher_equal_lower": [
+        20,
+        6,
+        8
+      ]
+    },
+    "pairs": [
+      {"task_id":"026b8bca1fba07a086d2b3a7d88c9b16_1","delivered_span":["[\"va\",\"VA Nursing Homes And Assisted Living | Veterans Affairs#1_0\",\"section\",2722,7484]",2722,7484],"substitute":"multidoc2dial:[\"va\",\"VA Nursing Homes And Assisted Living | Veterans Affairs#1_0\"]:[\"va\",\"VA Nursing Homes And Assisted Living | Veterans Affairs#1_0\",\"section\",1061,1822]:archive-f0c034c24966:1061:1822","f1":[4.878,5.217]},
+      {"task_id":"05d1233e323f975fe059cf5f94bd5bf1_1","delivered_span":["[\"studentaid\",\"Student Loan Deferment | Federal Student Aid#1_0\",\"section\",3702,4994]",3702,4994],"substitute":"multidoc2dial:[\"studentaid\",\"Student Loan Deferment | Federal Student Aid#1_0\"]:[\"studentaid\",\"Student Loan Deferment | Federal Student Aid#1_0\",\"section\",0,341]:archive-f0c034c24966:0:341","f1":[10.309,13.889]},
+      {"task_id":"20c54f2ec6fe8fefe74058e5164fc314_13","delivered_span":["[\"ssa\",\"Benefits Planner: Survivors | If You Are The Survivor | Social Security Administration#2_0\",\"section\",5722,6433]",5722,6433],"substitute":"multidoc2dial:[\"ssa\",\"Benefits Planner: Retirement | If You Are Divorced | Social Security Administration#1_0\"]:[\"ssa\",\"Benefits Planner: Retirement | If You Are Divorced | Social Security Administration#1_0\",\"section\",32,1700]:archive-f0c034c24966:32:1700","f1":[18.644,32.381]},
+      {"task_id":"3555f3d0214bead869ae94e54bb1c94c_8","delivered_span":["[\"ssa\",\"Learn what documents you will need to get a Social Security Card | Social Security Administration#20_0\",\"section\",757,3385]",757,3385],"substitute":"multidoc2dial:[\"ssa\",\"Learn what documents you will need to get a Social Security Card | Social Security Administration#18_0\"]:[\"ssa\",\"Learn what documents you will need to get a Social Security Card | Social Security Administration#18_0\",\"section\",759,2839]:archive-f0c034c24966:759:2839","f1":[13.115,13.115]},
+      {"task_id":"3555f3d0214bead869ae94e54bb1c94c_12","delivered_span":["[\"ssa\",\"Learn what documents you will need to get a Social Security Card | Social Security Administration#17_0\",\"section\",0,1294]",0,1294],"substitute":"multidoc2dial:[\"ssa\",\"Learn what documents you will need to get a Social Security Card | Social Security Administration#18_0\"]:[\"ssa\",\"Learn what documents you will need to get a Social Security Card | Social Security Administration#18_0\",\"section\",0,759]:archive-f0c034c24966:0:759","f1":[32.184,29.73]},
+      {"task_id":"387e84b84298dc73576f1fee8c34e53f_11","delivered_span":["[\"dmv\",\"Medical Certification FAQ's#3_0\",\"section\",8529,8736]",8529,8736],"substitute":"multidoc2dial:[\"dmv\",\"Medical Certification Requirements#3_0\"]:[\"dmv\",\"Medical Certification Requirements#3_0\",\"section\",5657,5846]:archive-f0c034c24966:5657:5846","f1":[68.293,68.293]},
+      {"task_id":"3de23bb1299107cfa9f1c8fe93a9ce6c_4","delivered_span":["[\"va\",\"VA.gov Home | Veterans Affairs#1_0\",\"section\",1680,1829]",1680,1829],"substitute":"multidoc2dial:[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\"]:[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\",\"section\",263,1677]:archive-f0c034c24966:263:1677","f1":[22.222,3.636]},
+      {"task_id":"3de23bb1299107cfa9f1c8fe93a9ce6c_6","delivered_span":["[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\",\"section\",0,263]",0,263],"substitute":"multidoc2dial:[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\"]:[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\",\"section\",263,1677]:archive-f0c034c24966:263:1677","f1":[16,8.403]},
+      {"task_id":"3de23bb1299107cfa9f1c8fe93a9ce6c_8","delivered_span":["[\"va\",\"VA claim exam (C&P exam) | Veterans Affairs#1_0\",\"section\",7795,8150]",7795,8150],"substitute":"multidoc2dial:[\"va\",\"VA claim exam (C&P exam) | Veterans Affairs#1_0\"]:[\"va\",\"VA claim exam (C&P exam) | Veterans Affairs#1_0\",\"section\",0,239]:archive-f0c034c24966:0:239","f1":[27.778,40.426]},
+      {"task_id":"3de23bb1299107cfa9f1c8fe93a9ce6c_10","delivered_span":["[\"va\",\"Eligibility For VA Disability Benefits | Veterans Affairs#1_0\",\"section\",1540,1888]",1540,1888],"substitute":"multidoc2dial:[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\"]:[\"va\",\"Eligibility For Veterans Pension | Veterans Affairs#1_0\",\"section\",2443,2788]:archive-f0c034c24966:2443:2788","f1":[32.653,26.471]},
+      {"task_id":"5b06dfd1c57d848921ce230a11f9ef9a_5","delivered_span":["[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\",\"section\",0,463]",0,463],"substitute":"multidoc2dial:[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\"]:[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\",\"section\",463,1549]:archive-f0c034c24966:463:1549","f1":[29.787,45.614]},
+      {"task_id":"5b06dfd1c57d848921ce230a11f9ef9a_9","delivered_span":["[\"va\",\"Check Your VA Claim Or Appeal Status | Veterans Affairs#1_0\",\"section\",2945,3078]",2945,3078],"substitute":"multidoc2dial:[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\"]:[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\",\"section\",1999,2351]:archive-f0c034c24966:1999:2351","f1":[9.302,38.462]},
+      {"task_id":"82ce8b2f012e056d4d91feece01c7507_3","delivered_span":["[\"va\",\"Servicemembers’ Group Life Insurance (SGLI) | Veterans Affairs#1_0\",\"section\",1982,2156]",1982,2156],"substitute":"multidoc2dial:[\"va\",\"Servicemembers’ Group Life Insurance (SGLI) | Veterans Affairs#1_0\"]:[\"va\",\"Servicemembers’ Group Life Insurance (SGLI) | Veterans Affairs#1_0\",\"section\",0,309]:archive-f0c034c24966:0:309","f1":[38.462,29.412]},
+      {"task_id":"82ce8b2f012e056d4d91feece01c7507_12","delivered_span":["[\"va\",\"Service-Disabled Veterans Life Insurance (S-DVI) | Veterans Affairs#1_0\",\"section\",3963,4797]",3963,4797],"substitute":"multidoc2dial:[\"va\",\"About VA Insurance Options And Eligibility | Veterans Affairs#1_0\"]:[\"va\",\"About VA Insurance Options And Eligibility | Veterans Affairs#1_0\",\"section\",879,1742]:archive-f0c034c24966:879:1742","f1":[26.016,40]},
+      {"task_id":"90740ea8e6f3e4afaad9fafa0efc1869_10","delivered_span":["[\"dmv\",\"MyDMV Account Terms of Service#1_0\",\"section\",0,4172]",0,4172],"substitute":"multidoc2dial:[\"dmv\",\"Get my own CDL driving record (abstract)#1_0\"]:[\"dmv\",\"Get my own CDL driving record (abstract)#1_0\",\"section\",789,1734]:archive-f0c034c24966:789:1734","f1":[14.035,85.333]},
+      {"task_id":"92755cdf967eac9f5aeeda531b3aa8f7_9","delivered_span":["[\"va\",\"Veterans’ Mortgage Life Insurance (VMLI) | Veterans Affairs#1_0\",\"section\",300,877]",300,877],"substitute":"multidoc2dial:[\"va\",\"Veterans’ Mortgage Life Insurance (VMLI) | Veterans Affairs#1_0\"]:[\"va\",\"Veterans’ Mortgage Life Insurance (VMLI) | Veterans Affairs#1_0\",\"section\",1736,2165]:archive-f0c034c24966:1736:2165","f1":[8.333,16.327]},
+      {"task_id":"d7f18eae2e179bcf3efc5a0a5b091970_1","delivered_span":["[\"va\",\"Request a Higher-Level Review | Veterans Affairs#1_0\",\"section\",384,970]",384,970],"substitute":"multidoc2dial:[\"va\",\"Frequently asked questions about decision reviews | Veterans Affairs#1_0\"]:[\"va\",\"Frequently asked questions about decision reviews | Veterans Affairs#1_0\",\"section\",2785,3407]:archive-f0c034c24966:2785:3407","f1":[10.526,16.842]},
+      {"task_id":"d7f18eae2e179bcf3efc5a0a5b091970_9","delivered_span":["[\"va\",\"Request a Higher-Level Review | Veterans Affairs#1_0\",\"section\",384,970]",384,970],"substitute":"multidoc2dial:[\"va\",\"Frequently asked questions about decision reviews | Veterans Affairs#1_0\"]:[\"va\",\"Frequently asked questions about decision reviews | Veterans Affairs#1_0\",\"section\",2785,3407]:archive-f0c034c24966:2785:3407","f1":[28.571,21.277]},
+      {"task_id":"d7f18eae2e179bcf3efc5a0a5b091970_11","delivered_span":["[\"va\",\"Multiple party or contested claims | Veterans Affairs#1_0\",\"section\",539,921]",539,921],"substitute":"multidoc2dial:[\"va\",\"Frequently asked questions about decision reviews | Veterans Affairs#1_0\"]:[\"va\",\"Frequently asked questions about decision reviews | Veterans Affairs#1_0\",\"section\",3407,3976]:archive-f0c034c24966:3407:3976","f1":[8,16.667]},
+      {"task_id":"dd624d36979de0498ad1d0a2e4c268a7_1","delivered_span":["[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\",\"section\",944,1466]",944,1466],"substitute":"multidoc2dial:[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\"]:[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\",\"section\",47,309]:archive-f0c034c24966:47:309","f1":[14.925,29.63]},
+      {"task_id":"dd624d36979de0498ad1d0a2e4c268a7_3","delivered_span":["[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#2_0\",\"section\",0,262]",0,262],"substitute":"multidoc2dial:[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\"]:[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\",\"section\",47,309]:archive-f0c034c24966:47:309","f1":[27.778,27.778]},
+      {"task_id":"dd624d36979de0498ad1d0a2e4c268a7_5","delivered_span":["[\"dmv\",\"Provide proof of insurance#1_0\",\"section\",2471,2492]",2471,2492],"substitute":"multidoc2dial:[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\"]:[\"ssa\",\"Benefit Verification Letter  | Social Security Administration#1_0\",\"section\",47,309]:archive-f0c034c24966:47:309","f1":[0,0]},
+      {"task_id":"dd624d36979de0498ad1d0a2e4c268a7_7","delivered_span":["[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\",\"section\",463,1549]",463,1549],"substitute":"multidoc2dial:[\"ssa\",\"Direct Deposit | Social Security Administration#1_0\"]:[\"ssa\",\"Direct Deposit | Social Security Administration#1_0\",\"section\",481,1567]:archive-f0c034c24966:481:1567","f1":[30,30]},
+      {"task_id":"dd624d36979de0498ad1d0a2e4c268a7_12","delivered_span":["[\"ssa\",\"my Social Security | Create an Account | Social Security Administratio#1_0\",\"section\",0,472]",0,472],"substitute":"multidoc2dial:[\"ssa\",\"Direct Deposit | Social Security Administration#1_0\"]:[\"ssa\",\"Direct Deposit | Social Security Administration#1_0\",\"section\",481,1567]:archive-f0c034c24966:481:1567","f1":[43.038,45]},
+      {"task_id":"dd624d36979de0498ad1d0a2e4c268a7_14","delivered_span":["[\"ssa\",\"Direct Deposit | Social Security Administration#2_0\",\"section\",1549,1999]",1549,1999],"substitute":"multidoc2dial:[\"ssa\",\"Direct Deposit | Social Security Administration#1_0\"]:[\"ssa\",\"Direct Deposit | Social Security Administration#1_0\",\"section\",1567,2017]:archive-f0c034c24966:1567:2017","f1":[12.698,13.793]},
+      {"task_id":"e0939b86b6f621211e52deec88dd9040_1","delivered_span":["[\"ssa\",\"How To Apply For Social Security Disability Benefits#1_0\",\"section\",52,537]",52,537],"substitute":"multidoc2dial:[\"ssa\",\"How To Apply For Social Security Disability Benefits#3_0\"]:[\"ssa\",\"How To Apply For Social Security Disability Benefits#3_0\",\"section\",0,485]:archive-f0c034c24966:0:485","f1":[27.119,29.63]},
+      {"task_id":"e3fc746c88493c749914d1e69d5b0673_5","delivered_span":["[\"studentaid\",\"How to Correct or Update Your FAFSA® Application | Federal Student Aid#1_0\",\"section\",1563,3451]",1563,3451],"substitute":"multidoc2dial:[\"studentaid\",\"How to Review and Correct Your FAFSA® Application | Federal Student Aid#1_0\"]:[\"studentaid\",\"How to Review and Correct Your FAFSA® Application | Federal Student Aid#1_0\",\"section\",5177,5542]:archive-f0c034c24966:5177:5542","f1":[16.41,27.35]},
+      {"task_id":"e3fc746c88493c749914d1e69d5b0673_9","delivered_span":["[\"studentaid\",\"Filling Out the FAFSA® Form | Federal Student Aid#1_0\",\"section\",16482,19438]",16482,19438],"substitute":"multidoc2dial:[\"studentaid\",\"How to Renew Your FAFSA® Application | Federal Student Aid#1_0\"]:[\"studentaid\",\"How to Renew Your FAFSA® Application | Federal Student Aid#1_0\",\"section\",356,1216]:archive-f0c034c24966:356:1216","f1":[28,28.571]},
+      {"task_id":"f46b71551f7c27698fe80d4834c02028_1","delivered_span":["[\"va\",\"Request a Board Appeal | Veterans Affairs#1_0\",\"section\",2776,3063]",2776,3063],"substitute":"multidoc2dial:[\"va\",\"Multiple party or contested claims | Veterans Affairs#1_0\"]:[\"va\",\"Multiple party or contested claims | Veterans Affairs#1_0\",\"section\",2554,2803]:archive-f0c034c24966:2554:2803","f1":[19.608,15.686]},
+      {"task_id":"f46b71551f7c27698fe80d4834c02028_5","delivered_span":["[\"va\",\"How To Apply For VA Voc Rehab And Employment | Veterans Affairs#1_0\",\"section\",0,188]",0,188],"substitute":"multidoc2dial:[\"va\",\"Request a Higher-Level Review | Veterans Affairs#1_0\"]:[\"va\",\"Request a Higher-Level Review | Veterans Affairs#1_0\",\"section\",3628,3743]:archive-f0c034c24966:3628:3743","f1":[6.154,13.333]},
+      {"task_id":"f46b71551f7c27698fe80d4834c02028_7","delivered_span":["[\"va\",\"Request a Board Appeal | Veterans Affairs#1_0\",\"section\",3336,3507]",3336,3507],"substitute":"multidoc2dial:[\"va\",\"Request a Higher-Level Review | Veterans Affairs#1_0\"]:[\"va\",\"Request a Higher-Level Review | Veterans Affairs#1_0\",\"section\",4689,4860]:archive-f0c034c24966:4689:4860","f1":[72.222,72.222]},
+      {"task_id":"f6760f292c057be5f1bbdc9d34d0b524_6","delivered_span":["[\"studentaid\",\"Graduated Plan | Federal Student Aid#1_0\",\"section\",286,702]",286,702],"substitute":"multidoc2dial:[\"studentaid\",\"Extended Plan | Federal Student Aid#1_0\"]:[\"studentaid\",\"Extended Plan | Federal Student Aid#1_0\",\"section\",315,730]:archive-f0c034c24966:315:730","f1":[36.145,28.125]},
+      {"task_id":"f6760f292c057be5f1bbdc9d34d0b524_8","delivered_span":["[\"studentaid\",\"Standard Plan | Federal Student Aid#1_0\",\"section\",2940,3619]",2940,3619],"substitute":"multidoc2dial:[\"studentaid\",\"Income-Driven Repayment Plans | Federal Student Aid#1_0\"]:[\"studentaid\",\"Income-Driven Repayment Plans | Federal Student Aid#1_0\",\"section\",15018,18178]:archive-f0c034c24966:15018:18178","f1":[21.538,57.143]},
+      {"task_id":"fe5f6b43660cf342e0b72cc216714828_3","delivered_span":["[\"dmv\",\"Renew non-driver ID card#1_0\",\"section\",3649,3998]",3649,3998],"substitute":"multidoc2dial:[\"dmv\",\"Replace a non-driver ID card#1_0\"]:[\"dmv\",\"Replace a non-driver ID card#1_0\",\"section\",2542,2641]:archive-f0c034c24966:2542:2641","f1":[18.75,34.783]}
+    ]
+  },
   "supplied_documents_cpu": {
     "baseline": "4d1f23a",
     "reuse": "d052356",

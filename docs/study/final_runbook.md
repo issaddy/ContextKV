@@ -247,6 +247,7 @@ python3 -m bench.cache_reuse \
 ## 保留结果
 
 - `results.jsonl` 保存逐题答案、来源地址、质量、完整响应、Qwen 输入与输出 token 及缓存计数。已完成请求的 `slot_wait_ms` 记录等待并发名额的时间，已计入 `complete_ms`。
+- MultiDoc2Dial 的 `grounding_span_recall` 是每题作者标注跨度中，被交付原文完整覆盖的比例。评分器按文档合并可见的相邻或重叠字符区间，在有标注及原文坐标时报告该项，主分数仍为答案 F1。
 - `batch_cost.json`：整批 GPU/Host 占用积分和峰值。
 - `scoring/manifest.json`：实际评分协议和评分成本。
 - `summary.json`、`report.md`：各 benchmark 的方法对比与差值。
