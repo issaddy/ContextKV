@@ -397,12 +397,22 @@ class ComputeRuntime:
             if previous is None or value > benefits[consumer, previous] or (
                     value == benefits[consumer, previous] and mode == 'exact'):
                 chosen[consumer] = mode
+        highest = 0
         for node_id, consumers in nodes.items():
             priority = int(1000 * sum(value for (consumer, mode), value in consumers.items()
                                       if chosen[consumer] == mode))
             self.cache.tree_core.node_by_id(node_id).priority = priority
             if priority:
+                highest = max(highest, priority)
                 self.prioritized_nodes.add(node_id)
+
+        # Committed reads are nearer than predicted reuse. Their pages remain reclaimable.
+        for request in self.scheduler.waiting_queue:
+            node = self.cache.tree_core._node_arena.get(getattr(request, 'contextkv_committed_node', None))
+            while node is not None and node.parent is not None:
+                node.priority = highest + 1
+                self.prioritized_nodes.add(node.id)
+                node = node.parent
 
     def ready_tokens(self, state):
         from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
@@ -521,8 +531,20 @@ def get_compute_runtime(scheduler):
 
 
 def admit_compute(scheduler, recv, req):
-    req.contextkv_compute_metadata = recv.contextkv_compute
+    metadata = recv.contextkv_compute
+    req.contextkv_compute_metadata = metadata
     req.contextkv_native_cache_salt = req.cache_salt
+    if metadata is None or metadata.get('mode') == 'infoflow':
+        return
+    layouts = get_compute_runtime(scheduler).source_layouts
+    scope = metadata.get('cache_scope', 'shared')
+    chain = tuple(block['source_id'] for block in metadata.get('blocks', ()))
+    while chain:
+        record = layouts.get((scope, chain[-1]), {}).get((req.cache_salt, chain))
+        if record is not None:
+            req.contextkv_committed_node = record[0]
+            break
+        chain = chain[:-1]
 
 
 def prepare_compute_request(scheduler, req):
