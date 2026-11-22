@@ -22,7 +22,8 @@
       "named": "798c84f",
       "header": "908381c",
       "field": "fc8c3b5",
-      "semantic_stop": "fdca33b"
+      "semantic_stop": "fdca33b",
+      "batch_prefill": "3214c3d"
     },
     "loong_reference_commit": "fc8c3b5"
   },
@@ -203,6 +204,23 @@
           "gpu_gib_seconds": 1699.07,
           "host_gib_seconds": 495.95,
           "active_kv_peak_tokens": 3456
+        },
+        "batch_prefill": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 19.167,
+          "complete_p95_ms": 9393.501784733962,
+          "prefill_tokens": 11428,
+          "output_tokens": 2744,
+          "wait_p95_ms": 2564.05,
+          "auxiliary_p95_ms": 3792.43,
+          "engine_p95_ms": 7267.24,
+          "total_input_tokens": 12772,
+          "gpu_gib_seconds": 2012.48,
+          "host_gib_seconds": 588.33,
+          "active_kv_peak_tokens": 3328
         }
       }
     },
@@ -382,6 +400,23 @@
           "gpu_gib_seconds": 2176.24,
           "host_gib_seconds": 657.8,
           "active_kv_peak_tokens": 4224
+        },
+        "batch_prefill": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 62.117,
+          "complete_p95_ms": 8560.91187928105,
+          "prefill_tokens": 14335,
+          "output_tokens": 2447,
+          "wait_p95_ms": 3522.51,
+          "auxiliary_p95_ms": 5524.41,
+          "engine_p95_ms": 4888.31,
+          "total_input_tokens": 15935,
+          "gpu_gib_seconds": 2187.28,
+          "host_gib_seconds": 661.93,
+          "active_kv_peak_tokens": 4608
         }
       }
     },
@@ -561,6 +596,23 @@
           "gpu_gib_seconds": 1344.18,
           "host_gib_seconds": 388.22,
           "active_kv_peak_tokens": 4096
+        },
+        "batch_prefill": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16897.83931632992,
+          "prefill_tokens": 14474,
+          "output_tokens": 1484,
+          "wait_p95_ms": 13638.73,
+          "auxiliary_p95_ms": 4064.65,
+          "engine_p95_ms": 3010.89,
+          "total_input_tokens": 16522,
+          "gpu_gib_seconds": 1312.63,
+          "host_gib_seconds": 381.81,
+          "active_kv_peak_tokens": 3968
         }
       }
     },
@@ -740,12 +792,71 @@
           "gpu_gib_seconds": 2410.99,
           "host_gib_seconds": 677.29,
           "active_kv_peak_tokens": 17152
+        },
+        "batch_prefill": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 74.5,
+          "complete_p95_ms": 29681.07336087851,
+          "prefill_tokens": 83492,
+          "output_tokens": 1806,
+          "wait_p95_ms": 24647.53,
+          "auxiliary_p95_ms": 5944.66,
+          "engine_p95_ms": 6579.92,
+          "total_input_tokens": 84260,
+          "gpu_gib_seconds": 2386.45,
+          "host_gib_seconds": 670.6,
+          "active_kv_peak_tokens": 17344
         }
       }
     }
   },
   "expanded": {
     "multidoc2dial": {
+      "native_prefill": {
+        "order": [
+          "fdca33b_run_1",
+          "3214c3d",
+          "fdca33b_run_2"
+        ],
+        "questions": 120,
+        "sessions": 20,
+        "fdca33b_run_1": {
+          "scored": 120,
+          "quality": 26.919,
+          "complete_p95_ms": 13508.080349781083,
+          "wait_p95_ms": 10668.93,
+          "auxiliary_p95_ms": 887.31,
+          "engine_p95_ms": 3499.65,
+          "prefill_tokens": 67594,
+          "output_tokens": 9515,
+          "extensions": 37
+        },
+        "3214c3d": {
+          "scored": 120,
+          "quality": 26.647,
+          "complete_p95_ms": 13689.427349274047,
+          "wait_p95_ms": 10197.72,
+          "auxiliary_p95_ms": 890.42,
+          "engine_p95_ms": 3371.31,
+          "prefill_tokens": 67210,
+          "output_tokens": 9444,
+          "extensions": 32
+        },
+        "fdca33b_run_2": {
+          "scored": 120,
+          "quality": 26.36,
+          "complete_p95_ms": 13742.378628591541,
+          "wait_p95_ms": 11001.12,
+          "auxiliary_p95_ms": 913.62,
+          "engine_p95_ms": 3800.03,
+          "prefill_tokens": 68142,
+          "output_tokens": 9569,
+          "extensions": 34
+        }
+      },
       "sessions": [
         "026b8bca1fba07a086d2b3a7d88c9b16",
         "05d1233e323f975fe059cf5f94bd5bf1",
@@ -912,6 +1023,60 @@
       6.91,
       3.47
     ]
+  },
+  "native_prefill_replay": {
+    "task_ids": [
+      "e4a72c6929c792b520f6c54a1876b42c_8",
+      "e4a72c6929c792b520f6c54a1876b42c_12",
+      "03a4925e04a5c8ab3e2fb28a562afd99_10",
+      "03a4925e04a5c8ab3e2fb28a562afd99_14",
+      "d0090553cee169c4d9b9b64fcaf1424c_9",
+      "d0090553cee169c4d9b9b64fcaf1424c_16",
+      "28714129e77152a3e0e6059ec07dd056_7",
+      "28714129e77152a3e0e6059ec07dd056_11",
+      "359c1fae078bdf15b4ede69672cf67cf_10",
+      "359c1fae078bdf15b4ede69672cf67cf_14",
+      "bd2485350a2eb2815436fc0104f504eb_8",
+      "bd2485350a2eb2815436fc0104f504eb_12",
+      "b154331dc3fa8bc3eefe0713e92b03f8_5",
+      "b154331dc3fa8bc3eefe0713e92b03f8_9",
+      "bd98d67dd19bd3756ace246d77700ccc_7",
+      "bd98d67dd19bd3756ace246d77700ccc_13",
+      "d39a4f697f2a8b6fe36b9face6c5d9b4_11",
+      "d39a4f697f2a8b6fe36b9face6c5d9b4_19",
+      "581ed05ceb21198768a262690df6cd32_5",
+      "581ed05ceb21198768a262690df6cd32_9"
+    ],
+    "source": "Previous submitted request for each MultiDoc2Dial training question, using actual P3 history",
+    "mode": "Native exact, one generated token per request, isolated cache namespaces, cleared before each concurrency group",
+    "comparison": "Legacy EMA recomputed from per-request forward-entry/finished timestamps on the same run. Batch CUDA events include graph replay or eager execution; tokens are counted once per batch.",
+    "matched_id_input_count_and_text": 20,
+    "concurrency": {
+      "1": {
+        "requests": 20,
+        "batches": 20,
+        "request_tokens": 15993,
+        "batch_tokens": 15993,
+        "device_batch_ms": 1813.3522300720215,
+        "request_wall_sum_ms": 1839.7638241294771,
+        "measured_ms_per_token": 0.11338411993197157,
+        "quoted_ms_per_token": 0.11338411993197157,
+        "legacy_request_ema_ms_per_token": 0.1172876421536157,
+        "largest_batch_tokens": 1719
+      },
+      "4": {
+        "requests": 20,
+        "batches": 10,
+        "request_tokens": 15993,
+        "batch_tokens": 15993,
+        "device_batch_ms": 1702.8975830078125,
+        "request_wall_sum_ms": 5310.968178557232,
+        "measured_ms_per_token": 0.10647768292426765,
+        "quoted_ms_per_token": 0.10647768292426765,
+        "legacy_request_ema_ms_per_token": 0.4706748964671248,
+        "largest_batch_tokens": 4982
+      }
+    }
   },
   "residency_replay": {
     "commit": "9600e47",
