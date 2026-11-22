@@ -183,6 +183,7 @@ class SharedEvidenceProvider:
         corpus, directory, sparse, dense, versions = self.corpus, self.directory, self.sparse, self.dense, self.versions
         catalogue = self.catalogue
         cached = None
+        parsed_documents = None
         if supplied_blocks is not None:
             titles = {block.key: block.title or next(
                 (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")
@@ -194,8 +195,9 @@ class SharedEvidenceProvider:
                 supplied_corpus = CorpusIndex(supplied_blocks, corpus_id=self.corpus.corpus_id,
                     snapshot_id=self.corpus_snapshot_id, source_metadata=source_metadata)
                 supplied_directory = SourceDirectory(supplied_corpus, self.template.tokenizer, unit_tokens=256)
+                parsed_documents = DocumentIndex.from_blocks(supplied_blocks)
                 self._supplied[key] = {"corpus": supplied_corpus, "directory": supplied_directory,
-                    "versions": VersionIndex.from_blocks(supplied_blocks, source_metadata),
+                    "versions": VersionIndex.from_blocks(supplied_blocks, source_metadata, parsed_documents),
                     "catalogue": self._catalogue(supplied_corpus)}
             cached = self._supplied[key]
             corpus, directory, versions = cached["corpus"], cached["directory"], cached["versions"]
@@ -244,7 +246,7 @@ class SharedEvidenceProvider:
         population_units = ()
         historical_ids = ()
         if full:
-            document_index = DocumentIndex.from_blocks(corpus.resolve(legal))
+            document_blocks = corpus.resolve(legal)
             pool = directory.full_scope(legal)
             population_units = pool.units
             query.source_titles = tuple(block.title for block in pool.source_blocks)
@@ -310,8 +312,10 @@ class SharedEvidenceProvider:
                 keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
                 pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
         if not full:
-            document_index = DocumentIndex.from_blocks(pool.source_blocks)
+            document_blocks = pool.source_blocks
             query.task = replace(query.task, effective_source_scope=tuple(block.key for block in pool.source_blocks))
+        document_index = (parsed_documents if parsed_documents is not None and document_blocks == supplied_blocks
+                          else DocumentIndex.from_blocks(document_blocks))
         units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in units)
         usage = dict(query.usage)
         available = self._body_budget(snapshot, query)
