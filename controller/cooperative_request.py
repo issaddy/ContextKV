@@ -111,7 +111,8 @@ def source_title_mentions(evidence, titles):
                     offset = block.span[0] if block.span else 0
                     witnesses.append(replace(block, text=match.group(), token_ids=(),
                         span=(offset + match.start(), offset + match.end())))
-                    lines.append(f"[{source}] mentions [{target}].")
+                    lines.append(f"[{source}] {json.dumps(titles[key], ensure_ascii=False)} mentions "
+                                 f"[{target}] {json.dumps(titles[other], ensure_ascii=False)}.")
                     break
     note = ("\nThe following visible excerpts mention another supplied document by title:\n"
             + "\n".join(lines)) if lines else ""
