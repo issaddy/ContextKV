@@ -8,6 +8,12 @@ import re
 from adapters.document_compute import DocumentIndex, _span, _unique_spans
 
 
+_IDENTIFIER = re.compile(
+    r"(?<!\w)(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+|[A-Z]{2,}-\d+|"
+    r"[A-Z][A-Z\d]*(?:_[A-Z\d]+)+|[A-Z][a-z]+(?:[A-Z][A-Za-z\d]*)+)(?!\w)"
+)
+
+
 def catalogue_versions(catalogue, families=()):
     """Compact source-declared version axis, shared by runtime and training."""
     result = {}
@@ -107,6 +113,19 @@ class VersionIndex:
                         continue
             selected.extend(info["keys"])
         return tuple(selected)
+
+    def missing_identifiers(self, question, version_keys, families):
+        """Find named symbols documented in the family but absent from the requested editions."""
+        missing = []
+        for symbol in dict.fromkeys(_IDENTIFIER.findall(question)):
+            literal = re.compile(r"(?<!\w)" + re.escape(symbol) + r"(?!\w)", re.IGNORECASE)
+            if any(literal.search(self.blocks[key].text) for key in version_keys):
+                continue
+            if any(literal.search(self.blocks[key].text)
+                   for (family, _), info in self.versions.items() if family in families
+                   for key in info["keys"]):
+                missing.append(symbol)
+        return tuple(missing)
 
     def adjacent(self, family, version, direction):
         """Resolve a predecessor/successor on the source-declared version axis."""

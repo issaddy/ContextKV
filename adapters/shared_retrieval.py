@@ -55,6 +55,7 @@ class SharedEvidenceState:
     document_titles: dict = field(default_factory=dict)
     title_note_budget: str = ""
     version_catalogue: dict = field(default_factory=dict)
+    missing_version_identifiers: tuple[str, ...] = ()
     costs: object = None
     computations: tuple = ()
     table_parts: tuple = ()
@@ -382,6 +383,9 @@ class SharedEvidenceProvider:
             document_index, pending_units=tuple(pending), body_tokens=available, population_units=population_units,
             evidence_batch=self.evidence_batch)
         state.version_catalogue = catalogue_versions(catalogue, families)
+        if wanted_versions and version_keys and state.version_catalogue:
+            state.missing_version_identifiers = versions.missing_identifiers(
+                question, version_keys, state.version_catalogue)
         if supplied_blocks is not None:
             state.source_headers = headers
             state.document_titles = titles

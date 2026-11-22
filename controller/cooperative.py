@@ -490,6 +490,10 @@ class CooperativeController:
         if state.version_catalogue:
             instruction += "\nAvailable document versions from the source index:\n" + json.dumps(
                 state.version_catalogue, ensure_ascii=False, separators=(",", ":"))
+        if state.missing_version_identifiers:
+            instruction += ("\nThe source index contains no literal mention of "
+                            + ", ".join(state.missing_version_identifiers)
+                            + " in the requested versions. Limit the answer to the requested scope.")
         return instruction
 
     def _answer_budget(self, state, snapshot, computations):
