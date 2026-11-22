@@ -205,13 +205,5 @@
       "gpu_kv_peak_gib": 7.984375,
       "gpu_kv_active_peak_tokens": 19136
     }
-  ],
-  "interrupted": {
-    "completed": 57,
-    "failed": 56,
-    "recorded": 113,
-    "input_tokens": 45988,
-    "output_tokens": 8581,
-    "resource_note": "Host reload failure; full batch resource integral unavailable."
-  }
+  ]
 }

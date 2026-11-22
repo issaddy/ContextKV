@@ -1,9 +1,5 @@
 # ContextKV 运行手册
 
-当前版本采用问题级总体覆盖、语义集合效用与原生缓存获取成本的联合选择。固定 Qwen3-32B，复用查询 LoRA 和 Jina 骨干；任务、字段、集合和停止头按当前协议训练。
-
-当前总体任务使用完整来源编码和按文档覆盖的证据投影，普通任务使用学习到的集合效用和停止决策。固定生成模型只接收预算内原文与计算结果。总体上下文使用新增 KV 页预算；跨轮来源需求和稳定引用头连接原生缓存保留。当前效果见[实测报告](results.md)。
-
 ## 路径与环境
 
 - 项目：`/home/relay/songjiayun/ContextKV`
@@ -208,6 +204,8 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ## 少量端到端评测
 
+已发布的四项固定题单按数据集使用独立的历史协议。MultiDoc2Dial、MT-RAG 使用 P3 和种子 20261119，VersionQA、Loong 使用 P1 和种子 42。复现时将结果文件中的 `task_ids` 写入相应 matrix 的 `cohorts.test.<dataset>`，并使用该组种子。
+
 默认每个 benchmark、每种方法 20 题。会话内按轮号的数值排序，每次从各会话依次取相邻两轮，最后用 `--limit-turns` 截断整套队列。使用预先选定的题单时，该值应至少等于题数最多的 benchmark，否则只会评测部分题目。各方法使用同一题单和生成条件，按 benchmark 分别报告质量和完整 P95。
 
 ```bash
@@ -224,7 +222,7 @@ python3 -m bench.study evaluate \
 
 `--methods ordinary_rag contextkv llamaindex` 和 `--datasets multidoc2dial mtrag versionqa loong` 可指定本次范围。公开评测使用参考历史；实际历史评测在会话内顺序提交导出的可评分轮次，失败轮次结束后，后续轮次使用此前已提交历史。
 
-连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次；当前清单保存在 `results/cooperation_optimization.json` 的 `cohorts`。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、已生成历史与到达偏移一致，先执行语义排序 Native 和缓存成本排列的 auto，再以 Native 重放 auto 使用的相同来源顺序，并在相同顺序下以 auto 省略未来来源需求。各路分别从冷 KV 开始，使用贪心生成并保留答案一致数。第三路直接读取已选顺序，省去在线报价时间。请求只在内存中暂存，输出 `cache_pair.json`；该配对的 P95 从输入就绪计时，完整队列的 P95 包含检索与辅助编码，质量按各 benchmark 原协议评分。
+连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次；当前固定题单保存在 `results/paired_qa_20261122.json` 的 `fixed20.<dataset>.task_ids`。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、已生成历史与到达偏移一致，先执行语义排序 Native 和缓存成本排列的 auto，再以 Native 重放 auto 使用的相同来源顺序，并在相同顺序下以 auto 省略未来来源需求。各路分别从冷 KV 开始，使用贪心生成并保留答案一致数。第三路直接读取已选顺序，省去在线报价时间。请求只在内存中暂存，输出 `cache_pair.json`；该配对的 P95 从输入就绪计时，完整队列的 P95 包含检索与辅助编码，质量按各 benchmark 原协议评分。
 
 KV 峰值直接读取页池，同时报告总驻留和不可淘汰的活动页峰值。`new_compute_kv_pages` 累计实际计算跨过的页边界，不包含 Host 搬运页；共享驻留容量按物理页计算一次。归还页会增加预分配池的可用容量，不会自动缩小该池。物理 GPU 占用按在线设备采样，评分设备不计入在线阶段。缓存配对同时给出参考 token F1；MT-RAG 的该指标与主队列官方综合分分别报告。
 
@@ -251,8 +249,4 @@ python3 -m bench.cache_reuse \
 - `scoring/manifest.json`：实际评分协议和评分成本。
 - `summary.json`、`report.md`：各 benchmark 的方法对比与差值。
 
-Qwen token 仅统计固定生成模型的调用；辅助编码费用计入完整响应、辅助耗时与物理占用。评分结束后清理临时原文评分输入和会话数据库，不保存候选计划、逐步恢复日志或重复归档。
-
-评分阶段缓存只保留题目 ID 和分数，原文放在临时工作目录；裁判费用只累计汇总，不保存提示、回复正文或逐调用日志。资源采样只保留时间及 GPU/Host 占用总量，用于最终积分和停止训练的费用标签。训练所需的来源标注、候选集合质量与停止轨迹保留为训练数据。
-
-[当前结果](results.md)包含各 benchmark 的同题质量、完整响应及批次资源；[连续会话指标](../../results/cooperation_optimization.json)与[公开参考历史指标](../../results/current.json)分别对应容器中的逐题记录。
+Qwen token 统计生成模型的调用。辅助编码计入完整响应、辅助耗时与物理占用。训练所用的逐事实和停止监督见本手册的辅助训练部分。 [实测结果](results.md)
