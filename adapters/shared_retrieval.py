@@ -231,15 +231,16 @@ class SharedEvidenceProvider:
         if intent.mode in {"explicit", "as_of"} and not wanted_versions:
             version_keys = ()
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
-        query.task = replace(query.task, effective_source_scope=legal)
         legal_set = set(legal)
         previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
                                if span.source_key in legal_set)
-        complete_population = "all_supplied_documents" in (
-            coverage_scope, query.task.coverage_scope, *(need.scope for need in query.task.needs))
-        if complete_population:
-            query.task = replace(query.task, coverage_scope="all_supplied_documents")
-        full = complete_population and (supplied_blocks is not None or bool(families))
+        declared = supplied_blocks is not None or bool(families)
+        complete_population = (coverage_scope == "all_supplied_documents"
+            or any(need.scope == "all_supplied_documents" for need in query.task.needs)
+            or (declared and query.task.coverage_scope == "all_supplied_documents"))
+        query.task = replace(query.task, effective_source_scope=legal,
+            coverage_scope="all_supplied_documents" if complete_population else "selected_sources")
+        full = complete_population and declared
         population_units = ()
         historical_ids = ()
         if full:

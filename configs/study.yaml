@@ -15,7 +15,7 @@ retrieval:
   sparse_index: data/indexes/multidoc2dial/sparse
   dense_index: data/indexes/multidoc2dial/dense
   candidate_k: 50
-  evidence_batch: 24
+  evidence_batch: 12
 selection:
   body_tokens: 16384
 execution:
