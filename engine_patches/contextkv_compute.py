@@ -22,6 +22,7 @@ class ComputeRuntime:
         self.pool = self.allocator.get_kvcache()
         self.costs = {}
         self.native_load_tokens = self.native_load_ms = 0
+        self.native_prefill_tokens = self.native_prefill_ms = 0
         self.cache.contextkv_report_load = self.observe_native_load
         self.decode_graphs = {}
         self.demands = {}
@@ -97,6 +98,7 @@ class ComputeRuntime:
             if flushed:
                 self.costs.clear()
                 self.native_load_tokens = self.native_load_ms = 0
+                self.native_prefill_tokens = self.native_prefill_ms = 0
                 self.demands.clear()
                 self.source_nodes.clear()
                 self.source_prefixes.clear()
@@ -459,6 +461,11 @@ class ComputeRuntime:
         phase_ms = {}
         for phase, first, last, tokens in state.events:
             elapsed = first.elapsed_time(last)
+            if phase == 'batch_prefill':
+                self.native_prefill_tokens += tokens
+                self.native_prefill_ms += elapsed
+                self.costs['prefill_token_ms'] = self.native_prefill_ms / self.native_prefill_tokens
+                continue
             phase_ms[phase] = phase_ms.get(phase, 0.0) + elapsed
             if tokens:
                 name = phase + '_token_ms'
@@ -476,9 +483,6 @@ class ComputeRuntime:
             name = state.mode + '_decode_token_ms'
             measured = (stats.completion_time - stats.prefill_finished_time) * 1000 / (output_count - 1)
             self.costs[name] = .8 * self.costs.get(name, measured) + .2 * measured
-        if state.mode == 'exact' and (prefill_tokens := len(state.input_ids) - req.cached_tokens):
-            measured = (stats.prefill_finished_time - stats.forward_entry_time) * 1000 / prefill_tokens
-            self.costs['prefill_token_ms'] = .8 * self.costs.get('prefill_token_ms', measured) + .2 * measured
         if state.mode == 'exact':
             scope = state.metadata.get('cache_scope', 'shared')
             prefix = []
