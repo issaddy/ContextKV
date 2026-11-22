@@ -1,0 +1,671 @@
+{
+  "waves": [
+    {
+      "long": [
+        "8aac94a9-c2fd-4911-b460-9a85bc029ffa"
+      ],
+      "short": [
+        "0a50d649091a802f4ebe322ed5dab897_5",
+        "bfee2cc8a7a12942da399284708ac067_5",
+        "01a066fc921fcf50074c9ecab21f0276_1"
+      ],
+      "source_tokens": 12288
+    },
+    {
+      "long": [
+        "a5075845-053d-4570-a282-cc74baf7e284",
+        "0b7cb5be-ffa4-4f8b-983d-dc18e68d7e05"
+      ],
+      "short": [
+        "28714129e77152a3e0e6059ec07dd056_1",
+        "0a50d649091a802f4ebe322ed5dab897_1"
+      ],
+      "source_tokens": 6144
+    },
+    {
+      "long": [
+        "4d6cd4f8-57d2-4a28-9522-6e4cd8bfbbc7",
+        "3a18a20b-95f1-4bfc-9f5b-ebd1496dffa0",
+        "b04fddff-35bf-47e1-944c-76276a8008c4"
+      ],
+      "short": [
+        "5c11d0c2e2183855c3e088d75babe358_1"
+      ],
+      "source_tokens": 4096
+    },
+    {
+      "long": [
+        "89ff6383-652f-4efd-8ff4-c23617eef20a",
+        "854f18da-ec84-40dd-87c5-5820a06e80ea"
+      ],
+      "short": [
+        "ad0d3262ec19b7ab1d0c2abff2584067_1",
+        "28714129e77152a3e0e6059ec07dd056_3"
+      ],
+      "source_tokens": 6144
+    },
+    {
+      "long": [
+        "beb996a0-6642-4c03-b3fe-43256b1228ee",
+        "b7405d8e-13f0-4750-a25d-df3a67ffd39a"
+      ],
+      "short": [
+        "263294e20897e70b0f00e09c17bb80fd_1",
+        "01a066fc921fcf50074c9ecab21f0276_4"
+      ],
+      "source_tokens": 6144
+    }
+  ],
+  "setup": {
+    "generator": "Qwen3-32B BF16",
+    "gpu": "H200",
+    "concurrency": 4,
+    "kv_pool_gib": 8,
+    "page_tokens": 64,
+    "quality": "Loong rubric (0-100) on long requests and MultiDoc2Dial reference F1 (0-100) on short requests; independent questions can share a dialogue.",
+    "timing": "Revisit P95 starts at simultaneous submission. Seed-to-answer P95 also includes reverse-order seeding. Offline judging is outside both. Milliseconds, inclusive percentiles.",
+    "routes": "Native uses a Native seed. Forced InfoFlow and auto share an independent-block seed. The fixed-seed control also measures an exact revisit after independent seeding.",
+    "baseline": "d074065",
+    "unified_decode": "8b3862b",
+    "source_token_budget": "Budget per long request, shared between its supplied documents.",
+    "deployment_calibration": "e6a01e7",
+    "source_of_dialogues": "MultiDoc2Dial development rows from shared set supervision. The calibration uses separate training task IDs."
+  },
+  "fixed_3_native_1_infoflow": {
+    "long_ids": [
+      "49f46b79-898c-45de-a19d-f25d17c216b1",
+      "9f29f552-c817-4c2a-8910-b5e8ae7c014f",
+      "b9fe5b23-43d7-49da-8e73-861bcf93b76f",
+      "41523348-9ee6-40b2-9660-e11859571bdf",
+      "b182ad6a-5c78-414e-af32-5cd27b91d064"
+    ],
+    "short_ids": [
+      "bfee2cc8a7a12942da399284708ac067_1",
+      "0a50d649091a802f4ebe322ed5dab897_3",
+      "f0cf3f069bf264c852bf0baf2647a96b_1",
+      "d93da3a62ffa4af2c0a1e16fc3eb8e66_1",
+      "000903bfebe95a9185e6eff850694ab3_1",
+      "88b001050f59872313efaf99faf5f35c_1",
+      "579d66414de6b1c38cab1916b9c2675a_1",
+      "0a50d649091a802f4ebe322ed5dab897_7",
+      "263294e20897e70b0f00e09c17bb80fd_3",
+      "bfee2cc8a7a12942da399284708ac067_3",
+      "000903bfebe95a9185e6eff850694ab3_5",
+      "f0cf3f069bf264c852bf0baf2647a96b_3",
+      "579d66414de6b1c38cab1916b9c2675a_3",
+      "d93da3a62ffa4af2c0a1e16fc3eb8e66_3",
+      "88b001050f59872313efaf99faf5f35c_4"
+    ],
+    "source_tokens_per_long": [
+      8192,
+      16384
+    ],
+    "caps": [
+      64,
+      1024
+    ],
+    "fixed_64_ignores_eos": true,
+    "baseline": {
+      "8192": {
+        "64": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 315,
+          "median_mixed_ms": 55.4,
+          "p95_mixed_ms": 56.58,
+          "revisit_p95_ms": 7853.58,
+          "output_tokens": 1280,
+          "prefill_tokens": 19833
+        },
+        "1024": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 250,
+          "median_mixed_ms": 55.578,
+          "p95_mixed_ms": 56.9,
+          "revisit_p95_ms": 11189.06,
+          "output_tokens": 2594,
+          "prefill_tokens": 19833,
+          "long_loong_mean": 28,
+          "native_multidoc_f1": 20.072
+        }
+      },
+      "16384": {
+        "64": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 315,
+          "median_mixed_ms": 57.064,
+          "p95_mixed_ms": 58.07,
+          "revisit_p95_ms": 10919.56,
+          "output_tokens": 1280,
+          "prefill_tokens": 24097
+        },
+        "1024": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 295,
+          "median_mixed_ms": 56.975,
+          "p95_mixed_ms": 58.1,
+          "revisit_p95_ms": 15892.44,
+          "output_tokens": 2895,
+          "prefill_tokens": 24097,
+          "long_loong_mean": 32,
+          "native_multidoc_f1": 20.25
+        }
+      }
+    },
+    "unified": {
+      "8192": {
+        "64": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 315,
+          "median_mixed_ms": 22.942,
+          "p95_mixed_ms": 23.87,
+          "revisit_p95_ms": 5281.81,
+          "output_tokens": 1280,
+          "prefill_tokens": 19833
+        },
+        "1024": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 244,
+          "median_mixed_ms": 22.951,
+          "p95_mixed_ms": 23.87,
+          "revisit_p95_ms": 8765.59,
+          "output_tokens": 2552,
+          "prefill_tokens": 19833,
+          "long_loong_mean": 28,
+          "native_multidoc_f1": 20.042
+        }
+      },
+      "16384": {
+        "64": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 315,
+          "median_mixed_ms": 24.565,
+          "p95_mixed_ms": 24.79,
+          "revisit_p95_ms": 8818.56,
+          "output_tokens": 1280,
+          "prefill_tokens": 24097
+        },
+        "1024": {
+          "requests": 20,
+          "mixed_3_native_1_infoflow_steps": 289,
+          "median_mixed_ms": 23.675,
+          "p95_mixed_ms": 24.75,
+          "revisit_p95_ms": 12933.7,
+          "output_tokens": 2918,
+          "prefill_tokens": 24097,
+          "long_loong_mean": 28.6,
+          "native_multidoc_f1": 20.042
+        }
+      }
+    },
+    "description": "The four requests in each wave share a decode step; timing covers the mixed forward including workspace preparation and row gathering. Forced InfoFlow uses independently resident blocks."
+  },
+  "independent_20": {
+    "baseline": {
+      "native": {
+        "used_long": {
+          "exact": 10
+        },
+        "revisit_p95": 5399.18,
+        "seed_to_answer_p95": 6801.53,
+        "output": 1610,
+        "prefill": 68005,
+        "long_output": 707,
+        "short_output": 903,
+        "long_quality": 56.5,
+        "short_quality": 20.119106,
+        "median_score_ms": 0,
+        "median_replay_ms": 0,
+        "cold": 0,
+        "reused": 0,
+        "potential": 0
+      },
+      "infoflow_fixed64": {
+        "used_long": {
+          "infoflow": 10
+        },
+        "revisit_p95": 6989.29,
+        "seed_to_answer_p95": 11062.79,
+        "output": 1280,
+        "prefill": 24710,
+        "long_output": 640,
+        "short_output": 640,
+        "long_quality": null,
+        "short_quality": null,
+        "median_score_ms": 346.176392,
+        "median_replay_ms": 842.369232,
+        "cold": 0,
+        "reused": 59252,
+        "potential": 10
+      },
+      "infoflow": {
+        "used_long": {
+          "infoflow": 10
+        },
+        "revisit_p95": 13942.23,
+        "seed_to_answer_p95": 16593.7,
+        "output": 1745,
+        "prefill": 24710,
+        "long_output": 822,
+        "short_output": 923,
+        "long_quality": 34.5,
+        "short_quality": 19.636101,
+        "median_score_ms": 342.295929,
+        "median_replay_ms": 844.182922,
+        "cold": 0,
+        "reused": 59252,
+        "potential": 10
+      },
+      "auto": {
+        "used_long": {
+          "infoflow": 1,
+          "exact": 9
+        },
+        "revisit_p95": 5801.53,
+        "seed_to_answer_p95": 8981.84,
+        "output": 1610,
+        "prefill": 60233,
+        "long_output": 707,
+        "short_output": 903,
+        "long_quality": 56.5,
+        "short_quality": 20.119106,
+        "median_score_ms": 0,
+        "median_replay_ms": 0,
+        "cold": 0,
+        "reused": 10845,
+        "potential": 10
+      }
+    },
+    "unified": {
+      "native": {
+        "used_long": {
+          "exact": 10
+        },
+        "revisit_p95": 5394.28,
+        "seed_to_answer_p95": 6795.36,
+        "output": 1610,
+        "prefill": 68005,
+        "long_output": 707,
+        "short_output": 903,
+        "long_quality": 56.5,
+        "short_quality": 20.119106,
+        "median_score_ms": 0,
+        "median_replay_ms": 0,
+        "cold": 0,
+        "reused": 0,
+        "potential": 0
+      },
+      "infoflow_fixed64": {
+        "used_long": {
+          "infoflow": 10
+        },
+        "revisit_p95": 4832.06,
+        "seed_to_answer_p95": 8914.65,
+        "output": 1280,
+        "prefill": 24710,
+        "long_output": 640,
+        "short_output": 640,
+        "long_quality": null,
+        "short_quality": null,
+        "median_score_ms": 344.815369,
+        "median_replay_ms": 845.075989,
+        "cold": 0,
+        "reused": 59252,
+        "potential": 10
+      },
+      "infoflow": {
+        "used_long": {
+          "infoflow": 10
+        },
+        "revisit_p95": 7274.45,
+        "seed_to_answer_p95": 10896.86,
+        "output": 1772,
+        "prefill": 24710,
+        "long_output": 809,
+        "short_output": 963,
+        "long_quality": 42.5,
+        "short_quality": 19.967343,
+        "median_score_ms": 343.147797,
+        "median_replay_ms": 844.14032,
+        "cold": 0,
+        "reused": 59252,
+        "potential": 10
+      },
+      "auto": {
+        "used_long": {
+          "infoflow": 1,
+          "exact": 9
+        },
+        "revisit_p95": 5603.88,
+        "seed_to_answer_p95": 8960.79,
+        "output": 1610,
+        "prefill": 60233,
+        "long_output": 707,
+        "short_output": 903,
+        "long_quality": 56.5,
+        "short_quality": 20.119106,
+        "median_score_ms": 0,
+        "median_replay_ms": 0,
+        "cold": 0,
+        "reused": 10845,
+        "potential": 10
+      }
+    }
+  },
+  "same_state_decode": {
+    "context": "5 waves of 3 Native + 1 InfoFlow. Replay steps 1,16,32,48,63 on identical live histories and KVs. The default reference is the separate eager Native subbatch and separate InfoFlow graph.",
+    "native": {
+      "rows": 75,
+      "median_relative_hidden_l2": 0.009419,
+      "min_cosine": 0.999267,
+      "same_top1": 73,
+      "max_logit_delta": 0.507813,
+      "solo_reference_same_top1": 75,
+      "median_relative_l2_with_graph_metadata": 0,
+      "median_relative_l2_with_matched_projection_batch": 0,
+      "same_top1_with_matched_projection_batch": 75,
+      "same_top1_with_graph_metadata": 75,
+      "graph_metadata_equal_hidden": 75,
+      "graph_metadata_max_relative_hidden_l2": 0
+    },
+    "infoflow": {
+      "rows": 25,
+      "median_relative_hidden_l2": 0,
+      "min_cosine": 1,
+      "same_top1": 25,
+      "max_logit_delta": 0,
+      "solo_reference_same_top1": 25,
+      "median_relative_l2_with_graph_metadata": 0,
+      "median_relative_l2_with_matched_projection_batch": 0,
+      "same_top1_with_matched_projection_batch": 25,
+      "same_top1_with_graph_metadata": 25
+    },
+    "eager_disabled_mixed_control": {
+      "native": 3,
+      "infoflow": 1,
+      "output_each": 8
+    }
+  },
+  "fixed_seed_native_revisit": {
+    "questions": 20,
+    "long_modes": {
+      "exact": 10
+    },
+    "prefill_tokens": 68645,
+    "output_tokens": 1610,
+    "revisit_p95_ms": 5421.44,
+    "seed_to_answer_p95_ms": 8074.17,
+    "long_quality": 56.5,
+    "short_quality": 20.119,
+    "description": "Exact revisit after the same independent-block seed as auto and forced InfoFlow."
+  },
+  "prefill_calibration": {
+    "previous": 0.448583,
+    "current": 0.108426,
+    "cost_fields_changed": [
+      "prefill_token_ms"
+    ],
+    "same_quality": true,
+    "concurrency": 4,
+    "tasks": [
+      "611468ee1567561df83307d715e1abf5_1",
+      "611468ee1567561df83307d715e1abf5_5",
+      "611468ee1567561df83307d715e1abf5_9",
+      "611468ee1567561df83307d715e1abf5_7",
+      "359c1fae078bdf15b4ede69672cf67cf_1",
+      "611468ee1567561df83307d715e1abf5_12",
+      "359c1fae078bdf15b4ede69672cf67cf_6",
+      "359c1fae078bdf15b4ede69672cf67cf_10",
+      "611468ee1567561df83307d715e1abf5_16",
+      "0a6335a4be887a3f55cfb994184339b4_1",
+      "359c1fae078bdf15b4ede69672cf67cf_12",
+      "6329fa5c294fdbbfaaaf89aba7b3e1bc_1",
+      "0a6335a4be887a3f55cfb994184339b4_8",
+      "6329fa5c294fdbbfaaaf89aba7b3e1bc_7",
+      "6329fa5c294fdbbfaaaf89aba7b3e1bc_5",
+      "6329fa5c294fdbbfaaaf89aba7b3e1bc_9",
+      "359c1fae078bdf15b4ede69672cf67cf_8",
+      "0a6335a4be887a3f55cfb994184339b4_13",
+      "611468ee1567561df83307d715e1abf5_3",
+      "611468ee1567561df83307d715e1abf5_14"
+    ],
+    "tokens": 68563
+  },
+  "calibrated_auto": {
+    "independent_20": {
+      "order": [
+        "prior",
+        "local",
+        "local-repeat",
+        "prior-repeat"
+      ],
+      "runs": {
+        "prior": {
+          "infoflow": 1,
+          "exact": 9,
+          "quality_long": 56.5,
+          "quality_short": 20.119106,
+          "seed_to_answer_p95_ms": 8960.79,
+          "revisit_p95_ms": 5603.88,
+          "prefill_tokens": 60233,
+          "output_tokens": 1610
+        },
+        "local": {
+          "infoflow": 1,
+          "exact": 9,
+          "quality_long": 55.5,
+          "quality_short": 20.119106,
+          "seed_to_answer_p95_ms": 8024.68,
+          "revisit_p95_ms": 5419.28,
+          "prefill_tokens": 63771,
+          "output_tokens": 1597
+        },
+        "local-repeat": {
+          "infoflow": 1,
+          "exact": 9,
+          "quality_long": 55.5,
+          "quality_short": 20.119106,
+          "seed_to_answer_p95_ms": 8025.96,
+          "revisit_p95_ms": 5414.92,
+          "prefill_tokens": 63771,
+          "output_tokens": 1597
+        },
+        "prior-repeat": {
+          "infoflow": 1,
+          "exact": 9,
+          "quality_long": 56.5,
+          "quality_short": 20.119106,
+          "seed_to_answer_p95_ms": 8973.71,
+          "revisit_p95_ms": 5598.39,
+          "prefill_tokens": 60233,
+          "output_tokens": 1610
+        }
+      }
+    },
+    "source_budget_16384": {
+      "order": [
+        "local16",
+        "prior16"
+      ],
+      "runs": {
+        "local16": {
+          "infoflow": 0,
+          "exact": 5,
+          "quality_long": 43,
+          "quality_short": 20.249533,
+          "seed_to_answer_p95_ms": 12618.08,
+          "revisit_p95_ms": 7441.86,
+          "prefill_tokens": 75731,
+          "output_tokens": 2746
+        },
+        "prior16": {
+          "infoflow": 1,
+          "exact": 4,
+          "quality_long": 32,
+          "quality_short": 20.249533,
+          "seed_to_answer_p95_ms": 16438.55,
+          "revisit_p95_ms": 9585.55,
+          "prefill_tokens": 66729,
+          "output_tokens": 2824
+        }
+      }
+    },
+    "paired_answer_replay": {
+      "task_id": "beb996a0-6642-4c03-b3fe-43256b1228ee",
+      "independently_scored": {
+        "prior": 20,
+        "local": 10
+      },
+      "route_both": "exact",
+      "output_tokens_both": 251,
+      "repeat_text_identical": true,
+      "repeat_characters": 368,
+      "single_score_for_identical_text": 10
+    },
+    "changed_routes": [
+      {
+        "id": "8aac94a9-c2fd-4911-b460-9a85bc029ffa",
+        "old_mode": "infoflow",
+        "new_mode": "exact",
+        "old_quality": 100,
+        "new_quality": 100,
+        "old_output": 6,
+        "new_output": 6,
+        "old_ms": 3259.24,
+        "new_ms": 1599.36,
+        "old_quote": {
+          "exact": 10930.786794,
+          "infoflow": 7785.587526,
+          "nonprefix_opportunity": true
+        },
+        "new_quote": {
+          "exact": 6967.613297,
+          "infoflow": 7784.338902,
+          "nonprefix_opportunity": true
+        }
+      },
+      {
+        "id": "854f18da-ec84-40dd-87c5-5820a06e80ea",
+        "old_mode": "exact",
+        "new_mode": "infoflow",
+        "old_quality": 100,
+        "new_quality": 100,
+        "old_output": 34,
+        "new_output": 21,
+        "old_ms": 2147.73,
+        "new_ms": 2416.61,
+        "old_quote": {
+          "exact": 2627.114747,
+          "infoflow": 3009.260821,
+          "nonprefix_opportunity": true
+        },
+        "new_quote": {
+          "exact": 2643.901152,
+          "infoflow": 2575.89869,
+          "nonprefix_opportunity": true
+        }
+      },
+      {
+        "id": "49f46b79-898c-45de-a19d-f25d17c216b1",
+        "old_mode": "infoflow",
+        "new_mode": "exact",
+        "old_quality": 20,
+        "new_quality": 75,
+        "old_output": 254,
+        "new_output": 176,
+        "old_ms": 13616.24,
+        "new_ms": 5371.28,
+        "old_quote": {
+          "exact": 12356.383278,
+          "infoflow": 9534.75809,
+          "nonprefix_opportunity": true
+        },
+        "new_quote": {
+          "exact": 7312.189664,
+          "infoflow": 9531.173366,
+          "nonprefix_opportunity": true
+        }
+      }
+    ]
+  },
+  "public_calibration_control": {
+    "source_and_score_comparison": {
+      "loong": {
+        "same_source_order": 16,
+        "same_text": 15,
+        "same_scores": 18,
+        "score_changes": [
+          {
+            "task": "3a18a20b",
+            "old": 100,
+            "current": 60,
+            "same_sources": true
+          },
+          {
+            "task": "198e64ea",
+            "old": 50,
+            "current": 40,
+            "same_sources": false
+          }
+        ]
+      },
+      "multidoc2dial": {
+        "same_source_order": 17,
+        "same_text": 10,
+        "same_scores": 12
+      },
+      "versionqa": {
+        "same_source_order": 20,
+        "same_text": 16,
+        "same_scores": 20
+      },
+      "mtrag": {
+        "same_source_order": 14,
+        "same_text": 6,
+        "same_scores": 4
+      }
+    },
+    "description": "Same fixed 20 questions per benchmark with the inherited prefill price, all 80 answers used Native. See paired_qa_20261122.json for the selected deployment and the original baselines.",
+    "inherited_price": {
+      "multidoc2dial": {
+        "quality": 17.841,
+        "complete_p95_ms": 9079.202912,
+        "actual_prefill_tokens": 11316,
+        "output_tokens": 2631,
+        "online_routes": {
+          "exact": 20,
+          "nonprefix": 0
+        }
+      },
+      "mtrag": {
+        "quality": 61.532,
+        "complete_p95_ms": 8526.377686,
+        "actual_prefill_tokens": 14485,
+        "output_tokens": 2390,
+        "online_routes": {
+          "exact": 20,
+          "nonprefix": 0
+        }
+      },
+      "versionqa": {
+        "quality": 85,
+        "complete_p95_ms": 16577.006924,
+        "actual_prefill_tokens": 14474,
+        "output_tokens": 1492,
+        "online_routes": {
+          "exact": 20,
+          "nonprefix": 0
+        }
+      },
+      "loong": {
+        "quality": 75.25,
+        "complete_p95_ms": 29624.85543,
+        "actual_prefill_tokens": 83724,
+        "output_tokens": 1766,
+        "online_routes": {
+          "exact": 20,
+          "nonprefix": 0
+        }
+      }
+    }
+  }
+}

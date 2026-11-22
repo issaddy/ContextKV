@@ -164,6 +164,23 @@ python3 -m bench.kv_layouts --config "$TRAIN_RUN/study.yaml" \
 
 同一入口可孤立验证需求如何影响下一轮的选择。将命令加上 `--exchange-demand --source-tokens 4096`，两次都预热两种完整布局，只交换哪种布局带有未来需求。再并发写入相同的四个 2,048-token 冷前缀，获取两种布局的报价后执行重访。单 token 输出把解码长度固定，结果记录两条路径分别驻留的 GPU/Host token、报价和 agent 最终选择。将 `--cohort` 切到 `results/kv_admission_20261122.json` 可复现不重叠的 20 题。结果中的 `ms` 是重访请求耗时，`seed_to_answer_ms` 从首次提交预热请求计至重访返回，包含中间分配、报价与编译。
 
+混合解码对照使用 8 GiB 池，每批四个请求。长文先按反序预热，再与短对话共同回答。分别启动两个版本的引擎，以相同证据运行以下入口。`infoflow` 使用已驻留的独立块，`auto` 对相同驻留状态自动报价，`exact` 两次都使用原生布局。用 `--seed-route infoflow --route exact` 可以固定独立块的建造成本，只改变重访路线。增加 `--fixed-tokens 64` 可固定输出长度。每次调用从冷池开始，文件分别记录重访耗时和包含预热的耗时。
+
+```bash
+python3 -m bench.kv_mixed_decode --config "$TRAIN_RUN/study.yaml" \
+  --cohort results/mixed_decode_20261122.json --documents data/loong/set1-v2/tasks.jsonl \
+  --dialogues data/training/shared/aux_supervision/sets.jsonl \
+  --route auto --output "$TRAIN_RUN/mixed-auto.json"
+```
+
+迁移引擎后，可以在现有质量资产上单独测量 Native 预填充单价。以下命令让 20 个训练提示各生成一个 token，引擎按整批实测时间和预填充 token 数计价。将部署配置的 `shared.runtime.kv_quality_asset` 指向输出文件，agent 与引擎会从同一单价开始报价，后续原生批次继续更新实测值。
+
+```bash
+python3 -m training.calibrate_kv --config "$TRAIN_RUN/study.yaml" \
+  --data data/training/shared/labels.jsonl --limit 20 --concurrency 4 \
+  --prefill-from models/infoflow-quality.json --output "$TRAIN_RUN/kv-local.json"
+```
+
 InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及在被移除段落的原位置等量填入历史段落的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)
 
 ```bash
