@@ -20,8 +20,10 @@
       "llamaindex": "LlamaIndex core 0.14.25",
       "resident": "9600e47",
       "named": "798c84f",
-      "header": "908381c"
-    }
+      "header": "908381c",
+      "field": "fc8c3b5"
+    },
+    "loong_reference_commit": "fc8c3b5"
   },
   "fixed20": {
     "multidoc2dial": {
@@ -166,6 +168,23 @@
           "gpu_gib_seconds": 1859.77,
           "host_gib_seconds": 546.94,
           "active_kv_peak_tokens": 3392
+        },
+        "field": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 18.688,
+          "complete_p95_ms": 9070.99,
+          "prefill_tokens": 11803,
+          "output_tokens": 2665,
+          "wait_p95_ms": 2474,
+          "auxiliary_p95_ms": 4102.91,
+          "engine_p95_ms": 7072.14,
+          "total_input_tokens": 13083,
+          "gpu_gib_seconds": 1931.43,
+          "host_gib_seconds": 568.26,
+          "active_kv_peak_tokens": 3584
         }
       }
     },
@@ -311,6 +330,23 @@
           "gpu_gib_seconds": 1965.63,
           "host_gib_seconds": 600.31,
           "active_kv_peak_tokens": 3776
+        },
+        "field": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 60.723,
+          "complete_p95_ms": 8547.15,
+          "prefill_tokens": 13775,
+          "output_tokens": 2540,
+          "wait_p95_ms": 3710.24,
+          "auxiliary_p95_ms": 5082.64,
+          "engine_p95_ms": 4856,
+          "total_input_tokens": 15375,
+          "gpu_gib_seconds": 2021.34,
+          "host_gib_seconds": 615.51,
+          "active_kv_peak_tokens": 3904
         }
       }
     },
@@ -456,6 +492,23 @@
           "gpu_gib_seconds": 1294.17,
           "host_gib_seconds": 378.09,
           "active_kv_peak_tokens": 4352
+        },
+        "field": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16204.83,
+          "prefill_tokens": 14473,
+          "output_tokens": 1639,
+          "wait_p95_ms": 13424.24,
+          "auxiliary_p95_ms": 4052.79,
+          "engine_p95_ms": 4272.08,
+          "total_input_tokens": 16521,
+          "gpu_gib_seconds": 1294.63,
+          "host_gib_seconds": 378.37,
+          "active_kv_peak_tokens": 4160
         }
       }
     },
@@ -522,16 +575,16 @@
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 31,
-          "complete_p95_ms": 38455.38,
-          "prefill_tokens": 98041,
-          "output_tokens": 1920,
-          "wait_p95_ms": 33093.97,
-          "auxiliary_p95_ms": 8981.42,
-          "engine_p95_ms": 7090.22,
-          "total_input_tokens": 99257,
-          "gpu_gib_seconds": 3165.88,
-          "host_gib_seconds": 874.52,
+          "quality": 33.5,
+          "complete_p95_ms": 39640.5,
+          "prefill_tokens": 100634,
+          "output_tokens": 1886,
+          "wait_p95_ms": 32685.08,
+          "auxiliary_p95_ms": 9196.97,
+          "engine_p95_ms": 6226.37,
+          "total_input_tokens": 101850,
+          "gpu_gib_seconds": 3253.96,
+          "host_gib_seconds": 898.61,
           "active_kv_peak_tokens": 22720
         },
         "llamaindex": {
@@ -539,17 +592,17 @@
           "declared": 20,
           "completed": 20,
           "scored": 20,
-          "quality": 45,
-          "complete_p95_ms": 40582.04,
-          "prefill_tokens": 94802,
-          "output_tokens": 2758,
-          "wait_p95_ms": 33694.35,
-          "auxiliary_p95_ms": 9606.01,
-          "engine_p95_ms": 13375.07,
-          "total_input_tokens": 96018,
-          "gpu_gib_seconds": 4361.5,
-          "host_gib_seconds": 1210.55,
-          "active_kv_peak_tokens": 21824
+          "quality": 47,
+          "complete_p95_ms": 38617.15,
+          "prefill_tokens": 95259,
+          "output_tokens": 1979,
+          "wait_p95_ms": 32528.09,
+          "auxiliary_p95_ms": 9405.15,
+          "engine_p95_ms": 9023.06,
+          "total_input_tokens": 96475,
+          "gpu_gib_seconds": 3194.47,
+          "host_gib_seconds": 884.56,
+          "active_kv_peak_tokens": 21952
         },
         "resident": {
           "protocol": "P1",
@@ -601,6 +654,23 @@
           "gpu_gib_seconds": 3406.17,
           "host_gib_seconds": 965.6,
           "active_kv_peak_tokens": 27072
+        },
+        "field": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 74.75,
+          "complete_p95_ms": 29878.98,
+          "prefill_tokens": 83073,
+          "output_tokens": 1824,
+          "wait_p95_ms": 24681.69,
+          "auxiliary_p95_ms": 6100.79,
+          "engine_p95_ms": 6544.69,
+          "total_input_tokens": 83841,
+          "gpu_gib_seconds": 2412.1,
+          "host_gib_seconds": 683.63,
+          "active_kv_peak_tokens": 17344
         }
       }
     }
