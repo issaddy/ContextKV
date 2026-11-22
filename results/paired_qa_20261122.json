@@ -19,7 +19,8 @@
       "ordinary_rag": "Ordinary RAG",
       "llamaindex": "LlamaIndex core 0.14.25",
       "resident": "9600e47",
-      "named": "798c84f"
+      "named": "798c84f",
+      "header": "908381c"
     }
   },
   "fixed20": {
@@ -147,6 +148,23 @@
           "total_input_tokens": 12998,
           "gpu_gib_seconds": 1780.16,
           "host_gib_seconds": 523.15,
+          "active_kv_peak_tokens": 3392
+        },
+        "header": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 18.997,
+          "complete_p95_ms": 9202.84,
+          "prefill_tokens": 11923,
+          "output_tokens": 2605,
+          "wait_p95_ms": 2944.63,
+          "auxiliary_p95_ms": 3775.66,
+          "engine_p95_ms": 6161.69,
+          "total_input_tokens": 13139,
+          "gpu_gib_seconds": 1859.77,
+          "host_gib_seconds": 546.94,
           "active_kv_peak_tokens": 3392
         }
       }
@@ -276,6 +294,23 @@
           "gpu_gib_seconds": 2000.02,
           "host_gib_seconds": 611.04,
           "active_kv_peak_tokens": 3840
+        },
+        "header": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 59.852,
+          "complete_p95_ms": 9070.78,
+          "prefill_tokens": 13820,
+          "output_tokens": 2344,
+          "wait_p95_ms": 3514.11,
+          "auxiliary_p95_ms": 5538.83,
+          "engine_p95_ms": 3713.03,
+          "total_input_tokens": 15036,
+          "gpu_gib_seconds": 1965.63,
+          "host_gib_seconds": 600.31,
+          "active_kv_peak_tokens": 3776
         }
       }
     },
@@ -404,6 +439,23 @@
           "gpu_gib_seconds": 1289.33,
           "host_gib_seconds": 376.7,
           "active_kv_peak_tokens": 4160
+        },
+        "header": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16376.36,
+          "prefill_tokens": 14473,
+          "output_tokens": 1612,
+          "wait_p95_ms": 13536.14,
+          "auxiliary_p95_ms": 4440.35,
+          "engine_p95_ms": 3245.19,
+          "total_input_tokens": 16521,
+          "gpu_gib_seconds": 1294.17,
+          "host_gib_seconds": 378.09,
+          "active_kv_peak_tokens": 4352
         }
       }
     },
@@ -532,6 +584,23 @@
           "gpu_gib_seconds": 3387.09,
           "host_gib_seconds": 960.7,
           "active_kv_peak_tokens": 26560
+        },
+        "header": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 70,
+          "complete_p95_ms": 39487.4,
+          "prefill_tokens": 136235,
+          "output_tokens": 2216,
+          "wait_p95_ms": 32551.19,
+          "auxiliary_p95_ms": 6785.88,
+          "engine_p95_ms": 11829.31,
+          "total_input_tokens": 137195,
+          "gpu_gib_seconds": 3406.17,
+          "host_gib_seconds": 965.6,
+          "active_kv_peak_tokens": 27072
         }
       }
     }
@@ -1000,5 +1069,43 @@
       31,
       4
     ]
+  },
+  "table_header_scan": {
+    "baseline": "798c84f",
+    "current": "908381c",
+    "cohort": "source_mentions_20261122.json#cohorts.test.loong",
+    "questions": 40,
+    "supplied_documents": 185,
+    "identical_parses": 185,
+    "markdown_tables": 205,
+    "parser_ms": {
+      "baseline": {
+        "total": 4288,
+        "p95_question": 46.2,
+        "max_question": 3448.2
+      },
+      "current": {
+        "total": 926,
+        "p95_question": 44.3,
+        "max_question": 157.9
+      }
+    },
+    "kv_pool_gib": 4,
+    "end_to_end": {
+      "baseline": {
+        "score": 79.875,
+        "complete_p95_ms": 76008.11,
+        "slot_wait_p95_ms": 70660.92,
+        "prefill_tokens": 229839,
+        "output_tokens": 3820
+      },
+      "current": {
+        "score": 80.375,
+        "complete_p95_ms": 74078.26,
+        "slot_wait_p95_ms": 71189,
+        "prefill_tokens": 228616,
+        "output_tokens": 4040
+      }
+    }
   }
 }
