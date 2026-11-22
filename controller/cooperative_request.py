@@ -1,12 +1,15 @@
 """Compile the selected evidence and its KV demand in one tokenizer pass."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 import json
+import re
 from urllib.parse import quote
 
 from engine_patches.kv_cost import exact_cost, infoflow_cost, page_tokens
 
+from .evidence import assign_references
 from .schema import EvidenceBlock, EvidenceKey, EvidenceSpan, Message, QueryContext, history_messages
 
 
@@ -83,6 +86,23 @@ def with_document_headers(evidence, headers):
         and (block.span or (0, len(block.text)))[0] <= header.span[0]
         and header.span[1] <= (block.span or (0, len(block.text)))[1] for block in evidence)]
     return (*missing, *evidence)
+
+
+def source_title_note(evidence, titles):
+    """Name direct title mentions between visible sources in final citation order."""
+    references = assign_references(block.key for block in evidence)
+    if len(references) < 2:
+        return ""
+    excerpts = {key: [] for _, key in references}
+    for block in evidence:
+        excerpts[block.key].append(" " + " ".join(re.findall(r"\w+", block.text.casefold())) + " ")
+    names = {key: " ".join(re.findall(r"\w+", title.casefold())) for key, title in titles.items()}
+    counts = Counter(names.values())
+    lines = [f"[{source}] mentions [{target}]." for source, key in references for target, other in references
+             if other != key and names[other] and counts[names[other]] == 1
+             and any(f" {names[other]} " in text for text in excerpts[key])]
+    return ("\nThe following visible excerpts mention another supplied document by title:\n"
+            + "\n".join(lines)) if lines else ""
 
 
 def blocks_for_units(units, source_blocks):

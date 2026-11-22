@@ -50,6 +50,8 @@ class SharedEvidenceState:
     evidence_batch: int = 24
     population_units: tuple = ()
     source_headers: tuple = ()
+    document_titles: dict = field(default_factory=dict)
+    title_note_budget: str = ""
     version_catalogue: dict = field(default_factory=dict)
     costs: object = None
     computations: tuple = ()
@@ -145,8 +147,10 @@ class SharedEvidenceProvider:
         catalogue = self.catalogue
         cached = None
         if supplied_blocks is not None:
-            supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + (block.title or next(
-                (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")))
+            titles = {block.key: block.title or next(
+                (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")
+                for block in supplied_blocks}
+            supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + titles[block.key])
                 for index, block in enumerate(supplied_blocks))
             key = snapshot.corpus_snapshot_id, tuple(block.key for block in supplied_blocks)
             if key not in self._supplied:
@@ -331,8 +335,11 @@ class SharedEvidenceProvider:
             evidence_batch=self.evidence_batch)
         state.version_catalogue = catalogue_versions(catalogue, families)
         if supplied_blocks is not None:
-            from controller.cooperative_request import document_headers
-            state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
+            from controller.cooperative_request import document_headers, source_title_note
+            documents = corpus.resolve(legal)
+            state.source_headers = document_headers(documents, self.template.tokenizer)
+            state.document_titles = titles
+            state.title_note_budget = source_title_note(documents, titles)
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
         state.computations = state.reused_claims

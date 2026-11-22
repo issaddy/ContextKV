@@ -8,7 +8,7 @@ import time
 from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, ANSWER_SCOPE, EvidenceCosts, blocks_for_units, compile_request,
-                                  source_address, source_body, with_document_headers, working_history, with_source_demand)
+                                  source_address, source_body, source_title_note, with_document_headers, working_history, with_source_demand)
 from .schema import EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -279,9 +279,10 @@ class CooperativeController:
         else:
             selected = selected_blocks(state)
         selected = with_document_headers(selected, state.source_headers)
+        title_note = source_title_note(selected, state.document_titles) if state.title_note_budget else ""
         request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
-            instruction=self._answer_instruction(state))
+            instruction=self._answer_instruction(state) + title_note)
         # Keep a small next-turn working set; repeated sources take precedence.
         open_ids = {need.need_id for need in state.open_needs}
         open_spans = [binding.source_span for binding in state.evidence.bindings if binding.need_id in open_ids]
@@ -491,7 +492,8 @@ class CooperativeController:
     def _answer_budget(self, state, snapshot, computations):
         from .cooperative_request import answer_task
         from .schema import Message, history_messages
-        question = answer_task(state.query.task.raw_question, computations)+"\n"+self._answer_instruction(state)
+        question = (answer_task(state.query.task.raw_question, computations)+"\n"+self._answer_instruction(state)
+                    + state.title_note_budget)
         headers = "".join(f"[D{i+1}] {block.title}\n{block.text}\n\n"
                           for i, block in enumerate(state.source_headers))
         fixed = self.template.render((Message("system", self.policy.system_prompt or SYSTEM), Message("user", headers),
