@@ -498,8 +498,7 @@
           "device_hit_tokens": 0,
           "host_loaded_tokens": 0,
           "prefill_tokens": 4726,
-          "quality": 0.04040404040404041,
-          "answer": "VA life insurance offers financial security for Veterans, service members, and their spouses and dependent children. You can explore your options, manage your policy, and file claims to get the insurance benefits you've earned [S1].\n\nTo determine which life insurance program you may be eligible for, consider the following options:\n\n1. **Servicemembers Group Life Insurance (SGLI)**: Provides group life insurance while you're serving.\n2. **Family Servicemembers Group Life Insurance (FSGLI)**: Adds coverage for your spouse and dependent children.\n3. **Traumatic Injury Protection (TSGLI)**: Offers short-term financial support to help you recover from a severe injury.\n4. **Veterans Group Life Insurance (VGLI)**: Provides group life insurance once you've ended your service.\n5. **Service-Disabled Veterans Insurance (S-DVI)**: If you're disabled because of an injury or illness caused or made worse by your active service, you can continue your life insurance beyond 2 years after you leave the military.\n6. **Veterans Mortgage Life Insurance (VMLI)**: If you have a severe service-connected disability, this mortgage protection insurance can help your family pay off the home mortgage on a home that's been adapted to meet your needs [S5].\n\nIf you are a service-disabled Veteran, you may be eligible for **Service-Disabled Veterans Life Insurance (S-DVI)**, which provides low-cost coverage. To apply for S-DVI, you must meet specific requirements, including having a service-connected disability and being in good health except for any service-connected conditions [S3].\n\nFor managing your policy, you can access your VA life insurance policy online to check your policy's status, pay your premium, update your beneficiary, and more [S4].\n\nIf you become totally disabled or terminally ill, you may be eligible for certain benefit options, such as a waiver of premiums or accelerated benefits [S6].\n\nFor more information or assistance, you can contact the VA Life Insurance Center at 800-669-8477 [S3]."
+          "quality": 0.04040404040404041
         },
         {
           "method": "ContextKV cache-priced order",
@@ -529,8 +528,7 @@
           "device_hit_tokens": 4608,
           "host_loaded_tokens": 0,
           "prefill_tokens": 118,
-          "quality": 0.039735099337748346,
-          "answer": "VA life insurance offers various options for Veterans, service members, and their families. Here are the key points and actions you can take:\n\n1. **Determine Eligibility and Choose a Program**:\n   - **Servicemembers Group Life Insurance (SGLI)**: Provides group life insurance for active service members.\n   - **Family Servicemembers Group Life Insurance (FSGLI)**: Adds coverage for a service member\u2019s spouse and dependent children.\n   - **Traumatic Injury Protection (TSGLI)**: Offers short-term financial support after a severe injury.\n   - **Veterans Group Life Insurance (VGLI)**: Available to Veterans after they leave the military.\n   - **Service-Disabled Veterans Insurance (S-DVI)**: For Veterans with a service-connected disability.\n   - **Veterans Mortgage Life Insurance (VMLI)**: Mortgage protection for Veterans with severe service-connected disabilities who receive a Specially Adapted Housing (SAH) grant [S2].\n\n2. **Access and Manage Your Policy Online**:\n   - Use the VA or Prudential Insurance Company of America portals to check your policy status, pay premiums, update beneficiaries, and review renewal options [S3].\n\n3. **Special Circumstances**:\n   - **Totally Disabled Policyholders**: You may qualify for a **waiver of premiums** if you are totally disabled and meet specific conditions (e.g., disability occurs before age 65 and lasts at least 6 months). Apply using **VA Form 29-357** [S1].\n   - **Terminally Ill Policyholders**: You may receive **accelerated benefits** (up to 50% of the face value of your policy) if you or your spouse has a terminal illness with a prognosis of 9 months or less. Apply using **Claim for Accelerated Benefits SGLV 8284** or **SGLV 8284A** [S1].\n\n4. **Apply for S-DVI**:\n   - You must have a service-connected disability (even if rated at 0%), be in good health (except for service-connected conditions), and apply within 2 years of receiving a new service-connected disability rating [S4].\n\n5. **Contact for Help**:\n   - For SGLI or VGLI: Call **800-419-1473**.\n   - For all other VA life insurance programs: Call **800-669-8477** [S6].\n\nFor more information, visit the VA website or use the VA Life Insurance Center\u2019s resources."
+          "quality": 0.039735099337748346
         },
         {
           "method": "InfoFlow non-prefix reuse",
@@ -560,8 +558,7 @@
           "device_hit_tokens": 4423,
           "host_loaded_tokens": 0,
           "prefill_tokens": 1270,
-          "quality": 0.03115264797507788,
-          "answer": "VA life insurance offers various options for Veterans, service members, and their families. Here is a summary of the key points and actions you can take:\n\n1. **Eligibility and Types of Coverage**:\n   - **Servicemembers Group Life Insurance (SGLI)**: Available to active-duty service members. Provides up to $400,000 in coverage [S5].\n   - **Family SGLI (FSGLI)**: Adds coverage for a service member's spouse and dependent children [S1].\n   - **Veterans Group Life Insurance (VGLI)**: Available to Veterans who had SGLI and want to continue coverage after leaving the military [S1].\n   - **Service-Disabled Veterans Insurance (S-DVI)**: For Veterans with a service-connected disability. Provides low-cost coverage [S3].\n   - **Traumatic Injury Protection (TSGLI)**: Short-term financial support for service members who suffer a severe injury [S1].\n   - **Veterans Mortgage Life Insurance (VMLI)**: For Veterans with severe service-connected disabilities who have had their homes adapted [S3].\n\n2. **Applying for Coverage**:\n   - **SGLI/VGLI**: Apply online or through VA Form 29-4364 [S1].\n   - **S-DVI**: Apply if you were rated for a service-connected disability (even 0%) and are in good health otherwise [S3].\n   - **TSGLI**: File a claim if you have a traumatic injury [S1].\n   - **VMLI**: Apply through the Specially Adapted Housing (SAH) Grant process [S3].\n\n3. **Managing Your Policy**:\n   - **Online Access**: Use the VA portal to check policy status, update beneficiaries, and pay premiums [S4].\n   - **Beneficiary Updates**: Keep beneficiary information current to ensure smooth claims processing [S1].\n   - **Premium Waivers**: If totally disabled, you may qualify for a waiver of premiums for S-DVI [S6].\n\n4. **Special Circumstances**:\n   - **Totally Disabled or Terminally Ill**: You may be eligible for an SGLI extension, premium waivers, or accelerated benefits [S6].\n   - **Accelerated Benefits**: If terminally ill, you can receive up to 50% of the face value of your policy in advance [S1].\n\n5. **Contact and Resources**:\n   - **VA Life Insurance Center**: Call 800-669-8477 for assistance with claims or policy questions [S1].\n   - **Forms and Publications**: Download VA forms and handbooks for detailed guidance [S1].\n\nFor more information, visit the VA website or contact the Office of Servicemembers Group Life Insurance (OSGLI) [S1]."
+          "quality": 0.03115264797507788
         }
       ]
     }
@@ -610,8 +607,7 @@
     "selected_variant": "sections",
     "set_asset": "models/shared-evidence-sections",
     "stop_asset": "models/shared-stop-sections.pt",
-    "kv_asset": "models/infoflow-quality.json",
-    "reason": "Higher composite quality on both benchmarks and lower auxiliary, GPU and KV cost than the intermediate calibrated candidate; one configuration for both benchmarks."
+    "kv_asset": "models/infoflow-quality.json"
   },
   "validation": {
     "field_factor_max_abs_error": 1.907e-06,
@@ -623,10 +619,5 @@
       "long_before": 0.071847,
       "long_after": 0.030021
     }
-  },
-  "remaining": [
-    "InfoFlow full requests still have no net benefit versus Native in the measured pairing.",
-    "MT-RAG auxiliary wall time is above the prior retained version and faithfulness declined.",
-    "MultiDoc2Dial cumulative GPU/Host occupancy remains above the prior retained version."
-  ]
+  }
 }

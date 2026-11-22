@@ -16,11 +16,6 @@
     ],
     "gpu_kv_pool_gib": 8
   },
-  "deployment": {
-    "engine": "retain hot-path optimizations",
-    "auxiliary_weights": "retain existing default set and stop heads",
-    "reason": "New heads trade higher quality and lower occupied KV for higher MultiDoc2Dial cumulative GPU/Host use and lower MT-RAG answer relevance."
-  },
   "infoflow": {
     "conditions": "Same four training states, concurrency 4, greedy, original answer instruction, recompute ratio 0.15; elapsed totals sum per-request latencies.",
     "before": {
