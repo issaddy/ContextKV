@@ -91,14 +91,15 @@ def ranked_population_windows(units, question, budget, tokenizer, witnesses):
     groups = {}
     for index, unit in enumerate(units):
         key = unit.source_spans[0].source_key
-        groups.setdefault((key.document_id, key.version), []).append(index)
+        groups.setdefault((key.corpus_id, key.document_id, key.version), []).append(index)
     terms = set(tokenizer.encode(question, add_special_tokens=False))
     tokens = tokenizer([u.text for u in units], add_special_tokens=False, return_attention_mask=False)["input_ids"]
     frequencies = [Counter(token for token in row if token in terms) for row in tokens]
     df = Counter(token for row in frequencies for token in row)
     idf = {token: log1p((len(units)-count+0.5)/(count+0.5)) for token, count in df.items()}
     mean_length = sum(map(len, tokens))/len(units)
-    scores = [sum(idf[token]*count*2.5/(count+1.5*(0.25+0.75*len(row)/mean_length))
+    k1, b = 1.5, 0.75
+    scores = [sum(idf[token]*count*(k1+1)/(count+k1*(1-b+b*len(row)/mean_length))
                   for token, count in counts.items()) for row, counts in zip(tokens, frequencies)]
 
     selected = {units[group[0]].unit_id for group in groups.values()}
