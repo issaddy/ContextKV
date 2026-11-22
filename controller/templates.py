@@ -2,26 +2,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from copy import copy, deepcopy
-from threading import local
-
-
-class _TokenizerWorker(local):
-    def __init__(self, prototype):
-        self.value = copy(prototype)
-        self.value._tokenizer = deepcopy(prototype.backend_tokenizer)
+from threading import Lock
 
 
 class ThreadTokenizer:
-    """Keep mutable tokenizer settings local to each encoding worker."""
+    """Share one vocabulary while serializing calls that use its mutable backend."""
     def __init__(self, tokenizer):
-        self._worker = _TokenizerWorker(tokenizer)
+        self._tokenizer = tokenizer
+        self._lock = Lock()
 
     def __getattr__(self, name):
-        return getattr(self._worker.value, name)
+        value = getattr(self._tokenizer, name)
+        if not callable(value):
+            return value
+
+        def call(*args, **kwargs):
+            with self._lock:
+                return value(*args, **kwargs)
+
+        return call
 
     def __call__(self, *args, **kwargs):
-        return self._worker.value(*args, **kwargs)
+        with self._lock:
+            return self._tokenizer(*args, **kwargs)
 
 
 @dataclass(frozen=True)
