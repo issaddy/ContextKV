@@ -207,7 +207,7 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ## 端到端评测
 
-以下命令复现 H200 的固定 20 题对照。生成引擎使用物理卡 4，两个辅助编码器共用物理卡 5。各方法使用已部署的权重。MultiDoc2Dial、MT-RAG 用各方法实际生成的历史（P3），VersionQA、Loong 用题目提供的历史（P1）。命令读取发布的题号和协议种子。[固定题单](../../results/paired_qa_20261122.json)
+以下命令复现 H200 的固定 20 题对照。生成引擎使用物理卡 4，两个辅助编码器共用物理卡 5。各方法使用已部署的权重和贪心解码。MultiDoc2Dial、MT-RAG 用各方法实际生成的历史（P3），VersionQA、Loong 用题目提供的历史（P1）。MT-RAG 官方评分环境由 `scoring.python` 和 `scoring.official_checkout` 指定，H200 的离线 checkout 包含作者脚本以及本地 ROUGE、BERTScore 指标。[固定题单与生成参数](../../results/paired_qa_20261122.json)
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1
@@ -220,9 +220,14 @@ import yaml
 
 out = Path(os.environ["EVAL_RUN"])
 study = yaml.safe_load(Path("configs/study.yaml").read_text())
+published = json.loads(Path("results/paired_qa_20261122.json").read_text())
+run = yaml.safe_load(Path(study["generation"]["run_config"]).read_text())
+run["sampling"] = published["setup"]["sampling"]
+(out / "generation.yaml").write_text(yaml.safe_dump(run))
+study["generation"]["run_config"] = str(out / "generation.yaml")
 study["shared"]["query"]["device"] = study["shared"]["evidence"]["device"] = "cuda:1"
 (out / "study.yaml").write_text(yaml.safe_dump(study))
-fixed = json.loads(Path("results/paired_qa_20261122.json").read_text())["fixed20"]
+fixed = published["fixed20"]
 for protocol, seed, names in (("P3", 20261119, ("multidoc2dial", "mtrag")),
                               ("P1", 42, ("versionqa", "loong"))):
     matrix = yaml.safe_load(Path("configs/study_matrix.yaml").read_text())

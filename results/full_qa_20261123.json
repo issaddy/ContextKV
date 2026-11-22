@@ -1,9 +1,13 @@
 {
   "setup": {
     "generator": "Qwen3-32B BF16",
+    "sampling": {"temperature": 0, "top_p": 1, "top_k": -1, "min_p": 0},
     "hardware": "H200",
+    "generation_gpu": 4,
+    "auxiliary_gpu": 5,
     "concurrency": 4,
     "gpu_kv_pool_gib": 8,
+    "page_tokens": 64,
     "quality_scale": "0–100",
     "complete_p95": "Includes slot waiting",
     "original": "cda1d04",
@@ -63,7 +67,9 @@
         "online_routes": {
           "exact": 100,
           "nonprefix": 0
-        }
+        },
+        "resident_frontier_selected_turns": 1,
+        "resident_nonprefix_opportunities": 0
       },
       "ordinary_rag": {
         "protocol": "P1",
@@ -112,6 +118,17 @@
         }
       }
     }
+  },
+  "versionqa_vs_external_baselines": {
+    "only_contextkv_correct": [
+      "versionqa-052<::>1", "versionqa-054<::>1", "versionqa-061<::>1",
+      "versionqa-062<::>1", "versionqa-068<::>1", "versionqa-075<::>1", "versionqa-076<::>1"
+    ],
+    "both_baselines_correct_contextkv_incorrect": [
+      "versionqa-014<::>1", "versionqa-015<::>1", "versionqa-019<::>1", "versionqa-020<::>1",
+      "versionqa-039<::>1", "versionqa-053<::>1", "versionqa-057<::>1", "versionqa-058<::>1",
+      "versionqa-083<::>1", "versionqa-099<::>1"
+    ]
   },
   "versionqa_by_category": {
     "Version-Specific Content Retrieval": {

@@ -1,6 +1,7 @@
 {
   "setup": {
     "generator": "Qwen3-32B BF16",
+    "sampling": {"temperature": 0, "top_p": 1, "top_k": -1, "min_p": 0},
     "hardware": "H200",
     "generation_gpu": 4,
     "auxiliary_gpu": 5,
@@ -30,7 +31,7 @@
       "shared_tokenizer": "27155ec"
     },
     "loong_reference_commit": "fc8c3b5",
-    "fixed20_statistic": "first completed run for each configuration"
+    "fixed20_statistic": "First complete run per method. The published release medians combine shared_tokenizer with tokenizer_runtime.fixed_repeats."
   },
   "fixed20": {
     "multidoc2dial": {
