@@ -7,6 +7,8 @@ state. Source texts and model token states are not copied into training rows.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+import gzip
 import json
 from pathlib import Path
 
@@ -28,6 +30,12 @@ def lambda_targets(model, trajectory, prices, trace_lambda):
     predicted, tails = model(features)
     count = len(rows)
     observed = torch.stack([observed_values(row["stop"], model.mean.device) for row in rows])
+    if "plan" in rows[0]:
+        groups = defaultdict(list)
+        for index, row in enumerate(rows):
+            groups[row["plan"]].append(index)
+        for indices in groups.values():
+            observed[indices, 0] = observed[indices, 0].mean()
     mask = torch.tensor([[True, index < count-1] for index in range(count)], device=model.mean.device)
     target = torch.zeros_like(predicted)
     target[:, 0] = observed
@@ -112,19 +120,28 @@ def evaluate_policy(model, trajectories, prices):
                "total_extensions": value["extensions"]} for name, value in totals.items()}}
 
 
+def load_trajectories(path):
+    path = Path(path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as source:
+        return [json.loads(line) for line in source if line.strip()]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trajectories")
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trace-lambda", type=float, default=0.8)
     parser.add_argument("--seconds-price", type=float, default=0.0)
     parser.add_argument("--gpu-price", type=float, default=0.0)
     parser.add_argument("--host-price", type=float, default=0.0)
     parser.add_argument("--tail-price", type=float, default=0.0)
     args = parser.parse_args(argv)
-    rows = [json.loads(line) for line in Path(args.trajectories).read_text().splitlines() if line]
+    torch.manual_seed(args.seed)
+    rows = load_trajectories(args.trajectories)
     prices = ValuePrices(args.seconds_price, args.gpu_price, args.host_price, args.tail_price)
     model = fit([row for row in rows if row["split"] == "train"], epochs=args.epochs,
                 trace_lambda=args.trace_lambda, prices=prices, device=args.device)

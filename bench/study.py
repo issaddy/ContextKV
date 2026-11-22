@@ -102,7 +102,7 @@ def method_config(config, method, dataset, split):
 
 
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
-                      limit_conversations=None, limit_turns=20, cache_pair=False):
+                      limit_conversations=None, limit_turns=20, cache_pair=False, record_answer=None):
     from adapters.providers import create_evidence_provider
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.evidence import make_evidence
@@ -161,6 +161,13 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                               **planned.pop(id(request))})
             return await compute(request, **options)
         service.engine.compute = capture
+    if record_answer is not None:
+        build_request = service.answer_request
+        async def record_request(state, snapshot, complete):
+            request = await build_request(state, snapshot, complete)
+            record_answer(state.query.task.task_id, request)
+            return request
+        service.answer_request = record_request
     provider = await asyncio.to_thread(create_evidence_provider, config, service.template)
     qa = DocumentQA(service, provider)
     await qa.start()

@@ -32,7 +32,7 @@
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
-当前默认资产：`models/shared-query`（任务头 286/63、总体覆盖头 382/95 个训练/开发状态）、`models/shared-evidence-sections`（沿用字段头，章节集合 24/6 状态）、`models/shared-stop-sections.pt`（24/6 会话、90 个终端答案）。集合头使用 180 个实际答案标签，来源为 MultiDoc2Dial 官方训练会话；评测会话独立。集合头为 7 参数信息增益校准，停止头使用 16 维共享摘要、12 维状态与 32 维隐藏层。候选采用作者章节，扩展批大小直接读取 `retrieval.evidence_batch`，当前为 24。停止特征包含下一批未编码来源的 token 量及当前证据的实际缓存报价。固定生成权重，查询和字段权重本轮未更新。
+当前默认资产：`models/shared-query`（任务头 286/63、总体覆盖头 382/95 个训练/开发状态）、`models/shared-evidence-sections`（沿用字段头，章节集合 24/6 状态）、`models/shared-stop-sections.pt`（24/6 会话、90 个终端答案）。集合头使用 180 个实际答案标签，来源为 MultiDoc2Dial 官方训练会话；评测会话独立。集合头为 7 参数信息增益校准，停止头使用 16 维共享摘要、12 维状态与 32 维隐藏层。候选采用作者章节，扩展批大小直接读取 `retrieval.evidence_batch`，当前为 12。停止特征包含下一批未编码来源的 token 量及当前证据的实际缓存报价。固定生成权重，查询和字段权重本轮未更新。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -129,14 +129,20 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
 
-停止头的驻留配对使用同一批题、同一批候选和已有集合监督中的 `selected_ids`。分别运行以下两次采集，每次使用独立的输出文件。GPU 组保留预填充来源的需求，Host 组在证据选择前释放需求。按题号和扩展步对齐两组，用 `unit_ids` 核对证据顺序，用 `stop.device_hit_tokens` 和 `stop.host_loaded_tokens` 核对实际驻留变化。两组按原 train/dev 划分合并后的轨迹保存在容器同目录的 `stop-residency.jsonl`。
+实际多轮停止轨迹来自 MultiDoc2Dial 官方训练会话。按声明题单运行正常 P3 问答，用上一轮提交给引擎的提示预热，分别保留 GPU 需求或释放到 Host。每次扩展 12 段，记录当前实际回答的 F1、引擎回执及继续一步的费用。同一条轨迹中，输入 token 和执行路径均相同的状态共用平均质量标签，各自保留实测费用。
 
 ```bash
+asset=training/assets/multidoc2dial-stop-dialogues.jsonl.gz
+python3 -m training.prepare_stop_histories --config "$TRAIN_RUN/study.yaml" \
+  --targets "$asset" --tasks data/multidoc2dial/train/tasks.jsonl \
+  --output "$TRAIN_RUN/stop-inputs.jsonl" --gpu-devices 4 5 --concurrency 4 --seed 20261122
 for tier in gpu host; do
   python3 -m training.collect_shared_values stop --config "$TRAIN_RUN/study.yaml" \
-    --data data/training/shared/aux_supervision/sets.jsonl --train-states 24 --dev-states 20 \
-    --seed-tier "$tier" --concurrency 4 --output "$TRAIN_RUN/stop-$tier.jsonl"
+    --data "$TRAIN_RUN/stop-inputs.jsonl" --seed-tier "$tier" --batch-size 12 \
+    --gpu-devices 4 5 --train-states 48 --dev-states 24 --concurrency 4 --output "$TRAIN_RUN/stop-$tier.jsonl"
 done
+python3 -m training.stop_value "$asset" --output "$TRAIN_RUN/stop.pt" \
+  --seconds-price 0.001 --tail-price 0.001 --seed 42
 ```
 
 InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及在被移除段落的原位置等量填入历史段落的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)

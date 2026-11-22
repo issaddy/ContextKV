@@ -15,7 +15,7 @@ import yaml
 
 from controller.config import create_model_template, load_config, apply_study_config
 from controller.cooperative import CooperativeController, execution_totals
-from controller.cooperative_request import compile_request, working_history
+from controller.cooperative_request import CompiledRequest, compile_request, working_history
 from controller.engine_client import SGLangEngineClient
 from controller.schema import EvidenceBlock, EvidencePool, EvidenceUnit, SessionSnapshot, TurnRecord
 from controller.serialization import decode, to_jsonable
@@ -69,7 +69,7 @@ async def score_answers(rows, endpoint, *, model, concurrency):
         await asyncio.gather(*(score(item) for item in rows))
 
 
-async def collect(args):
+async def collect(args, *, answer_plans=None):
     config = yaml.safe_load(Path(args.config).read_text())
     run = apply_study_config(load_config(config["generation"]["run_config"]), config)
     template = create_model_template(run.model)
@@ -130,7 +130,7 @@ async def collect(args):
         state.version_catalogue = catalogue_versions(catalogue, query.task.version_intent.document_families)
         return state
 
-    async def answer(row, state, snapshot, identity, previous_totals):
+    async def answer(row, state, snapshot, identity, previous_totals, plans=None):
         started = time.monotonic()
         totals = dict(previous_totals)
         state = replace(state, totals=totals)
@@ -143,9 +143,10 @@ async def collect(args):
         item = {"source": row, "answer": result["text"], "output_tokens": result["meta"]["completion_tokens"]}
         if args.stage == "stop":
             windows[identity] = started, time.monotonic()
+            receipt = result["meta"]["contextkv_compute"]
+            item["plan"] = plans.setdefault((request.input_ids, receipt["mode"]), len(plans))
             item.update(call_id=identity, costs={"seconds": windows[identity][1]-started})
             if args.seed_tier:
-                receipt = result["meta"]["contextkv_compute"]
                 item["unit_ids"] = state.selected_ids
                 item["costs"].update(device_hit_tokens=receipt["device_hit_tokens"],
                     host_loaded_tokens=receipt["host_loaded_tokens"], prefill_tokens=receipt["actual_prefill_tokens"],
@@ -157,7 +158,8 @@ async def collect(args):
         async with limit:
             started = time.monotonic()
             snapshot = SessionSnapshot(row["task_id"], raw_history=history(row))
-            if args.stage == "stop" and args.seed_tier:
+            previous = row.get("previous_request") if args.seed_tier else None
+            if args.stage == "stop" and args.seed_tier and previous is None:
                 recorded = {unit["unit_id"]: unit for unit in row["units"]}
                 seed_units = tuple(decode(EvidenceUnit, recorded[key]) for key in row["selected_ids"])
             if row["dataset"] == config["retrieval"]["corpus_id"]:
@@ -219,7 +221,12 @@ async def collect(args):
             batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
             if not args.seed_tier:
                 seed_units = units[:batch_size] if index % 2 == 1 else ()
-            if seed_units:
+            request = None
+            if previous is not None:
+                request = CompiledRequest(input_ids=tuple(previous["input_ids"]), messages=(), evidence=(),
+                    spans=(), reference_map=(), blocks=tuple(previous["blocks"]), demand=tuple(previous["demand"]),
+                    query_span=tuple(previous["query_span"]))
+            elif seed_units:
                 seed = []
                 request = compile_request(template, row["question"], snapshot.raw_history, ())
                 for unit in seed_units:
@@ -232,9 +239,10 @@ async def collect(args):
                     request = candidate
             pending, observed = units, ()
             by_id = {unit.unit_id: unit for unit in units}
+            plans = {} if answer_plans is None else answer_plans.setdefault(row["task_id"], {})
             while pending:
                 branch_id = f"{namespace}:{row['task_id']}:{len(observed)}"
-                if seed_units:
+                if request is not None:
                     seed_id = branch_id+":warm"
                     seed_started = time.monotonic()
                     await engine.compute(request, session_id=branch_id, request_id=seed_id,
@@ -262,7 +270,7 @@ async def collect(args):
                     cache_scope=branch_id, cache_namespace=branch_id)
                 encode_id, prepare_id = branch_id+":encode", branch_id+":prepare"
                 windows[encode_id] = first, time.monotonic()
-                if seed_units and args.seed_tier == "host":
+                if request is not None and args.seed_tier == "host":
                     released = time.monotonic()
                     await engine.close_session(branch_id)
                     windows[branch_id+":release"] = released, time.monotonic()
@@ -276,7 +284,7 @@ async def collect(args):
                 features = StopValueHead.features(encoded.summary(state.selected_ids, state.pool.units,
                     tuple(need.need_id for need in state.query.task.needs), state.completed_needs),
                     controller._value_state(state, time.monotonic()-paid_seconds)).cpu().tolist()
-                item = await answer(row, state, snapshot, branch_id, totals)
+                item = await answer(row, state, snapshot, branch_id, totals, plans)
                 states.append({"features": features, "answer": item})
             outputs.append((row, states))
 
@@ -298,7 +306,7 @@ async def collect(args):
         states = []
         for state in observed:
             item = state["answer"]
-            value = {"features": state["features"],
+            value = {"features": state["features"], "plan": item["plan"],
                      "stop": {"quality": item["quality"], **item["costs"]}}
             if args.seed_tier:
                 value["unit_ids"] = item["unit_ids"]
