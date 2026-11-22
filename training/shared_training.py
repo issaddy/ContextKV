@@ -314,9 +314,16 @@ def field_loss(encoder, query, units, row):
 def train_evidence(args):
     import torch
     torch.manual_seed(args.seed)
-    data = [row for row in rows(args.data)
-            if (bool(row["task_state"]["needs"] and row["units"]) if args.field_only else bool(row.get("sets")))]
+    data = rows(args.data)
+    if args.field_only:
+        data = [row for row in data if row["task_state"]["needs"] and row["units"]]
+    else:
+        for row in data:
+            row["sets"] = [choice for choice in row.get("sets", ()) if choice["quality"] is not None]
+        data = [row for row in data if len(row["sets"]) >= 2]
     training = [row for row in data if row["split"] == "train"]
+    if not training:
+        raise ValueError("No labelled training states for the requested evidence head")
     needs_encoding = args.field_only or any("features" not in row["sets"][0] for row in data)
     with ExitStack() as resources:
         if needs_encoding:
@@ -368,18 +375,20 @@ def train_evidence(args):
                     total += loss.item()
                     steps += 1
             with torch.no_grad():
-                observed = []
+                chosen_qualities, fact_recalls = [], []
                 for (features, completed, _, _), row in zip(encoded["dev"], (r for r in data if r["split"]=="dev")):
                     chosen = row["sets"][int(heads.utility_from_features(features, completed).argmax())]
+                    chosen_qualities.append(chosen["quality"])
                     if "covered_facts" in chosen:
-                        observed.append((chosen["quality"], sum(chosen["covered_facts"])/len(chosen["covered_facts"])))
-                if observed:
-                    selection["dev_chosen_quality"], selection["dev_chosen_fact_recall"] = (
-                        sum(values)/len(values) for values in zip(*observed))
+                        fact_recalls.append(sum(chosen["covered_facts"])/len(chosen["covered_facts"]))
+                if fact_recalls:
+                    selection["dev_chosen_fact_recall"] = sum(fact_recalls)/len(fact_recalls)
                 if encoded["dev"]:
+                    selection["dev_chosen_quality"] = sum(chosen_qualities)/len(chosen_qualities)
                     selection["dev_loss"] = sum(float(gain_loss(x)) for x in encoded["dev"])/len(encoded["dev"])
             selection.update(dev_states=len(encoded["dev"]), epoch=args.epochs,
-                             fact_labelled_states=sum("covered_facts" in r["sets"][0] for r in data))
+                             fact_labelled_states=sum(
+                                 "covered_facts" in r["sets"][0] or "supported_facts" in r["sets"][0] for r in data))
         else:
             optimizer = torch.optim.AdamW(heads.parameters(), lr=args.learning_rate)
             for _ in range(args.epochs):

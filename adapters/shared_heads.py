@@ -149,6 +149,11 @@ class EvidenceHeads(nn.Module):
 
     @staticmethod
     def gain_loss(predictions, qualities, empty):
-        gains = qualities-qualities[empty].mean()
+        if empty.any():
+            gains = qualities - qualities[empty].mean()
+        else:
+            # Incremental reads identify differences between plans with evidence already present.
+            predictions = predictions - predictions.mean()
+            gains = qualities - qualities.mean()
         loss = F.mse_loss(predictions, gains)
         return loss + F.kl_div(predictions.log_softmax(-1), gains.softmax(-1), reduction="sum")
