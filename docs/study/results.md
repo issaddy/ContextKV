@@ -226,6 +226,10 @@ ContextKV 正确率低于普通基线 14 个百分点，低于 LlamaIndex 11 个
 
 这次全量评测早于 `v` 前缀匹配修正。当时有 5 道 Bootstrap 题选入的来源均不含问题指定的版本，修正后的同题结果见上方版本对齐小规模验证。
 
+在两个互不重叠的 20 题队列中，第 015 题所需的 `SPARK-44581` 仅出现在 Spark 3.3.4 的发布记录中。默认版本范围只保留了 Spark 3.5.5；开放历史版本后，3.3.4 中的原段落排到第 1 位，该题答对，实际 prefill 从 1,446 降到 941 token。第 057 题则已在首批 24 个候选的第 2 位拿到 `assert.deepEqual` 的函数说明，最终交付的是模块首页。单独用函数段落替换首页，两次交叉测量的 prefill 都是 860 token，答案都从模块的稳定级别 2 改为函数的弃用级别 0，输出从 29 增至 43 token。[Node.js 15.14.0 断言文档](https://nodejs.org/download/release/v15.14.0/docs/api/assert.html)
+
+第 046、054 题询问的名称在指定版本文档中均无字面匹配。保留已选原文，只随版本目录给出全文查找结果，两个回答均通过作者评分，输出分别由 232、99 降至 66、67 token。第 049 题已经交付 Node.js 17.9.1 的构造函数段落，随题语料与该版本官方文档均列出 `new Error(message)`，参考答案却要求 `new Error(message[, options])` 及 `cause` 参数。项目沿用作者评分。[Node.js 17.9.1 构造函数文档](https://nodejs.org/download/release/v17.9.1/docs/api/errors.html)
+
 ## MT-RAG 全量公开参考历史（2026-11-16）
 
 固定 Qwen3-32B，IBM Cloud 测试集 **205 题、26 个会话**，并发 4、公开参考历史。三种方法均交付 205/205。质量为官方综合分乘以 100，P95 包含完整在线响应，GPU/Host 为 GiB·s。
