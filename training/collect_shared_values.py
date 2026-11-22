@@ -144,6 +144,12 @@ async def collect(args):
         if args.stage == "stop":
             windows[identity] = started, time.monotonic()
             item.update(call_id=identity, costs={"seconds": windows[identity][1]-started})
+            if args.seed_tier:
+                receipt = result["meta"]["contextkv_compute"]
+                item["unit_ids"] = state.selected_ids
+                item["costs"].update(device_hit_tokens=receipt["device_hit_tokens"],
+                    host_loaded_tokens=receipt["host_loaded_tokens"], prefill_tokens=receipt["actual_prefill_tokens"],
+                    output_tokens=item["output_tokens"])
         await engine.close_session(identity)
         return item
 
@@ -151,6 +157,9 @@ async def collect(args):
         async with limit:
             started = time.monotonic()
             snapshot = SessionSnapshot(row["task_id"], raw_history=history(row))
+            if args.stage == "stop" and args.seed_tier:
+                recorded = {unit["unit_id"]: unit for unit in row["units"]}
+                seed_units = tuple(decode(EvidenceUnit, recorded[key]) for key in row["selected_ids"])
             if row["dataset"] == config["retrieval"]["corpus_id"]:
                 query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"],
                                                                   initial_only=args.stage == "sets")
@@ -205,27 +214,33 @@ async def collect(args):
                              for (chosen, item), flags, vector in zip(observations, marks, features)]})
                 return
             paid_seconds = time.monotonic()-started
-            warm = index % 2 == 1
+            namespace = f"stop:{args.seed_tier}" if args.seed_tier else "stop"
             state, encoded, states = None, None, []
             batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
+            if not args.seed_tier:
+                seed_units = units[:batch_size] if index % 2 == 1 else ()
+            if seed_units:
+                seed = []
+                request = compile_request(template, row["question"], snapshot.raw_history, ())
+                for unit in seed_units:
+                    blocks = source_blocks((*seed, unit))
+                    candidate = compile_request(template, row["question"], snapshot.raw_history,
+                        blocks, future_sources=blocks)
+                    if len(candidate.input_ids)+1 > run.context.max_total_model_tokens:
+                        break
+                    seed.append(unit)
+                    request = candidate
             pending, observed = units, ()
             by_id = {unit.unit_id: unit for unit in units}
             while pending:
-                branch_id = f"stop:{row['task_id']}:{len(observed)}"
-                if warm:
-                    seed = []
-                    request = compile_request(template, row["question"], snapshot.raw_history, ())
-                    for unit in units[:batch_size]:
-                        blocks = source_blocks((*seed, unit))
-                        candidate = compile_request(template, row["question"], snapshot.raw_history,
-                            blocks, future_sources=blocks)
-                        if len(candidate.input_ids)+1 > run.context.max_total_model_tokens:
-                            break
-                        seed.append(unit)
-                        request = candidate
-                    await engine.compute(request, session_id=branch_id, request_id=branch_id+":warm",
+                branch_id = f"{namespace}:{row['task_id']}:{len(observed)}"
+                if seed_units:
+                    seed_id = branch_id+":warm"
+                    seed_started = time.monotonic()
+                    await engine.compute(request, session_id=branch_id, request_id=seed_id,
                         max_new_tokens=1, mode=config["shared"]["runtime"]["kv_mode"],
                         cache_scope=branch_id, cache_namespace=branch_id, **kv_policy)
+                    windows[seed_id] = seed_started, time.monotonic()
                 first = time.monotonic()
                 seen = {unit.unit_id for unit in observed}
                 fresh = tuple(unit for unit in SharedEvidenceProvider._closure(pending[:batch_size], by_id)
@@ -245,12 +260,19 @@ async def collect(args):
                 state.evidence_batch = batch_size
                 complete = controller.executor(branch_id, branch_id+":work", totals,
                     cache_scope=branch_id, cache_namespace=branch_id)
+                encode_id, prepare_id = branch_id+":encode", branch_id+":prepare"
+                windows[encode_id] = first, time.monotonic()
+                if seed_units and args.seed_tier == "host":
+                    released = time.monotonic()
+                    await engine.close_session(branch_id)
+                    windows[branch_id+":release"] = released, time.monotonic()
+                preparing = time.monotonic()
                 await controller.prepare_state(state, snapshot, complete)
-                transition_id = f"expand:{row['task_id']}:{len(observed)}"
-                windows[transition_id] = first, time.monotonic()
-                paid_seconds += windows[transition_id][1]-first
+                windows[prepare_id] = preparing, time.monotonic()
+                transition = (encode_id, prepare_id)
+                paid_seconds += sum(windows[key][1]-windows[key][0] for key in transition)
                 if states:
-                    states[-1]["transition_id"] = transition_id
+                    states[-1]["transition"] = transition
                 features = StopValueHead.features(encoded.summary(state.selected_ids, state.pool.units,
                     tuple(need.need_id for need in state.query.task.needs), state.completed_needs),
                     controller._value_state(state, time.monotonic()-paid_seconds)).cpu().tolist()
@@ -278,11 +300,16 @@ async def collect(args):
             item = state["answer"]
             value = {"features": state["features"],
                      "stop": {"quality": item["quality"], **item["costs"]}}
-            if "transition_id" in state:
-                identity = state["transition_id"]
-                value["transition"] = {"seconds": windows[identity][1]-windows[identity][0], **attributed[identity]}
+            if args.seed_tier:
+                value["unit_ids"] = item["unit_ids"]
+            if "transition" in state:
+                phases = state["transition"]
+                value["transition"] = {
+                    "seconds": sum(windows[key][1]-windows[key][0] for key in phases),
+                    **{metric: sum(attributed[key][metric] for key in phases) for metric in attributed[phases[0]]}}
             states.append(value)
-        save_record({"task_id": row["task_id"], "conversation_id": row["conversation_id"],
+        save_record({**({"seed_tier": args.seed_tier} if args.seed_tier else {}),
+                     "task_id": row["task_id"], "conversation_id": row["conversation_id"],
                      "split": row["split"], "candidate_origin": row.get("candidate_origin", "supplied"), "states": states})
     return {"states": record_count, "answers": answer_count, "output": str(path)}
 
@@ -295,6 +322,8 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--gpu-devices", type=int, nargs="+", default=[4, 5, 6, 7])
     parser.add_argument("--batch-size", type=int, help="Evidence expansion size; defaults to the online retrieval batch")
+    parser.add_argument("--seed-tier", choices=("gpu", "host"),
+        help="For stop trajectories, prime the recorded selected_ids from set supervision and retain or release the GPU demand.")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--train-states", type=int)
     parser.add_argument("--dev-states", type=int)

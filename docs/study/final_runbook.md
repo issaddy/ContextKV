@@ -129,6 +129,16 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
 
 跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
 
+停止头的驻留配对使用同一批题、同一批候选和已有集合监督中的 `selected_ids`。分别运行以下两次采集，每次使用独立的输出文件。GPU 组保留预填充来源的需求，Host 组在证据选择前释放需求。按题号和扩展步对齐两组，用 `unit_ids` 核对证据顺序，用 `stop.device_hit_tokens` 和 `stop.host_loaded_tokens` 核对实际驻留变化。两组按原 train/dev 划分合并后的轨迹保存在容器同目录的 `stop-residency.jsonl`。
+
+```bash
+for tier in gpu host; do
+  python3 -m training.collect_shared_values stop --config "$TRAIN_RUN/study.yaml" \
+    --data data/training/shared/aux_supervision/sets.jsonl --train-states 24 --dev-states 20 \
+    --seed-tier "$tier" --concurrency 4 --output "$TRAIN_RUN/stop-$tier.jsonl"
+done
+```
+
 InSCIt 自然对话使用作者训练分区。每个会话取一条引用多篇文章的回答，以及最近的一条引用单篇文章的回答，两题都保留实际对话历史。干预集合包含作者引用的段落、逐篇移除后的段落，以及在被移除段落的原位置等量填入历史段落的组合。文章数量描述该回答的来源，逐事实覆盖由固定生成模型的实际回答评定。[固定版本的原始数据](https://github.com/ellenmellon/INSCIT/blob/2319fb85932b9528a13417223ffc6fc629ae8087/data/train.json)
 
 ```bash
