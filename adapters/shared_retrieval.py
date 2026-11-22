@@ -1,7 +1,9 @@
 """Scope-first retrieval and shared evidence encoding for the cooperative executor."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field, replace
+from math import log1p
 import time
 
 from adapters.corpus import CorpusIndex
@@ -50,6 +52,8 @@ class SharedEvidenceState:
     evidence_batch: int = 24
     population_units: tuple = ()
     source_headers: tuple = ()
+    document_titles: dict = field(default_factory=dict)
+    title_note_budget: str = ""
     version_catalogue: dict = field(default_factory=dict)
     costs: object = None
     computations: tuple = ()
@@ -80,6 +84,39 @@ class SharedEvidenceState:
         return tuple(need for need in self.query.task.needs if need.need_id not in self.completed_needs
                      and (need.operation in {"count", "sum", "mean", "min", "max", "group"}
                           or need.need_id not in supported))
+
+
+def ranked_population_windows(units, question, budget, tokenizer, witnesses):
+    """Keep witness windows and dependencies, then fill by BM25 rank within each document."""
+    groups = {}
+    for index, unit in enumerate(units):
+        key = unit.source_spans[0].source_key
+        groups.setdefault((key.corpus_id, key.document_id, key.version), []).append(index)
+    terms = set(tokenizer.encode(question, add_special_tokens=False))
+    tokens = tokenizer([u.text for u in units], add_special_tokens=False, return_attention_mask=False)["input_ids"]
+    frequencies = [Counter(token for token in row if token in terms) for row in tokens]
+    df = Counter(token for row in frequencies for token in row)
+    idf = {token: log1p((len(units)-count+0.5)/(count+0.5)) for token, count in df.items()}
+    mean_length = sum(map(len, tokens))/len(units)
+    k1, b = 1.5, 0.75
+    scores = [sum(idf[token]*count*(k1+1)/(count+k1*(1-b+b*len(row)/mean_length))
+                  for token, count in counts.items()) for row, counts in zip(tokens, frequencies)]
+
+    selected = {units[group[0]].unit_id for group in groups.values()}
+    selected.update(dep for unit in units for dep in unit.dependencies)
+    selected.update(unit.unit_id for unit in units for span in unit.source_spans
+                    if any(span.source_key == block.key and span.start < block.span[1] and block.span[0] < span.end
+                           for block in witnesses))
+    remaining = budget - sum(unit.body_tokens for unit in units if unit.unit_id in selected)
+    ranked = [sorted(group, key=scores.__getitem__, reverse=True) for group in groups.values()]
+    for rank in range(max(map(len, ranked))):
+        for group in ranked:
+            if rank < len(group):
+                unit = units[group[rank]]
+                if unit.unit_id not in selected and unit.body_tokens <= remaining:
+                    selected.add(unit.unit_id)
+                    remaining -= unit.body_tokens
+    return selected
 
 
 class SharedEvidenceProvider:
@@ -120,9 +157,10 @@ class SharedEvidenceProvider:
                                           candidate_view="initial" if initial_only else "all")
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
-                                coverage_scope="selected_sources", facts=()):
+                                coverage_scope="selected_sources", facts=(), available_kv_tokens=None):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
-            supplied_blocks=tuple(blocks), source_metadata=source_metadata, coverage_scope=coverage_scope, facts=facts)
+            supplied_blocks=tuple(blocks), source_metadata=source_metadata, coverage_scope=coverage_scope, facts=facts,
+            available_kv_tokens=available_kv_tokens)
 
     def _catalogue(self, corpus):
         catalogue = tuple({(corpus.source_metadata.get(block.key, {}).get("document_family", block.key.document_id),
@@ -137,7 +175,7 @@ class SharedEvidenceProvider:
         return tuple(row for row in catalogue if counts[row["family"]] > 1)
 
     def _retrieve(self, snapshot, question, request_id, *, supplied_blocks=None, source_metadata=None,
-                  coverage_scope="selected_sources", facts=(), candidate_view=None):
+                  coverage_scope="selected_sources", facts=(), candidate_view=None, available_kv_tokens=None):
         import torch
         started = time.perf_counter()
         document_tokens = 0
@@ -145,8 +183,10 @@ class SharedEvidenceProvider:
         catalogue = self.catalogue
         cached = None
         if supplied_blocks is not None:
-            supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + (block.title or next(
-                (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")))
+            titles = {block.key: block.title or next(
+                (line.strip().lstrip("#").strip() for line in block.text.splitlines() if line.strip()), "")
+                for block in supplied_blocks}
+            supplied_blocks = tuple(replace(block, title=f"D{index+1} | " + titles[block.key])
                 for index, block in enumerate(supplied_blocks))
             key = snapshot.corpus_snapshot_id, tuple(block.key for block in supplied_blocks)
             if key not in self._supplied:
@@ -275,6 +315,18 @@ class SharedEvidenceProvider:
         available = self._body_budget(snapshot, query)
         by_id = {unit.unit_id: unit for unit in units}
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
+        if supplied_blocks is not None:
+            from controller.cooperative_request import document_headers, source_title_mentions
+            documents = corpus.resolve(legal)
+            headers = document_headers(documents, self.template.tokenizer)
+            note, witnesses = source_title_mentions(documents, titles)
+            if full and witnesses:
+                headers += witnesses
+                budget = available
+                if available_kv_tokens is not None:
+                    budget = min(budget, available_kv_tokens - self.config["execution"]["output_tokens"])
+                if sum(unit.body_tokens for unit in units) > budget:
+                    initial_ids = ranked_population_windows(units, question, budget, self.template.tokenizer, witnesses)
         initial_ids.update(historical_ids)
         pending_dependencies = list(initial_ids)
         while pending_dependencies:
@@ -331,8 +383,9 @@ class SharedEvidenceProvider:
             evidence_batch=self.evidence_batch)
         state.version_catalogue = catalogue_versions(catalogue, families)
         if supplied_blocks is not None:
-            from controller.cooperative_request import document_headers
-            state.source_headers = document_headers(corpus.resolve(legal), self.template.tokenizer)
+            state.source_headers = headers
+            state.document_titles = titles
+            state.title_note_budget = note
         self._finish_state(state)
         state.reused_claims = self._reuse_computations(state, facts)
         state.computations = state.reused_claims
