@@ -8,7 +8,7 @@ import time
 from weakref import WeakValueDictionary
 
 from .cooperative_request import (SYSTEM, ANSWER_SCOPE, EvidenceCosts, blocks_for_units, compile_request,
-                                  source_address, source_body, source_title_note, with_document_headers, working_history, with_source_demand)
+                                  source_address, source_body, source_title_mentions, with_document_headers, working_history, with_source_demand)
 from .schema import EvidenceKey, QueryContext
 from .serialization import decode, to_jsonable
 
@@ -146,6 +146,9 @@ class CooperativeController:
             async def retrieve(question):
                 if supplied_blocks is None:
                     return await provider.retrieve(snapshot, question, task_id, **facts)
+                if self.dialogue_mode == "contextkv":
+                    native = await self.engine.evidence_state(())
+                    facts["available_kv_tokens"] = native["available_tokens"]
                 return await provider.retrieve_supplied(snapshot, question, task_id, supplied_blocks,
                     source_metadata=source_metadata, coverage_scope=coverage_scope, **facts)
 
@@ -279,7 +282,7 @@ class CooperativeController:
         else:
             selected = selected_blocks(state)
         selected = with_document_headers(selected, state.source_headers)
-        title_note = source_title_note(selected, state.document_titles) if state.title_note_budget else ""
+        title_note = source_title_mentions(selected, state.document_titles)[0] if state.title_note_budget else ""
         request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
             instruction=self._answer_instruction(state) + title_note)

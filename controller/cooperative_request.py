@@ -88,21 +88,34 @@ def with_document_headers(evidence, headers):
     return (*missing, *evidence)
 
 
-def source_title_note(evidence, titles):
-    """Name direct title mentions between visible sources in final citation order."""
+def source_title_mentions(evidence, titles):
+    """Return the citation note and one original text span per directed title mention."""
     references = assign_references(block.key for block in evidence)
     if len(references) < 2:
-        return ""
+        return "", ()
     excerpts = {key: [] for _, key in references}
     for block in evidence:
-        excerpts[block.key].append(" " + " ".join(re.findall(r"\w+", block.text.casefold())) + " ")
-    names = {key: " ".join(re.findall(r"\w+", title.casefold())) for key, title in titles.items()}
+        excerpts[block.key].append(block)
+    names = {key: tuple(re.findall(r"\w+", title.casefold())) for key, title in titles.items()}
     counts = Counter(names.values())
-    lines = [f"[{source}] mentions [{target}]." for source, key in references for target, other in references
-             if other != key and names[other] and counts[names[other]] == 1
-             and any(f" {names[other]} " in text for text in excerpts[key])]
-    return ("\nThe following visible excerpts mention another supplied document by title:\n"
+    patterns = [(target, other, re.compile(r"(?<!\w)" + r"\W+".join(map(re.escape, names[other])) + r"(?!\w)", re.I))
+                for target, other in references if names[other] and counts[names[other]] == 1]
+    lines, witnesses = [], []
+    for source, key in references:
+        for target, other, pattern in patterns:
+            if key == other:
+                continue
+            for block in excerpts[key]:
+                match = pattern.search(block.text)
+                if match:
+                    offset = block.span[0] if block.span else 0
+                    witnesses.append(replace(block, text=match.group(), token_ids=(),
+                        span=(offset + match.start(), offset + match.end())))
+                    lines.append(f"[{source}] mentions [{target}].")
+                    break
+    note = ("\nThe following visible excerpts mention another supplied document by title:\n"
             + "\n".join(lines)) if lines else ""
+    return note, tuple(witnesses)
 
 
 def blocks_for_units(units, source_blocks):
