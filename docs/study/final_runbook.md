@@ -207,25 +207,40 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ## 端到端评测
 
-已发布的四项固定题单按数据集使用独立的历史协议。MultiDoc2Dial、MT-RAG 使用 P3 和种子 20261119，VersionQA、Loong 使用 P1 和种子 42。复现时将结果文件中的 `task_ids` 写入相应 matrix 的 `cohorts.test.<dataset>`，并使用该组种子。
-
-默认每个 benchmark、每种方法 20 题。会话内按轮号的数值排序，每次从各会话依次取相邻两轮，最后用 `--limit-turns` 截断整套队列。使用预先选定的题单时，该值应至少等于题数最多的 benchmark，否则只会评测部分题目。各方法使用同一题单和生成条件，按 benchmark 分别报告质量和完整 P95。
-
-全量对照沿用各题集的历史协议和种子。在 matrix 中移除 `cohorts`，逐题集使用测试集行数作为 `--limit-turns`。MultiDoc2Dial、MT-RAG、VersionQA 和 Loong 分别为 4,094、205、100 和 323 题。原配置与当前配置各使用对应提交的 controller、SGLang 补丁和 KV 单价资产。H200 对照的原始及校准单价见[全量配置与结果](../../results/full_qa_20261123.json)。
+以下命令复现 H200 的固定 20 题对照。生成引擎使用物理卡 4，两个辅助编码器共用物理卡 5。各方法使用已部署的权重。MultiDoc2Dial、MT-RAG 用各方法实际生成的历史（P3），VersionQA、Loong 用题目提供的历史（P1）。命令读取发布的题号和协议种子。[固定题单](../../results/paired_qa_20261122.json)
 
 ```bash
-python3 -m bench.study evaluate \
-  --config "$TRAIN_RUN/study.yaml" --matrix configs/study_matrix.yaml \
-  --split test --limit-turns 20 --concurrency 4 \
-  --output runs/current/public
+export CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1
+EVAL_RUN=$(mktemp -d runs/eval-XXXXXX)
+export EVAL_RUN
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+import yaml
 
-python3 -m bench.study evaluate \
-  --config "$TRAIN_RUN/study.yaml" --matrix configs/study_system_matrix.yaml \
-  --split test --limit-turns 20 --concurrency 4 \
-  --output runs/current/actual-history
+out = Path(os.environ["EVAL_RUN"])
+study = yaml.safe_load(Path("configs/study.yaml").read_text())
+study["shared"]["query"]["device"] = study["shared"]["evidence"]["device"] = "cuda:1"
+(out / "study.yaml").write_text(yaml.safe_dump(study))
+fixed = json.loads(Path("results/paired_qa_20261122.json").read_text())["fixed20"]
+for protocol, seed, names in (("P3", 20261119, ("multidoc2dial", "mtrag")),
+                              ("P1", 42, ("versionqa", "loong"))):
+    matrix = yaml.safe_load(Path("configs/study_matrix.yaml").read_text())
+    matrix["datasets"] = {name: matrix["datasets"][name] for name in names}
+    matrix["resources"]["gpu_devices"] = [4, 5]
+    matrix.update(protocol=protocol, seed=seed,
+                  cohorts={"test": {name: fixed[name]["task_ids"] for name in names}})
+    (out / f"{protocol}.yaml").write_text(yaml.safe_dump(matrix, sort_keys=False))
+PY
+
+for protocol in P3 P1; do
+  python3 -m bench.study evaluate --config "$EVAL_RUN/study.yaml" \
+    --matrix "$EVAL_RUN/$protocol.yaml" --split test --limit-turns 20 \
+    --concurrency 4 --output "$EVAL_RUN/$protocol"
+done
 ```
 
-`--methods ordinary_rag contextkv llamaindex` 和 `--datasets multidoc2dial mtrag versionqa loong` 可指定本次范围。公开评测使用参考历史；实际历史评测在会话内顺序提交导出的可评分轮次，失败轮次结束后，后续轮次使用此前已提交历史。
+全量对照使用相同种子和协议，去掉 matrix 的 `cohorts`，每次用 `--datasets` 指定一个题集，以对应题数作为 `--limit-turns`。MultiDoc2Dial、MT-RAG、VersionQA 和 Loong 分别为 4,094、205、100 和 323 题。原配置使用 `cda1d04` 的 controller、SGLang 补丁及原始 KV 单价资产，当前配置使用发布版资产。每种方法从冷池开始。[全量配置与单价](../../results/full_qa_20261123.json)
 
 连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次；当前固定题单保存在 `results/paired_qa_20261122.json` 的 `fixed20.<dataset>.task_ids`。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、已生成历史与到达偏移一致，先执行语义排序 Native 和缓存成本排列的 auto，再以 Native 重放 auto 使用的相同来源顺序，并在相同顺序下以 auto 省略未来来源需求。各路分别从冷 KV 开始，使用贪心生成并保留答案一致数。第三路直接读取已选顺序，省去在线报价时间。请求只在内存中暂存，输出 `cache_pair.json`；该配对的 P95 从输入就绪计时，完整队列的 P95 包含检索与辅助编码，质量按各 benchmark 原协议评分。
 
