@@ -18,7 +18,8 @@
       "combined": "4d1f23a",
       "ordinary_rag": "Ordinary RAG",
       "llamaindex": "LlamaIndex core 0.14.25",
-      "resident": "9600e47"
+      "resident": "9600e47",
+      "named": "798c84f"
     }
   },
   "fixed20": {
@@ -130,6 +131,23 @@
           "gpu_gib_seconds": 1768.27,
           "host_gib_seconds": 527.38,
           "active_kv_peak_tokens": 3328
+        },
+        "named": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 19.016,
+          "complete_p95_ms": 9204.58,
+          "prefill_tokens": 11782,
+          "output_tokens": 2560,
+          "wait_p95_ms": 2983.56,
+          "auxiliary_p95_ms": 3805.07,
+          "engine_p95_ms": 5628.24,
+          "total_input_tokens": 12998,
+          "gpu_gib_seconds": 1780.16,
+          "host_gib_seconds": 523.15,
+          "active_kv_peak_tokens": 3392
         }
       }
     },
@@ -241,6 +259,23 @@
           "gpu_gib_seconds": 2097.66,
           "host_gib_seconds": 648.76,
           "active_kv_peak_tokens": 4928
+        },
+        "named": {
+          "protocol": "P3",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 59.836,
+          "complete_p95_ms": 8743.04,
+          "prefill_tokens": 14284,
+          "output_tokens": 2304,
+          "wait_p95_ms": 3619.98,
+          "auxiliary_p95_ms": 5500.64,
+          "engine_p95_ms": 4195.51,
+          "total_input_tokens": 15500,
+          "gpu_gib_seconds": 2000.02,
+          "host_gib_seconds": 611.04,
+          "active_kv_peak_tokens": 3840
         }
       }
     },
@@ -351,6 +386,23 @@
           "total_input_tokens": 16521,
           "gpu_gib_seconds": 1307.63,
           "host_gib_seconds": 387.89,
+          "active_kv_peak_tokens": 4160
+        },
+        "named": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 85,
+          "complete_p95_ms": 16102.52,
+          "prefill_tokens": 14473,
+          "output_tokens": 1621,
+          "wait_p95_ms": 13221.67,
+          "auxiliary_p95_ms": 4194.38,
+          "engine_p95_ms": 4220.82,
+          "total_input_tokens": 16521,
+          "gpu_gib_seconds": 1289.33,
+          "host_gib_seconds": 376.7,
           "active_kv_peak_tokens": 4160
         }
       }
@@ -463,6 +515,23 @@
           "gpu_gib_seconds": 3321.49,
           "host_gib_seconds": 955.78,
           "active_kv_peak_tokens": 28800
+        },
+        "named": {
+          "protocol": "P1",
+          "declared": 20,
+          "completed": 20,
+          "scored": 20,
+          "quality": 72.25,
+          "complete_p95_ms": 39264.68,
+          "prefill_tokens": 135676,
+          "output_tokens": 2196,
+          "wait_p95_ms": 32768.45,
+          "auxiliary_p95_ms": 6878.91,
+          "engine_p95_ms": 11996.61,
+          "total_input_tokens": 136636,
+          "gpu_gib_seconds": 3387.09,
+          "host_gib_seconds": 960.7,
+          "active_kv_peak_tokens": 26560
         }
       }
     }
@@ -723,6 +792,213 @@
         "out": 170,
         "engine_ms": 4308.6
       }
+    ]
+  },
+  "named_document_pairs": {
+    "commit": "798c84f",
+    "method": "Fixed original spans, source IDs, question and ordering. Same directed mention in both instructions; the treatment adds the two document titles. Cold Native generation at concurrency four, alternating arm order by batch, followed by Loong official scoring.",
+    "initial": {
+      "task_ids": [
+        "b7405d8e-13f0-4750-a25d-df3a67ffd39a",
+        "c6666dc5-f286-4359-ac6f-511737d9b3d6",
+        "a5075845-053d-4570-a282-cc74baf7e284",
+        "c4a4e642-fa00-4377-a756-40f2f7ea7a74",
+        "89ff6383-652f-4efd-8ff4-c23617eef20a",
+        "4efcb525-bf7a-442e-b767-d3fc30aa1305",
+        "f359acf5-39a1-4490-ba4a-95d38de35fa7",
+        "13a4a371-6339-4c9d-82cf-fc9ab2bb017d",
+        "8878fb61-6996-4984-9774-5ce9fb506d37",
+        "da57097c-d4fa-494d-90b8-a86d6578904b",
+        "6e59cc47-82ae-4421-be67-f6ca0992f718",
+        "30a2535f-7e73-46ad-a402-ee80ac6e4f92",
+        "d7adf528-91a9-4978-a25c-29e61562a3be",
+        "a8fa7aa1-2198-419b-a0de-6ba4d1c1f160",
+        "b517cfc0-9245-4f1e-81b0-61d8c0dad060",
+        "7bfef6af-b337-4b5d-aada-41f500b375d3",
+        "68e88dcc-6dec-4bb4-b51b-1fe8d6cd856d",
+        "453af4e2-691e-42b4-bac7-9bc808c90eb8",
+        "683f4cfd-1cfe-475d-927a-08a71d4f69e9",
+        "949f3450-9b30-4556-be5f-ca8afe9e072f",
+        "a780dc25-81d8-4e0f-b344-5086b8055e04",
+        "1df3da1b-87c8-4692-9ec7-83d1b0e9caa3",
+        "21437cb8-574d-4713-ab25-2f1667ac4ab8",
+        "aa9707c4-9506-4e51-899d-9213ad10a324"
+      ],
+      "quality_up_equal_down": [
+        7,
+        14,
+        3
+      ],
+      "reference_ids": {
+        "n": 24,
+        "score": 71.25,
+        "input_tokens": 73113,
+        "output_tokens": 1990,
+        "engine_p95_ms": 4598.05
+      },
+      "reference_ids_and_titles": {
+        "n": 24,
+        "score": 82.917,
+        "input_tokens": 74935,
+        "output_tokens": 1489,
+        "engine_p95_ms": 3392.23
+      }
+    },
+    "confirmation": {
+      "task_ids": [
+        "014ae33b-22e7-4fb7-ae34-56f64160ce74",
+        "2357f6df-fed9-4508-a80c-800fe6995caa",
+        "28f4bc5c-284c-4bf0-b844-35f3554c2c92",
+        "e904afd3-5cb9-4bf7-bbee-9c8defac858c",
+        "cd618a43-7176-432d-b21e-432e5c2ca4a7",
+        "42872573-11e0-4406-855c-ad0d83ce0bc4",
+        "2d30c308-8267-4453-b27e-1eb8f4330e25",
+        "835a4005-8c32-4083-b52d-4e014d1d35f5",
+        "4ddb4ff4-993c-4a86-ae68-1a1a4119d3b9",
+        "3e4ee654-dfd8-4ffd-a825-79e0997961c9",
+        "9b982095-daad-4632-9573-b0d7037dd6a7",
+        "90e446b8-4238-4dd8-b5dc-748c51d52cbb",
+        "c2eb0280-3201-4791-9ffb-1503841ce9ff",
+        "0223faf0-f46f-459d-b1cd-45c4dab78fc2",
+        "09b3204a-4cd3-49b7-97b3-54a20864e2b8",
+        "74df278b-9320-46dc-8c71-0aea2419aafa",
+        "2fb7e717-7267-4727-832f-384483046ff3",
+        "31ee8539-2e9e-40e2-adc3-082c872698f7",
+        "8c052189-328d-4f98-909d-c3ff31b77dad",
+        "38014959-d599-4de6-ba9e-c5a8f599ed28"
+      ],
+      "quality_up_equal_down": [
+        7,
+        13,
+        0
+      ],
+      "reference_ids": {
+        "n": 20,
+        "score": 71.25,
+        "input_tokens": 134359,
+        "output_tokens": 1418,
+        "engine_p95_ms": 6193.15
+      },
+      "reference_ids_and_titles": {
+        "n": 20,
+        "score": 86,
+        "input_tokens": 135742,
+        "output_tokens": 1297,
+        "engine_p95_ms": 6068.14
+      }
+    }
+  },
+  "tight_pool_loong": {
+    "pool_gib": 4,
+    "concurrency": 4,
+    "cohort": "source_mentions_20261122.json#cohorts.test.loong",
+    "baseline_commit": "d052356",
+    "current_commit": "798c84f",
+    "measurement": "Same 40 tasks. One earlier candidate attempt ended with 39 scored after an HTTP read error; the full candidate cohort was run again.",
+    "baseline": {
+      "all": {
+        "n": 40,
+        "quality": 78.375,
+        "p95_ms": 83857.88,
+        "wait_p95_ms": 77322.67,
+        "after_admission_p95_ms": 21779.53,
+        "aux_p95_ms": 7609.45,
+        "engine_p95_ms": 11264.85,
+        "prefill_tokens": 238200,
+        "output_tokens": 4290,
+        "mean_selected": 15.97
+      },
+      "paper": {
+        "n": 20,
+        "quality": 75.25,
+        "p95_ms": 84967.25,
+        "wait_p95_ms": 80220.85,
+        "after_admission_p95_ms": 11007.11,
+        "aux_p95_ms": 6299.73,
+        "engine_p95_ms": 8251.38,
+        "prefill_tokens": 61766,
+        "output_tokens": 1670,
+        "mean_selected": 14.3
+      },
+      "financial": {
+        "n": 10,
+        "quality": 86,
+        "p95_ms": 80192.94,
+        "wait_p95_ms": 61051,
+        "after_admission_p95_ms": 27526.92,
+        "aux_p95_ms": 9256.23,
+        "engine_p95_ms": 21630.47,
+        "prefill_tokens": 143183,
+        "output_tokens": 2154,
+        "mean_selected": 25.2
+      },
+      "legal": {
+        "n": 10,
+        "quality": 77,
+        "p95_ms": 77701.63,
+        "wait_p95_ms": 71853.06,
+        "after_admission_p95_ms": 10156.38,
+        "aux_p95_ms": 7948.69,
+        "engine_p95_ms": 5697.44,
+        "prefill_tokens": 33251,
+        "output_tokens": 466,
+        "mean_selected": 10.1
+      }
+    },
+    "current": {
+      "all": {
+        "n": 40,
+        "quality": 79.875,
+        "p95_ms": 76008.11,
+        "wait_p95_ms": 70660.92,
+        "after_admission_p95_ms": 21920.99,
+        "aux_p95_ms": 7398.41,
+        "engine_p95_ms": 12154.41,
+        "prefill_tokens": 229839,
+        "output_tokens": 3820,
+        "mean_selected": 14.6
+      },
+      "paper": {
+        "n": 20,
+        "quality": 83.75,
+        "p95_ms": 77423.82,
+        "wait_p95_ms": 73342.58,
+        "after_admission_p95_ms": 9336.25,
+        "aux_p95_ms": 6148.22,
+        "engine_p95_ms": 6506.3,
+        "prefill_tokens": 55272,
+        "output_tokens": 1251,
+        "mean_selected": 12.2
+      },
+      "financial": {
+        "n": 10,
+        "quality": 75,
+        "p95_ms": 73501.56,
+        "wait_p95_ms": 54306.81,
+        "after_admission_p95_ms": 26457.47,
+        "aux_p95_ms": 10995.73,
+        "engine_p95_ms": 19787.46,
+        "prefill_tokens": 143003,
+        "output_tokens": 2110,
+        "mean_selected": 24.9
+      },
+      "legal": {
+        "n": 10,
+        "quality": 77,
+        "p95_ms": 71075.22,
+        "wait_p95_ms": 65239.5,
+        "after_admission_p95_ms": 9605.5,
+        "aux_p95_ms": 7723.5,
+        "engine_p95_ms": 3979.08,
+        "prefill_tokens": 31564,
+        "output_tokens": 459,
+        "mean_selected": 9.1
+      }
+    },
+    "quality_up_equal_down": [
+      5,
+      31,
+      4
     ]
   }
 }
