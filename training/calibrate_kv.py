@@ -40,6 +40,14 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
         # Compare complete batches. Interleaving per-state exact/InfoFlow pairs
         # prices mixed dispatch and graph capture as if they were path costs.
         await engine.profile_prepare()
+        if args.prefill_from:
+            asset = json.loads(Path(args.prefill_from).read_text())
+            results = await asyncio.gather(*(generate(row, "exact", 1) for row in source))
+            asset["costs"]["prefill_token_ms"] = (await engine.metrics())["costs"]["prefill_token_ms"]
+            asset["calibration"]["native_prefill"] = {
+                "concurrency": args.concurrency, "tasks": [row["task_id"] for row in source],
+                "tokens": sum(r["meta"]["contextkv_compute"]["actual_prefill_tokens"] for r in results)}
+            return asset
         generated, cold, output_lengths = {}, {}, {}
         for mode in ("exact", "infoflow"):
             results = await asyncio.gather(*(generate(row, mode, config["execution"]["output_tokens"]) for row in source))
@@ -62,15 +70,11 @@ async def calibrate_kv_quality(args, config, run, template, engine, source):
     await score_answers(answers, run.engine.base_url, model=run.model.name, concurrency=args.concurrency)
     records = [{"task_id": task_id, "exact": pair["exact"]["quality"],
                 "infoflow": pair["infoflow"]["quality"]} for task_id, pair in pairs]
-    asset = {"recompute_ratio": ratio, "quality_loss":
+    return {"recompute_ratio": ratio, "quality_loss":
              sum(row["exact"]-row["infoflow"] for row in records)/len(records),
              "costs": costs, "pairs": records,
              "calibration": {"concurrency": args.concurrency, "first_pass_elapsed_ms": cold,
                  "revisit_elapsed_ms": sum(result["elapsed_ms"] for result in warm)}}
-    path = Path(args.output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asset, ensure_ascii=False, indent=2)+"\n")
-    return {"states": len(records), "quality_loss": asset["quality_loss"], "output": str(path)}
 
 
 async def collect(args):
@@ -79,7 +83,13 @@ async def collect(args):
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=SamplingRecipe())
     source = [json.loads(line) for line in Path(args.data).read_text().splitlines() if line]
-    return await calibrate_kv_quality(args, config, run, template, engine, source)
+    asset = await calibrate_kv_quality(args, config, run, template, engine, source)
+    path = Path(args.output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asset, ensure_ascii=False, indent=2)+"\n")
+    states = asset["calibration"]["native_prefill"]["tasks"] if args.prefill_from else asset["pairs"]
+    return {"quality_loss": asset["quality_loss"], "states": len(states),
+            "prefill_token_ms": asset["costs"]["prefill_token_ms"], "output": str(path)}
 
 
 def main():
@@ -87,6 +97,7 @@ def main():
     parser.add_argument("--config", default="configs/study.yaml")
     parser.add_argument("--data", required=True)
     parser.add_argument("--output", default="models/infoflow-quality.json")
+    parser.add_argument("--prefill-from", help="Reprice Native prefill on this engine using an existing quality asset")
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--concurrency", type=int, default=4)
     print(json.dumps(asyncio.run(collect(parser.parse_args()))))
