@@ -166,7 +166,7 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ## 少量端到端评测
 
-默认每个 benchmark、每种方法 20 题。`--limit-turns` 可指定规模；固定种子分散选择会话并保留相邻轮次，各方法使用相同题目与生成条件，每个 benchmark 单独评分和报告。
+默认每个 benchmark、每种方法 20 题。会话内按轮号的数值排序，每次从各会话依次取相邻两轮，最后用 `--limit-turns` 截断整套队列。使用预先选定的题单时，该值应至少等于题数最多的 benchmark，否则只会评测部分题目。各方法使用同一题单和生成条件，按 benchmark 分别报告质量和完整 P95。
 
 ```bash
 python3 -m bench.study evaluate \
@@ -204,7 +204,7 @@ python3 -m bench.cache_reuse \
 
 ## 保留结果
 
-- `results.jsonl`：逐题答案、来源地址、质量、完整响应、Qwen 输入/输出 token 与缓存计数。
+- `results.jsonl` 保存逐题答案、来源地址、质量、完整响应、Qwen 输入与输出 token 及缓存计数。已完成请求的 `slot_wait_ms` 记录等待并发名额的时间，已计入 `complete_ms`。
 - `batch_cost.json`：整批 GPU/Host 占用积分和峰值。
 - `scoring/manifest.json`：实际评分协议和评分成本。
 - `summary.json`、`report.md`：各 benchmark 的方法对比与差值。

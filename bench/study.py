@@ -116,7 +116,7 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     conversations = sorted(grouped)
     random.Random(matrix.get("seed", 42)).shuffle(conversations)
     conversations = conversations[:limit_conversations]
-    ordered = [sorted(grouped[sid], key=lambda row: row["turn"]) for sid in conversations]
+    ordered = [sorted(grouped[sid], key=lambda row: int(row["turn"])) for sid in conversations]
     # Spread a small queue across conversations while retaining adjacent turns.
     selected = [row for start in range(0, max(map(len, ordered), default=0), 2)
                 for turns in ordered for row in turns[start:start+2]]
@@ -211,7 +211,9 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 "question": query, "history_origin": "author_reference_import" if protocol == "P1" else "model_actual",
                 "measurement_kind": "hardware", "metrics": {}, "generation_dir": str(directory.resolve())}
             try:
+                queued_at = time.monotonic()
                 async with semaphore:
+                    slot_wait_ms = (time.monotonic() - queued_at) * 1000
                     supplied, metadata = None, None
                     if row.get("coverage_mode") or spec.get("supplied_documents", False):
                         contexts = [catalogue[key] for key in row["scope_source_ids"]] if catalogue else row["contexts"]
@@ -230,7 +232,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     tuple(OnlineContext(block.key.passage_id, block.text, block.source_uri, block.title)
                           for block in response.evaluation_evidence), protocol, query_context=response.query_context)
                 append("official.jsonl", official_record(turn, response.assistant_text))
-                cost = {"complete_ms": response.complete_ms, "total_input_tokens": response.total_input_tokens,
+                cost = {"complete_ms": response.complete_ms, "slot_wait_ms": slot_wait_ms,
+                    "total_input_tokens": response.total_input_tokens,
                     "total_output_tokens": response.total_output_tokens, "auxiliary_ms": response.auxiliary_model_ms,
                     "online_compute_ms": response.engine_elapsed_ms + response.auxiliary_model_ms,
                     "actual_prefill_tokens": response.total_prefill_tokens,
