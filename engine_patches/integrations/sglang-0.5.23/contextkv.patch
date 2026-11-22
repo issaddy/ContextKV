@@ -390,3 +390,15 @@ diff --git a/python/sglang/srt/mem_cache/l2_transfer.py b/python/sglang/srt/mem_
                  )
              )
          return prepared
+diff --git a/python/sglang/srt/mem_cache/unified_radix_cache.py b/python/sglang/srt/mem_cache/unified_radix_cache.py
+--- a/python/sglang/srt/mem_cache/unified_radix_cache.py
++++ b/python/sglang/srt/mem_cache/unified_radix_cache.py
+@@ -3578,4 +3578,8 @@
+                     self.metrics_collector.observe_load_back_duration(
+                         duration_ms / 1000.0
+                     )
++                    observe = getattr(self, "contextkv_report_load", None)
++                    tokens = (ack.num_tokens_by_pool or {}).get(PoolName.KV.value, 0)
++                    if observe is not None and tokens:
++                        observe(duration_ms, tokens)
+             finish_count -= 1

@@ -7,6 +7,8 @@ import json
 import time
 from weakref import WeakValueDictionary
 
+from engine_patches.kv_cost import transfer_token_ms
+
 from .cooperative_request import (SYSTEM, ANSWER_SCOPE, EvidenceCosts, blocks_for_units, compile_request,
                                   source_address, source_body, source_title_mentions, with_document_headers, working_history, with_source_demand)
 from .schema import EvidenceKey, QueryContext
@@ -567,8 +569,8 @@ class CooperativeController:
                 "gpu_ready_fraction": min(1., quote["gpu_tokens"]/max(1, selected_tokens)),
                 "host_ready_fraction": min(1., quote["host_tokens"]/max(1, selected_tokens)),
                 "queue_depth": state.costs.snapshot["queue_depth"],
-                **{name: native.get(name, 0) for name in (
-                    "prefill_token_ms", "transfer_token_ms")}}
+                "prefill_token_ms": native.get("prefill_token_ms", 0),
+                "transfer_token_ms": transfer_token_ms(native, quote["mode"])}
 
     async def _ordinary(self, snapshot, query, request_id, retrieve_evidence, complete, totals, arrived):
         from .cooperative_request import CompiledRequest

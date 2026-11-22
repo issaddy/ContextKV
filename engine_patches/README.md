@@ -31,6 +31,7 @@
 - `auto` 的 Native checkpoint 保留稳定原文，私有问题/回答尾部在请求结束时归还。需求对应的前缀留在 GPU，其他已有 Host 副本的原文通过 HiCache 原生 demote 归还 GPU 页；重访时可回载。`exact` 保持普通 Native 缓存行为。InfoFlow 的打分页在重算完成后归还，独立块与私有覆盖继续服务解码。
 - 后续独立块复用按相对 Native 的边际 prefill 收益估值：每 token 的正收益为 `max(0, native_prefill_ms − recompute_ratio × replay_ms)`。Native 精确前缀按节省的 prefill 计价。同一未来消费者只选择收益较高的一种表示，共享页容量按实际 GPU 或 Host 页计一次，保留优先级随实测成本更新。GPU/Host 容量、搬运和淘汰仍由原生缓存管理。
 - agent 和引擎共用 `kv_cost.py`。自动执行先检查 Native 前缀以外是否有完整驻留的独立块，再按当前请求的成本决定是否复用。未来来源需求影响分层保留。两条路径共用的输出长度估计取自正常结束的生成。
+- HiCache 完成有计时的回载后，引擎用累计 CUDA 搬运毫秒数除以同批累计搬运的 KV token 数，更新 `exact_transfer_token_ms`。Native 选材报价与停止决策使用同一单价。一次冷启动评测从清空累计值开始。
 
 `meta_info.contextkv_compute` 返回真实输入/输出 token、prefill、GPU 命中、Host 回载、完整服务耗时及必要费用均值。内部工作段长度与语义输入长度分别计量；不记录正文或逐 token 轨迹。
 

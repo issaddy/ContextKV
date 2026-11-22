@@ -21,6 +21,8 @@ class ComputeRuntime:
         self.allocator = scheduler.token_to_kv_pool_allocator
         self.pool = self.allocator.get_kvcache()
         self.costs = {}
+        self.native_load_tokens = self.native_load_ms = 0
+        self.cache.contextkv_report_load = self.observe_native_load
         self.decode_graphs = {}
         self.demands = {}
         self.source_nodes = {}
@@ -94,6 +96,7 @@ class ComputeRuntime:
             flushed = self.scheduler.flush_cache()
             if flushed:
                 self.costs.clear()
+                self.native_load_tokens = self.native_load_ms = 0
                 self.demands.clear()
                 self.source_nodes.clear()
                 self.source_prefixes.clear()
@@ -440,6 +443,11 @@ class ComputeRuntime:
                     pending.append(node.parent)
         if tracker[0]:
             self.cache.update_eviction_metrics(tracker[0], time.perf_counter()-started)
+
+    def observe_native_load(self, elapsed_ms, tokens):
+        self.native_load_ms += elapsed_ms
+        self.native_load_tokens += tokens
+        self.costs["exact_transfer_token_ms"] = self.native_load_ms / self.native_load_tokens
 
     def finish(self, req):
         state = req.contextkv_compute_state
