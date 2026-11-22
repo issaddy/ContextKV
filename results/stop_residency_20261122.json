@@ -141,20 +141,51 @@
   },
   "paired_quality": {
     "dev_questions": 24,
-    "eligible_nonterminal_pairs": 96,
-    "equal_compiled_input_and_mode": 90,
+    "eligible_nonterminal_pairs": 95,
+    "equal_compiled_input_and_mode": 91,
     "intervention": "Hold 21 semantic features fixed and exchange the seven measured system features between the GPU/Host trajectories.",
     "coupled": {
-      "action_flips": 13,
-      "flips_reproduced_by_quality_alone": 13,
-      "flips_reproduced_by_cost_alone": 1,
-      "max_abs_quality_change": 0.1782679111,
-      "max_abs_seconds_change": 1.1844263
+      "action_flips": 12,
+      "max_abs_quality_change": 0.26215848326683044,
+      "max_abs_seconds_change": 1.332728624343872,
+      "flips_reproduced_by_quality_alone": 12,
+      "flips_reproduced_by_cost_alone": 0
     },
     "semantic": {
       "action_flips": 0,
       "max_abs_quality_change": 0,
-      "max_abs_seconds_change": 1.1844263
+      "max_abs_seconds_change": 1.3327291011810303
     }
+  },
+  "training_trajectories": {
+    "asset": "training/assets/multidoc2dial-stop-dialogues.jsonl.gz",
+    "evidence_batch": 12,
+    "trace_lambda": 0.8,
+    "seconds_price": 0.001,
+    "tail_price": 0.001,
+    "states_per_tier": 359,
+    "train": {
+      "questions": 48,
+      "first_batches_missing_sources_before": 40,
+      "missing_source_occurrences_before": 42,
+      "first_batches_matching_serving_after": 48,
+      "unchanged_final_plan_states": 308,
+      "nonzero_quality_differences_before": 216,
+      "nonzero_quality_differences_after": 0,
+      "max_abs_quality_difference_before": 0.16745731234550476,
+      "states_with_distinct_action_times_after": 308
+    },
+    "dev": {
+      "questions": 24,
+      "first_batches_missing_sources_before": 17,
+      "missing_source_occurrences_before": 21,
+      "first_batches_matching_serving_after": 24,
+      "unchanged_final_plan_states": 158,
+      "nonzero_quality_differences_before": 113,
+      "nonzero_quality_differences_after": 0,
+      "max_abs_quality_difference_before": 0.18253394961357117,
+      "states_with_distinct_action_times_after": 158
+    },
+    "quality_difference_tolerance": 1e-06
   }
 }

@@ -151,10 +151,9 @@ class SharedEvidenceProvider:
     async def retrieve(self, snapshot, query, request_id, *, facts=()):
         return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, facts=facts)
 
-    async def retrieve_candidates(self, snapshot, query, request_id, *, initial_only=False):
-        """Return serving candidates, optionally restricted to the first encoded batch."""
-        return await run_retrieval_worker(self._retrieve, snapshot, query, request_id,
-                                          candidate_view="initial" if initial_only else "all")
+    async def retrieve_candidates(self, snapshot, query, request_id):
+        """Return the serving encoder's first batch and its pending candidates."""
+        return await run_retrieval_worker(self._retrieve, snapshot, query, request_id, candidates_only=True)
 
     async def retrieve_supplied(self, snapshot, query, request_id, blocks, *, source_metadata=None,
                                 coverage_scope="selected_sources", facts=(), available_kv_tokens=None):
@@ -175,7 +174,7 @@ class SharedEvidenceProvider:
         return tuple(row for row in catalogue if counts[row["family"]] > 1)
 
     def _retrieve(self, snapshot, question, request_id, *, supplied_blocks=None, source_metadata=None,
-                  coverage_scope="selected_sources", facts=(), candidate_view=None, available_kv_tokens=None):
+                  coverage_scope="selected_sources", facts=(), candidates_only=False, available_kv_tokens=None):
         import torch
         started = time.perf_counter()
         document_tokens = 0
@@ -342,8 +341,8 @@ class SharedEvidenceProvider:
                     pending_dependencies.append(identity)
         initial = tuple(unit for unit in units if unit.unit_id in initial_ids)
         pending = tuple(unit for unit in units if unit.unit_id not in initial_ids)
-        if candidate_view:
-            return query, initial if candidate_view == "initial" else (*initial, *pending)
+        if candidates_only:
+            return query, initial, pending
         evidence = self.evidence_encoder.encode(query, initial)
         usage["input_tokens"] += evidence.usage["input_tokens"]+document_tokens
         selected = ()

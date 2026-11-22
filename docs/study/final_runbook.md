@@ -28,7 +28,7 @@
 
 固定 Qwen3-32B 作为标签和实际答案生成器。查询训练使用会话对齐与任务关系；证据训练先完成字段/来源头，再加入实际答案集合效用；最后采集多步停止轨迹。
 
-当前默认资产：`models/shared-query`（任务头 286/63、总体覆盖头 382/95 个训练/开发状态）、`models/shared-evidence-sections`（沿用字段头，章节集合 24/6 状态）、`models/shared-stop-sections.pt`（24/6 会话、90 个终端答案）。集合头使用 180 个实际答案标签，来源为 MultiDoc2Dial 官方训练会话；评测会话独立。集合头为 7 参数信息增益校准，停止头使用 16 维共享摘要、12 维状态与 32 维隐藏层。候选采用作者章节，扩展批大小直接读取 `retrieval.evidence_batch`，当前为 12。停止特征包含下一批未编码来源的 token 量及当前证据的实际缓存报价。固定生成权重，查询和字段权重本轮未更新。
+当前默认资产：`models/shared-query`（任务头 286/63、总体覆盖头 382/95 个训练/开发状态）、`models/shared-evidence-sections`（沿用字段头，章节集合 24/6 状态）、`models/shared-stop-sections.pt`（24/6 会话、90 个终端答案）。集合头使用 180 个实际答案标签，来源为 MultiDoc2Dial 官方训练会话；评测会话独立。集合头为 7 参数信息增益校准，停止头使用 16 维共享摘要、12 维状态与 32 维隐藏层。候选采用作者章节，扩展批大小直接读取 `retrieval.evidence_batch`，当前为 12。停止特征包含下一批未编码来源的 token 量及当前证据的实际缓存报价。
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -119,13 +119,13 @@ python3 -m training.stop_value data/training/shared/stop.jsonl \
   --seconds-price 0.001 --tail-price 0.001
 ```
 
-训练产生的查询头、集合头、停止头和成本系数写入本次实验目录。Native 和 InfoFlow 分批执行；随后每状态一次单 token 重访测量可复用阶段费用，首次编译与冷建的已付时间保留。重算比例、质量差和实测成本系数一起由控制器读取，训练采集使用相同政策。服务重启后沿用这些系数，后续请求的实测费用继续更新它们。
+训练产生的查询头、集合头、停止头和成本系数写入本次实验目录。校准时分别运行 Native 和 InfoFlow，再用单 token 重访测量复用费用。首次编译与冷建的耗时计入首访。重算比例、质量差和实测成本系数一起由控制器读取，训练采集使用相同政策。服务重启后沿用这些系数，后续请求的实测费用继续更新它们。
 
 范围标签按整题与各子需求分别生成。补采自然样本时，用 `--exclude-labelled-sessions` 指定已有标注文件，保留官方训练对话的原划分，并轮转采样不同深度的轮次。WikiSQL 范围样本保留原问题、表 ID、SQL 和匹配行数；同一百科页面只进入一个划分。容器中范围与集合监督位于 `data/training/shared/aux_supervision/{scope,sets}.jsonl`。单独重训现有范围头时，使用 `training.shared_training coverage --init-asset models/shared-query --data data/training/shared/aux_supervision/scope.jsonl`，其余参数沿用上面的命令，输出到新的训练目录。
 
 跨文档配对样本位于容器 `data/training/shared/aux_supervision/manifest_dialogues.jsonl`。44 个构造会话按软件仓库划分为 24 个训练会话和 20 个开发会话，共 132 轮；第二轮保存 306 次证据集合干预的回答标签。
 
-实际多轮停止轨迹来自 MultiDoc2Dial 官方训练会话。按声明题单运行正常 P3 问答，用上一轮提交给引擎的提示预热，GPU 组保留需求，Host 组显式把该采样分支的已备份页降至 Host。每次扩展 12 段，记录当前实际回答的 F1、引擎回执及继续一步的费用。同一条轨迹中，输入 token 和执行路径均相同的状态共用平均质量标签，各自保留实测费用。
+实际多轮停止轨迹来自 MultiDoc2Dial 官方训练会话。按声明题单运行正常 P3 问答，用上一轮提交给引擎的提示预热，GPU 组保留需求，Host 组显式把该采样分支的已备份页降至 Host。每次扩展 12 段，记录当前实际回答的 F1、引擎回执及继续一步的费用。同一条轨迹中，输入 token 和执行路径均相同的回答共用平均质量标签。若继续读取的所有剩余分支最终都提交这一回答计划，继续动作也使用其实测质量，各分支分别计入扩展和回答费用。开发回放的剩余 P95 从首次停止决策起算，完整 P95 从请求进入队列起算。
 
 ```bash
 asset=training/assets/multidoc2dial-stop-dialogues.jsonl.gz
@@ -137,7 +137,8 @@ for tier in gpu host; do
     --data "$TRAIN_RUN/stop-inputs.jsonl" --seed-tier "$tier" --batch-size 12 \
     --gpu-devices 4 5 --train-states 48 --dev-states 24 --concurrency 4 --output "$TRAIN_RUN/stop-$tier.jsonl"
 done
-python3 -m training.stop_value "$asset" --output "$TRAIN_RUN/stop.pt" \
+cat "$TRAIN_RUN/stop-gpu.jsonl" "$TRAIN_RUN/stop-host.jsonl" > "$TRAIN_RUN/stop-dialogues.jsonl"
+python3 -m training.stop_value "$TRAIN_RUN/stop-dialogues.jsonl" --output "$TRAIN_RUN/stop.pt" \
   --seconds-price 0.001 --tail-price 0.001 --seed 42
 ```
 

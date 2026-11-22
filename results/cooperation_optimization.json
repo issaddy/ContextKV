@@ -9,7 +9,7 @@
     "kv_pool_tokens": 32768,
     "kv_page_tokens": 64,
     "kv_bytes_per_token": 262144,
-    "resource_note": "GPU KV pool remains preallocated at 8 GiB; live occupied pages and non-evictable active pages are reported separately. No concurrency-capacity claim is made from idle-cache demotion.",
+    "resource_note": "The 8 GiB GPU KV pool is preallocated. Measurements distinguish occupied pages from active, non-evictable pages.",
     "measurement_devices": {
       "mtrag": [
         4,
@@ -182,94 +182,6 @@
     }
   },
   "reference_results": "results/cooperation.json",
-  "before": [
-    {
-      "dataset": "mtrag",
-      "method": "contextkv",
-      "metric": "mtrageval_harmonic",
-      "completed": 20,
-      "requested": 20,
-      "quality": 0.5423548547947857,
-      "metrics": {
-        "RB_alg": {
-          "mean": 0.329639027595332,
-          "scored": 20
-        },
-        "RB_alg_idk": {
-          "mean": 0.329639027595332,
-          "scored": 20
-        },
-        "RB_llm": {
-          "mean": 0.8550000000000001,
-          "scored": 20
-        },
-        "RB_llm_idk": {
-          "mean": 0.8550000000000001,
-          "scored": 20
-        },
-        "RL_F": {
-          "mean": 0.752886286975,
-          "scored": 20
-        },
-        "RL_F_idk": {
-          "mean": 0.752886286975,
-          "scored": 20
-        }
-      },
-      "p95_seconds": 23.125374338217078,
-      "total_input_tokens": 66153,
-      "total_output_tokens": 10784,
-      "gpu_gib_seconds": 7262.162849968045,
-      "host_gib_seconds": 2190.222429674121,
-      "gpu_peak_gib": 81.65234375,
-      "host_peak_gib": 24.534879684448242,
-      "actual_device_hit_tokens": 2432,
-      "actual_host_loaded_tokens": 384,
-      "actual_prefill_tokens": 63337,
-      "new_compute_kv_pages": 1170,
-      "gpu_kv_peak_tokens": 32768,
-      "gpu_kv_peak_gib": 8,
-      "gpu_kv_active_peak_tokens": 17536,
-      "implementation": "1958bda",
-      "engine_implementation": "0c36706",
-      "records_path": "runs/cooperation/accepted/contextkv/mtrag/results.jsonl"
-    },
-    {
-      "dataset": "multidoc2dial",
-      "method": "contextkv",
-      "metric": "f1",
-      "completed": 20,
-      "requested": 20,
-      "quality": 0.21097262566768885,
-      "metrics": {
-        "exact_match": {
-          "mean": 0,
-          "scored": 20
-        },
-        "f1": {
-          "mean": 0.21097262566768885,
-          "scored": 20
-        }
-      },
-      "p95_seconds": 6.136850503832102,
-      "total_input_tokens": 12515,
-      "total_output_tokens": 2355,
-      "gpu_gib_seconds": 1767.0049247924617,
-      "host_gib_seconds": 525.2142909371329,
-      "gpu_peak_gib": 81.46875,
-      "host_peak_gib": 24.243165969848633,
-      "actual_device_hit_tokens": 1152,
-      "actual_host_loaded_tokens": 0,
-      "actual_prefill_tokens": 11363,
-      "new_compute_kv_pages": 225,
-      "gpu_kv_peak_tokens": 13184,
-      "gpu_kv_peak_gib": 3.21875,
-      "gpu_kv_active_peak_tokens": 3840,
-      "implementation": "1958bda",
-      "engine_implementation": "0c36706",
-      "records_path": "runs/cooperation/accepted/contextkv/multidoc2dial/results.jsonl"
-    }
-  ],
   "baseline": [
     {
       "dataset": "multidoc2dial",

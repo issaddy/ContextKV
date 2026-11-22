@@ -30,18 +30,25 @@ def lambda_targets(model, trajectory, prices, trace_lambda):
     predicted, tails = model(features)
     count = len(rows)
     observed = torch.stack([observed_values(row["stop"], model.mean.device) for row in rows])
+    previous, previous_tails = predicted.clone(), tails.clone()
     if "plan" in rows[0]:
         groups = defaultdict(list)
         for index, row in enumerate(rows):
             groups[row["plan"]].append(index)
         for indices in groups.values():
             observed[indices, 0] = observed[indices, 0].mean()
+        # STOP quality is known throughout the last run of identical answer plans.
+        # CONTINUE reaches that run from the immediately preceding decision too.
+        first = count - 1
+        while first > 0 and rows[first-1]["plan"] == rows[-1]["plan"]:
+            first -= 1
+        previous[first:, 0, 0] = observed[-1, 0]
+        previous[max(0, first-1):-1, 1, 0] = observed[-1, 0]
     mask = torch.tensor([[True, index < count-1] for index in range(count)], device=model.mean.device)
     target = torch.zeros_like(predicted)
     target[:, 0] = observed
     realised_seconds = torch.zeros_like(tails)
     realised_seconds[:, 0] = observed[:, 1]
-    previous, previous_tails = predicted.clone(), tails.clone()
     previous[-1, 0], previous_tails[-1, 0] = observed[-1], observed[-1, 1]
     steps = [observed_values({"quality": 0.0, **row["transition"]}, model.mean.device)
              for row in rows[:-1]]
@@ -101,7 +108,7 @@ def fit(trajectories, *, epochs=40, learning_rate=1e-3, trace_lambda=0.8,
 @torch.inference_mode()
 def evaluate_policy(model, trajectories, prices):
     """Replay held-out measured branches, starting at the first decision."""
-    totals = {policy: {"quality": 0., "seconds": 0., "extensions": 0}
+    totals = {policy: {"quality": 0., "seconds": [], "extensions": 0}
               for policy in ("finish_first", "learned", "exhaust")}
     for trajectory in trajectories:
         rows = trajectory["states"]
@@ -112,11 +119,13 @@ def evaluate_policy(model, trajectories, prices):
         for policy, index in (("finish_first", 0), ("learned", stop), ("exhaust", len(rows)-1)):
             terminal = rows[index]["stop"]
             totals[policy]["quality"] += terminal["quality"]
-            totals[policy]["seconds"] += terminal["seconds"] + sum(row["transition"]["seconds"] for row in rows[:index])
+            elapsed = terminal["seconds"] + sum(row["transition"]["seconds"] for row in rows[:index])
+            totals[policy]["seconds"].append(elapsed)
             totals[policy]["extensions"] += index
     return {"trajectories": len(trajectories), "policies": {
         name: {"mean_quality": value["quality"]/len(trajectories),
-               "mean_remaining_seconds": value["seconds"]/len(trajectories),
+               "mean_remaining_seconds": sum(value["seconds"])/len(trajectories),
+               "p95_remaining_seconds": torch.tensor(value["seconds"], dtype=torch.float64).quantile(.95).item(),
                "total_extensions": value["extensions"]} for name, value in totals.items()}}
 
 

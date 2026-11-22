@@ -71,6 +71,8 @@ async def score_answers(rows, endpoint, *, model, concurrency):
 
 async def collect(args, *, answer_plans=None):
     config = yaml.safe_load(Path(args.config).read_text())
+    if args.stage == "stop" and args.batch_size is not None:
+        config["retrieval"]["evidence_batch"] = args.batch_size
     run = apply_study_config(load_config(config["generation"]["run_config"]), config)
     template = create_model_template(run.model)
     engine = SGLangEngineClient(run.engine.base_url, timeout=run.engine.timeout_seconds, sampling=run.sampling)
@@ -89,6 +91,7 @@ async def collect(args, *, answer_plans=None):
     from adapters.shared_encoding import SharedQueryEncoder, SharedEvidenceEncoder
     from adapters.shared_retrieval import SharedEvidenceState, SharedEvidenceProvider
     from adapters.document_compute import DocumentIndex
+    batch_size = config["retrieval"].get("evidence_batch", SharedEvidenceState.evidence_batch)
     provider = (SharedEvidenceProvider(config, template)
                 if any(row["dataset"] == config["retrieval"]["corpus_id"] for row in source) else None)
     if provider:
@@ -163,11 +166,12 @@ async def collect(args, *, answer_plans=None):
                 recorded = {unit["unit_id"]: unit for unit in row["units"]}
                 seed_units = tuple(decode(EvidenceUnit, recorded[key]) for key in row["selected_ids"])
             if row["dataset"] == config["retrieval"]["corpus_id"]:
-                query, units = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"],
-                                                                  initial_only=args.stage == "sets")
+                query, initial, pending = await provider.retrieve_candidates(snapshot, row["question"], row["task_id"])
+                units = initial if args.stage == "sets" else (*initial, *pending)
                 row = {**row, "units": to_jsonable(units), "candidate_origin": "online_scope_hybrid"}
             else:
                 units = tuple(decode(EvidenceUnit, unit) for unit in row["units"])
+                initial = units[:batch_size]
                 query = await asyncio.to_thread(query_encoder.encode, conversation(row), row["question"],
                     row["task_id"], row["turn"], catalogue=row.get("catalogue", ()))
             if query.task.coverage_scope == "all_supplied_documents" or not units:
@@ -218,7 +222,6 @@ async def collect(args, *, answer_plans=None):
             paid_seconds = time.monotonic()-started
             namespace = f"stop:{args.seed_tier}" if args.seed_tier else "stop"
             state, encoded, states = None, None, []
-            batch_size = args.batch_size or config["retrieval"]["evidence_batch"]
             if not args.seed_tier:
                 seed_units = units[:batch_size] if index % 2 == 1 else ()
             request = None
@@ -237,7 +240,7 @@ async def collect(args, *, answer_plans=None):
                         break
                     seed.append(unit)
                     request = candidate
-            pending, observed = units, ()
+            pending, observed, batch = units, (), initial
             by_id = {unit.unit_id: unit for unit in units}
             plans = {} if answer_plans is None else answer_plans.setdefault(row["task_id"], {})
             while pending:
@@ -251,13 +254,14 @@ async def collect(args, *, answer_plans=None):
                     windows[seed_id] = seed_started, time.monotonic()
                 first = time.monotonic()
                 seen = {unit.unit_id for unit in observed}
-                fresh = tuple(unit for unit in SharedEvidenceProvider._closure(pending[:batch_size], by_id)
+                fresh = tuple(unit for unit in SharedEvidenceProvider._closure(batch, by_id)
                               if unit.unit_id not in seen)
                 new = await asyncio.to_thread(evidence_encoder.encode, query if state is None else state.query, fresh)
                 encoded = new if encoded is None else encoded.merge(new)
                 observed = (*observed, *fresh)
                 seen.update(unit.unit_id for unit in fresh)
                 pending = tuple(unit for unit in pending if unit.unit_id not in seen)
+                batch = pending[:batch_size]
                 if state is None:
                     state = state_for(query, encoded, observed, units, branch_id, totals, row.get("catalogue", ()))
                 else:

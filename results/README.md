@@ -7,11 +7,11 @@
 | [已提交请求的前缀回收优先级](kv_admission_20261122.json) | 报价、调度准入与回执的逐阶段对照，以及独立题单上的完整耗时 |
 | [Native 与 InfoFlow 混合解码](mixed_decode_20261122.json) | 等长输出单步时间、自然答案质量、真实路由及计入预热的 P95 |
 | [从冷池开始的非前缀重访](kv_cold_start_20261123.json) | 首访及重访的实际路线、独立块准备费用、真实会话中超出 Native 前缀的来源需求 |
-| [停止决策的驻留配对](stop_residency_20261122.json) | 固定计划的质量漂移、Native 回载单价、120 轮完整会话和首批即答消融 |
+| [停止决策的驻留配对](stop_residency_20261122.json) | 训练首批与线上证据的对齐、固定计划的动作质量与费用、Native 回载和 120 轮停止消融 |
 | [指定指标行的容量感知选材](range_projection_20261122.json) | 原文投影的配对结果、独立金融题单和 KV 开销 |
 | [长文标题提及与容量反馈](source_mentions_20261122.json) | 4 GiB 和 8 GiB 下的长文选材、覆盖和开销 |
 | [协同机制](crosslayer_20261118.json) | 来源驻留对选材的影响、未来需求对 Host 回载的影响 |
 | [归档的参考历史题单](current.json) | 四个 benchmark 的质量、完整 P95 和资源费用 |
-| [早期连续会话原配置](cooperation.json) · [协同配置](cooperation_optimization.json) | 同题 P3 对照和固定证据的缓存配对 |
+| [早期连续会话原配置](cooperation.json) · [协同配置](cooperation_optimization.json) | 同题 P3 对照和固定证据的缓存配对。协同配置的对照值见原配置的 `current` |
 
 [实验结果与数据划分](../docs/study/results.md) · [运行手册](../docs/study/final_runbook.md)
