@@ -85,10 +85,10 @@ def extend_table_structure(text, parsed_tables):
         if body.endswith(":") and not _QUANTITY.search(body):
             parents.append((bullet.start("body"), body_span))
             continue
+        if not parents:
+            continue
         match = _FLAT_ROW.fullmatch(body)
         if not match or _QUANTITY.search(match.group("object")):
-            continue
-        if not parents:
             continue
         # Named values require the colon present in the original list item.
         object_text = match.group("object")
@@ -108,16 +108,21 @@ def extend_table_structure(text, parsed_tables):
         tables.append(replace(table, relations=tuple(replace(row, parent_path=paths[index]) for row in table.relations)))
     tables.extend(nested)
     covered = [(table.span.start, table.span.end) for table in tables]
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        match = _FLAT_ROW.fullmatch(line.text)
-        if (i in excluded or not match or _QUANTITY.search(match.group("object"))
-                or _BULLET.match(raw_lines[i].rstrip("\r\n"))
-                or any(start <= line.start < end for start, end in covered)):
-            i += 1
+    for header, line in enumerate(lines):
+        if header in excluded or not _header(line.text):
             continue
-        first, rows = i, []
+        caption = header - 1
+        while caption >= 0 and not lines[caption].text:
+            caption -= 1
+        if (caption < 0 or caption in excluded or not _title(lines[caption].text)
+                or (caption > 0 and lines[caption - 1].text and not _HEADING.match(lines[caption].text))):
+            continue
+        i = header + 1
+        while i < len(lines) and not lines[i].text:
+            i += 1
+        if i == len(lines) or any(start <= lines[i].start < end for start, end in covered):
+            continue
+        rows = []
         while i < len(lines) and lines[i].text and i not in excluded:
             match = _FLAT_ROW.fullmatch(lines[i].text)
             if (not match or _QUANTITY.search(match.group("object"))
@@ -125,16 +130,7 @@ def extend_table_structure(text, parsed_tables):
                 break
             rows.append((i, match))
             i += 1
-        header = first - 1
-        while header >= 0 and not lines[header].text:
-            header -= 1
-        caption = header - 1
-        while caption >= 0 and not lines[caption].text:
-            caption -= 1
-        if (len(rows) < 2 or (i < len(lines) and lines[i].text and i not in excluded)
-                or header < 0 or header in excluded or not _header(lines[header].text)
-                or caption < 0 or caption in excluded or not _title(lines[caption].text)
-                or (caption > 0 and lines[caption - 1].text and not _HEADING.match(lines[caption].text))):
+        if len(rows) < 2 or (i < len(lines) and lines[i].text and i not in excluded):
             continue
         relations = []
         for row_index, match in rows:
