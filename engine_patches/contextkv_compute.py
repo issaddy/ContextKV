@@ -182,14 +182,13 @@ class ComputeRuntime:
             source_id = scope, spec['source_id']
             match = self._match(source_id, block_ids)
             full = match.device_prefix_len + match.host_hit_length == len(block_ids)
-            if full or spec.get("revisited"):
-                reuse_ends.append(end)
             warm += end - start if full else 0
             cold += 0 if full else end - start
             if full and match.host_hit_length:
                 transfer, _ = self.cache.tree_core.build_load_back_spec(match.best_match_node, req=req)
                 host_pages.update(transfer.host_indices.tolist())
             if full:
+                reuse_ends.append(end)
                 node = self.cache.tree_core.node_by_id(match.last_device_node)
                 while node.parent is not None and node.id not in gpu_nodes:
                     gpu_nodes.add(node.id)

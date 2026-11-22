@@ -139,8 +139,7 @@ class EvidenceCosts:
     """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
 
     def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
-                 output_tokens, policy, mode="auto", source_headers=(), previous_sources=()):
-        self.previous_sources = set(previous_sources)
+                 output_tokens, policy, mode="auto", source_headers=()):
         self.sources, self.lengths = {}, {}
         self.dependencies = {unit.unit_id: unit.dependencies for unit in units}
         self.changed_members = False
@@ -240,8 +239,8 @@ class EvidenceCosts:
         for address in addresses:
             resident = self.snapshot["sources"].get(address, {"gpu_tokens": 0, "host_tokens": 0})
             length = self.lengths[address]
-            ready = resident["gpu_tokens"] + resident["host_tokens"] >= length
-            if address not in prefix_sources and (ready or address in self.previous_sources):
+            ready = 0 < length <= resident["gpu_tokens"] + resident["host_tokens"]
+            if ready and address not in prefix_sources:
                 nonprefix_opportunity = True
             if ready:
                 gpu += min(length, resident["gpu_tokens"])

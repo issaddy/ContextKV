@@ -44,7 +44,6 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                 lock = sessions.setdefault(session, asyncio.Lock())
                 async with lock, slots:
                     original = item["request"]
-                    revisited = {block["source_id"] for block in original.blocks if block.get("revisited")}
                     evidence = priced_evidence[index] if layout == "same_order" else item["ranked_evidence"]
                     if mode == "auto":
                         from controller.schema import SourceSpan
@@ -57,7 +56,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                         empty = compile_request(template, original.messages[-1].content, item["history"], (),
                                                 system_prompt=original.messages[0].content)
                         costs = EvidenceCosts(units, evidence, template.tokenizer, snapshot,
-                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy, previous_sources=revisited)
+                            prompt_tokens=len(empty.input_ids), output_tokens=options["max_new_tokens"], policy=policy)
                         by_id = {source_address(block): block for block in evidence}
                         evidence = tuple(by_id[identity] for identity in costs.order(tuple(by_id)))
                         if layout == "priced":
@@ -67,8 +66,7 @@ async def replay_requests(run, trace, output, *, concurrency, references, metric
                     request = compile_request(template, original.messages[-1].content, item["history"], evidence,
                         system_prompt=original.messages[0].content)
                     shift = len(request.input_ids)-len(original.input_ids)
-                    request = replace(request, query_span=tuple(position+shift for position in original.query_span),
-                        blocks=tuple({**block, "revisited": block["source_id"] in revisited} for block in request.blocks))
+                    request = replace(request, query_span=tuple(position+shift for position in original.query_span))
                     if layout == "priced":
                         from controller.cooperative_request import with_source_demand
                         request = with_source_demand(request, original.demand)

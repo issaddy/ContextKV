@@ -302,9 +302,7 @@ class CooperativeController:
             address = block["source_id"]
             visits = state.retained_sources.get(address, 0)
             demand.append({"source_id": address, "uses": 1.0 if address in pending else (visits+1)/(visits+2)})
-        blocks = tuple({**block, "revisited": block["source_id"] in state.retained_sources}
-                       for block in request.blocks)
-        return with_source_demand(replace(request, blocks=blocks), demand)
+        return with_source_demand(request, demand)
 
     def _reading_allowance(self, state, snapshot, request, output_tokens):
         """Every read funds its own output and the reserved terminal context first."""
@@ -524,8 +522,7 @@ class CooperativeController:
         def select():
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
-                policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers,
-                previous_sources=state.retained_sources)
+                policy=self.kv_policy, mode=self.settings.get("kv_mode", "auto"), source_headers=state.source_headers)
             if closed:
                 ids = ()
             elif state.query.task.coverage_scope == "all_supplied_documents":
