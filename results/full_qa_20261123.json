@@ -22,6 +22,34 @@
     }
   },
   "benchmarks": {
+    "multidoc2dial": {
+      "contextkv": {
+        "protocol": "P3",
+        "declared": 4094,
+        "completed": 4094,
+        "scored": 4094,
+        "quality": 24.915,
+        "complete_p95_ms": 413709.293,
+        "wait_p95_ms": 411618.773,
+        "wait_at_complete_p95_ms": 411459.567,
+        "auxiliary_p95_ms": 739.789,
+        "engine_p95_ms": 4033.781,
+        "prefill_tokens": 2311855,
+        "output_tokens": 363267,
+        "gpu_hit_tokens": 400640,
+        "host_loaded_tokens": 102848,
+        "total_input_tokens": 2815343,
+        "gpu_gib_seconds": 192042.31,
+        "host_gib_seconds": 65820.75,
+        "active_kv_peak_tokens": 8128,
+        "online_routes": {
+          "exact": 4094,
+          "nonprefix": 0
+        },
+        "resident_frontier_selected_turns": 75,
+        "reported_nonprefix_opportunities": 0
+      }
+    },
     "mtrag": {
       "original": {
         "protocol": "P3",
