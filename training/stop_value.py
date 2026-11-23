@@ -35,7 +35,7 @@ def lambda_targets(model, trajectory, prices, trace_lambda):
         for index, row in enumerate(rows):
             groups[row["plan"]].append(index)
         for indices in groups.values():
-            observed[indices] = observed[indices].mean(0)
+            observed[indices, 0] = observed[indices, 0].mean()
     mask = torch.tensor([[True, index < count - 1] for index in range(count)], device=model.mean.device)
     chosen = prices.utility(predicted, tails).masked_fill(~mask, -torch.inf).argmax(-1)
     previous = observed[:, None, :].repeat(1, 2, 1)

@@ -1,0 +1,726 @@
+{
+  "configuration": {
+    "generator": "Qwen3-32B BF16",
+    "concurrency": 4,
+    "gpu_kv_gib": 8,
+    "online_gpus": [4, 5],
+    "judge_gpus": [6, 7],
+    "runs_per_arm": 1,
+    "seed_for_sampling": 20261124,
+    "arms": {
+      "parent": "5b1acb3",
+      "commit": "3c40ffd",
+      "selected": "Calibrated-feature ablation: restore deployed features and remove the extra prefix reward; also correct source family and GQA dispatch.",
+      "core": "Retained configuration in this revision: calibrated semantic frontier and stopping, priced resident-prefix candidates, version index, measured GQA dispatch and control-plane changes."
+    },
+    "sampling": "Exclude conversations in the published fixed20. P3 uses first 2 or 3 recorded turns in 8 sessions. P1 samples proportionally by VersionQA category or Loong domain.",
+    "quality_scale": "0-100 for QA panels; development set answer labels use 0-1",
+    "protocols": {"multidoc2dial": "P3", "mtrag": "P3", "versionqa": "P1", "loong": "P1"},
+    "publication_cohort": "Task IDs in paired_qa_20261122.json, fixed20. Historical release uses its first recorded run; candidate and retained arms each ran once.",
+    "paired_differences": "Recompute the benchmark quality difference after omitting each conversation in turn. The range describes sensitivity to individual conversations.",
+    "kernel_protocol": "Qwen3-32B GQA dimensions, H200 BF16, ten alternating calls per kernel at each shape. old_ms and fused_ms are medians.",
+    "demand_protocol": "6 GiB, same 20 Loong tasks and source spans as the independent QA panel. Seed two orders, exchange declared future demand, issue identical competing allocations, then quote and revisit with one output token. matched counts choices of the demanded order; changed_layout counts tasks whose choice switched."
+  },
+  "datasets": {
+    "multidoc2dial": {
+      "task_ids": [
+        "1b840040aad6aa0a3b7b879731b7cde3_1",
+        "1b840040aad6aa0a3b7b879731b7cde3_3",
+        "1b840040aad6aa0a3b7b879731b7cde3_5",
+        "f414e20792dd0319ae89b032d49ce2e6_1",
+        "f414e20792dd0319ae89b032d49ce2e6_3",
+        "f414e20792dd0319ae89b032d49ce2e6_5",
+        "e7e99b96746357386b4d89c331c026e0_1",
+        "e7e99b96746357386b4d89c331c026e0_3",
+        "e7e99b96746357386b4d89c331c026e0_5",
+        "aaaf77d5b484ed143b3b32fbfeeb0420_1",
+        "aaaf77d5b484ed143b3b32fbfeeb0420_3",
+        "aaaf77d5b484ed143b3b32fbfeeb0420_5",
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_1",
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_3",
+        "1dc5a7a65b88e24af429d738f0e13a5c_1",
+        "1dc5a7a65b88e24af429d738f0e13a5c_3",
+        "40af5857c0ee3a34cef864778b6014ce_1",
+        "40af5857c0ee3a34cef864778b6014ce_3",
+        "2453f88559d55706f8471352c83bab95_1",
+        "2453f88559d55706f8471352c83bab95_5"
+      ],
+      "arms": {
+        "parent": {
+          "quality": 23.36,
+          "complete_p95_s": 6.93,
+          "wait_p95_s": 3.883,
+          "aux_p95_s": 1.848,
+          "prefill": 8610,
+          "output": 1886,
+          "gpu_hit": 384,
+          "host_load": 0,
+          "sources": 24,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "commit": {
+          "quality": 18.409,
+          "complete_p95_s": 8.56,
+          "wait_p95_s": 5.312,
+          "aux_p95_s": 1.665,
+          "prefill": 16501,
+          "output": 2423,
+          "gpu_hit": 1856,
+          "host_load": 0,
+          "sources": 71,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "selected": {
+          "quality": 22.185,
+          "complete_p95_s": 6.844,
+          "wait_p95_s": 3.487,
+          "aux_p95_s": 1.499,
+          "prefill": 8610,
+          "output": 1994,
+          "gpu_hit": 704,
+          "host_load": 0,
+          "sources": 23,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "core": {
+          "quality": 23.381,
+          "complete_p95_s": 6.612,
+          "wait_p95_s": 3.559,
+          "aux_p95_s": 1.514,
+          "prefill": 8654,
+          "output": 1946,
+          "gpu_hit": 384,
+          "host_load": 0,
+          "sources": 24,
+          "routes": {"exact": 20},
+          "changes": 0
+        }
+      },
+      "paired": {
+        "commit_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-5.942, -3.288],
+          "prefill_direction": {"up": 18, "equal": 0, "down": 2},
+          "source_count_direction": {"up": 17, "equal": 2, "down": 1},
+          "quality_direction": {"up": 6, "equal": 3, "down": 11}
+        },
+        "selected_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-1.382, -0.537],
+          "prefill_direction": {"up": 6, "equal": 11, "down": 3},
+          "source_count_direction": {"up": 1, "equal": 18, "down": 1},
+          "quality_direction": {"up": 2, "equal": 13, "down": 5}
+        },
+        "selected_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [1.982, 4.947],
+          "prefill_direction": {"up": 3, "equal": 0, "down": 17},
+          "source_count_direction": {"up": 2, "equal": 1, "down": 17},
+          "quality_direction": {"up": 9, "equal": 3, "down": 8}
+        },
+        "core_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-0.031, 0.073],
+          "prefill_direction": {"up": 3, "equal": 17, "down": 0},
+          "source_count_direction": {"up": 0, "equal": 20, "down": 0},
+          "quality_direction": {"up": 4, "equal": 15, "down": 1}
+        },
+        "core_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [3.311, 6.015],
+          "prefill_direction": {"up": 2, "equal": 0, "down": 18},
+          "source_count_direction": {"up": 1, "equal": 2, "down": 17},
+          "quality_direction": {"up": 11, "equal": 2, "down": 7}
+        }
+      }
+    },
+    "mtrag": {
+      "task_ids": [
+        "f3a917e029970190be5ee508ba770d7f<::>1",
+        "f3a917e029970190be5ee508ba770d7f<::>2",
+        "f3a917e029970190be5ee508ba770d7f<::>3",
+        "5815bb4a99e2a0d8a986348da4c49083<::>1",
+        "5815bb4a99e2a0d8a986348da4c49083<::>2",
+        "5815bb4a99e2a0d8a986348da4c49083<::>3",
+        "c01c8cf11437e6bb3bc93efac26528c2<::>1",
+        "c01c8cf11437e6bb3bc93efac26528c2<::>2",
+        "c01c8cf11437e6bb3bc93efac26528c2<::>3",
+        "47b2471404382af6e973013ab1cf96b9<::>1",
+        "47b2471404382af6e973013ab1cf96b9<::>2",
+        "47b2471404382af6e973013ab1cf96b9<::>3",
+        "81afaf82a0d9a5fad6eaa196f8d9641c<::>1",
+        "81afaf82a0d9a5fad6eaa196f8d9641c<::>2",
+        "674aa142d92a6b4262de254df0c3f7b2<::>1",
+        "674aa142d92a6b4262de254df0c3f7b2<::>2",
+        "c6c3b02ca32795af64c903dd76700517<::>1",
+        "c6c3b02ca32795af64c903dd76700517<::>2",
+        "ddbbbe7ea13560c5768639207e1ca604<::>1",
+        "ddbbbe7ea13560c5768639207e1ca604<::>2"
+      ],
+      "arms": {
+        "parent": {
+          "quality": 61.848,
+          "complete_p95_s": 11.764,
+          "wait_p95_s": 8.737,
+          "aux_p95_s": 3.569,
+          "prefill": 12013,
+          "output": 2245,
+          "gpu_hit": 3584,
+          "host_load": 0,
+          "sources": 26,
+          "routes": {"exact": 20},
+          "changes": 1
+        },
+        "commit": {
+          "quality": 60.932,
+          "complete_p95_s": 17.041,
+          "wait_p95_s": 9.706,
+          "aux_p95_s": 3.431,
+          "prefill": 38313,
+          "output": 3451,
+          "gpu_hit": 4096,
+          "host_load": 0,
+          "sources": 92,
+          "routes": {"exact": 20},
+          "changes": 4
+        },
+        "selected": {
+          "quality": 57.39,
+          "complete_p95_s": 8.624,
+          "wait_p95_s": 5.309,
+          "aux_p95_s": 2.756,
+          "prefill": 11741,
+          "output": 2204,
+          "gpu_hit": 3264,
+          "host_load": 0,
+          "sources": 25,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "core": {
+          "quality": 60.698,
+          "complete_p95_s": 11.818,
+          "wait_p95_s": 8.21,
+          "aux_p95_s": 3.144,
+          "prefill": 11998,
+          "output": 2288,
+          "gpu_hit": 3584,
+          "host_load": 0,
+          "sources": 26,
+          "routes": {"exact": 20},
+          "changes": 1
+        }
+      },
+      "paired": {
+        "commit_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-2.214, 0.713],
+          "prefill_direction": {"up": 16, "equal": 2, "down": 2},
+          "source_count_direction": {"up": 17, "equal": 3, "down": 0}
+        },
+        "selected_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-5.598, -1.993],
+          "prefill_direction": {"up": 5, "equal": 9, "down": 6},
+          "source_count_direction": {"up": 2, "equal": 16, "down": 2}
+        },
+        "selected_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [-5.973, -1.473],
+          "prefill_direction": {"up": 1, "equal": 2, "down": 17},
+          "source_count_direction": {"up": 0, "equal": 3, "down": 17}
+        },
+        "core_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-1.487, 0.21],
+          "prefill_direction": {"up": 1, "equal": 17, "down": 2},
+          "source_count_direction": {"up": 0, "equal": 20, "down": 0}
+        },
+        "core_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [-1.919, 0.914],
+          "prefill_direction": {"up": 2, "equal": 2, "down": 16},
+          "source_count_direction": {"up": 0, "equal": 3, "down": 17}
+        }
+      }
+    },
+    "versionqa": {
+      "task_ids": [
+        "versionqa-095<::>1",
+        "versionqa-098<::>1",
+        "versionqa-081<::>1",
+        "versionqa-090<::>1",
+        "versionqa-006<::>1",
+        "versionqa-019<::>1",
+        "versionqa-013<::>1",
+        "versionqa-009<::>1",
+        "versionqa-036<::>1",
+        "versionqa-026<::>1",
+        "versionqa-035<::>1",
+        "versionqa-034<::>1",
+        "versionqa-033<::>1",
+        "versionqa-080<::>1",
+        "versionqa-072<::>1",
+        "versionqa-064<::>1",
+        "versionqa-062<::>1",
+        "versionqa-060<::>1",
+        "versionqa-059<::>1",
+        "versionqa-041<::>1"
+      ],
+      "arms": {
+        "parent": {
+          "quality": 70.0,
+          "complete_p95_s": 16.323,
+          "wait_p95_s": 13.375,
+          "aux_p95_s": 2.223,
+          "prefill": 16942,
+          "output": 1821,
+          "gpu_hit": 1344,
+          "host_load": 0,
+          "sources": 21,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "commit": {
+          "quality": 75.0,
+          "complete_p95_s": 27.08,
+          "wait_p95_s": 21.645,
+          "aux_p95_s": 2.945,
+          "prefill": 56828,
+          "output": 2109,
+          "gpu_hit": 4032,
+          "host_load": 0,
+          "sources": 102,
+          "routes": {"exact": 20},
+          "changes": 1
+        },
+        "selected": {
+          "quality": 70.0,
+          "complete_p95_s": 17.401,
+          "wait_p95_s": 14.131,
+          "aux_p95_s": 2.019,
+          "prefill": 16218,
+          "output": 1880,
+          "gpu_hit": 1920,
+          "host_load": 0,
+          "sources": 21,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "core": {
+          "quality": 75.0,
+          "complete_p95_s": 17.317,
+          "wait_p95_s": 14.229,
+          "aux_p95_s": 2.021,
+          "prefill": 16218,
+          "output": 1980,
+          "gpu_hit": 1920,
+          "host_load": 0,
+          "sources": 21,
+          "routes": {"exact": 20},
+          "changes": 0
+        }
+      },
+      "paired": {
+        "commit_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [0.0, 10.526],
+          "prefill_direction": {"up": 18, "equal": 2, "down": 0},
+          "source_count_direction": {"up": 18, "equal": 2, "down": 0},
+          "quality_direction": {"up": 2, "equal": 17, "down": 1}
+        },
+        "selected_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-5.263, 5.263],
+          "prefill_direction": {"up": 3, "equal": 15, "down": 2},
+          "source_count_direction": {"up": 2, "equal": 17, "down": 1},
+          "quality_direction": {"up": 1, "equal": 18, "down": 1}
+        },
+        "selected_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [-10.526, 0.0],
+          "prefill_direction": {"up": 0, "equal": 3, "down": 17},
+          "source_count_direction": {"up": 0, "equal": 3, "down": 17},
+          "quality_direction": {"up": 1, "equal": 17, "down": 2}
+        },
+        "core_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [0.0, 5.263],
+          "prefill_direction": {"up": 3, "equal": 15, "down": 2},
+          "source_count_direction": {"up": 2, "equal": 17, "down": 1},
+          "quality_direction": {"up": 1, "equal": 19, "down": 0}
+        },
+        "core_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [-5.263, 5.263],
+          "prefill_direction": {"up": 0, "equal": 3, "down": 17},
+          "source_count_direction": {"up": 0, "equal": 3, "down": 17},
+          "quality_direction": {"up": 1, "equal": 18, "down": 1}
+        }
+      }
+    },
+    "loong": {
+      "task_ids": [
+        "95113326-325c-4941-b1ad-e334a2296a8e",
+        "9b23cfbf-3c09-425d-888c-51a0f72fe774",
+        "ff3aa0ab-8dff-4115-8365-0b734655b779",
+        "1364edb3-f357-41f6-98e1-3e4b1972b505",
+        "c9495554-23fd-4667-a519-7e9139b5d17c",
+        "cae27e9d-deba-4ae8-b55b-430c0eb50e52",
+        "701a8028-fff8-40ca-9c43-a6146694fb89",
+        "9f07ccde-226c-4863-801e-49fa4e7552d6",
+        "f0e8f91d-9034-447f-a4ab-6db15ebe5077",
+        "19c55985-7496-4338-88a3-df16e2397536",
+        "d363efa9-8e5d-4cd1-8d20-a2b52f360f61",
+        "861875d2-377e-4397-aceb-e215fc9aca2d",
+        "194d3c8e-4a63-4e09-9163-63a88afe08bd",
+        "55fa764d-367e-4be9-aa93-7fb9233cd354",
+        "3b3111ed-78b9-47dc-9700-b9152d777935",
+        "b91d10e3-d5b9-47c0-a2e0-610c4c857f82",
+        "7b104919-2fba-44d2-91dd-a56bd2f30e91",
+        "da57097c-d4fa-494d-90b8-a86d6578904b",
+        "5a79fe19-b944-493f-be04-13b3ba24c7c6",
+        "e904afd3-5cb9-4bf7-bbee-9c8defac858c"
+      ],
+      "arms": {
+        "parent": {
+          "quality": 73.0,
+          "complete_p95_s": 53.474,
+          "wait_p95_s": 49.107,
+          "aux_p95_s": 5.694,
+          "prefill": 201433,
+          "output": 2837,
+          "gpu_hit": 1472,
+          "host_load": 64,
+          "sources": 460,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "commit": {
+          "quality": 70.5,
+          "complete_p95_s": 47.647,
+          "wait_p95_s": 44.015,
+          "aux_p95_s": 5.158,
+          "prefill": 197449,
+          "output": 2760,
+          "gpu_hit": 1408,
+          "host_load": 128,
+          "sources": 448,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "selected": {
+          "quality": 69.25,
+          "complete_p95_s": 48.301,
+          "wait_p95_s": 44.043,
+          "aux_p95_s": 5.031,
+          "prefill": 198502,
+          "output": 2925,
+          "gpu_hit": 1408,
+          "host_load": 128,
+          "sources": 450,
+          "routes": {"exact": 20},
+          "changes": 0
+        },
+        "core": {
+          "quality": 72.75,
+          "complete_p95_s": 48.431,
+          "wait_p95_s": 44.052,
+          "aux_p95_s": 5.105,
+          "prefill": 192580,
+          "output": 2913,
+          "gpu_hit": 1408,
+          "host_load": 128,
+          "sources": 423,
+          "routes": {"exact": 20},
+          "changes": 0
+        }
+      },
+      "paired": {
+        "commit_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-5.263, 0.0],
+          "prefill_direction": {"up": 6, "equal": 8, "down": 6},
+          "source_count_direction": {"up": 6, "equal": 8, "down": 6},
+          "quality_direction": {"up": 2, "equal": 12, "down": 6}
+        },
+        "selected_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-5.0, -1.579],
+          "prefill_direction": {"up": 4, "equal": 13, "down": 3},
+          "source_count_direction": {"up": 3, "equal": 14, "down": 3},
+          "quality_direction": {"up": 1, "equal": 15, "down": 4}
+        },
+        "selected_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [-3.947, 1.316],
+          "prefill_direction": {"up": 6, "equal": 10, "down": 4},
+          "source_count_direction": {"up": 5, "equal": 11, "down": 4},
+          "quality_direction": {"up": 2, "equal": 15, "down": 3}
+        },
+        "core_minus_parent": {
+          "quality_delta_leave_one_conversation_out": [-4.474, 2.105],
+          "prefill_direction": {"up": 3, "equal": 11, "down": 6},
+          "source_count_direction": {"up": 3, "equal": 11, "down": 6},
+          "quality_direction": {"up": 1, "equal": 16, "down": 3}
+        },
+        "core_minus_commit": {
+          "quality_delta_leave_one_conversation_out": [-2.368, 5.0],
+          "prefill_direction": {"up": 2, "equal": 11, "down": 7},
+          "source_count_direction": {"up": 2, "equal": 12, "down": 6},
+          "quality_direction": {"up": 3, "equal": 14, "down": 3}
+        }
+      }
+    }
+  },
+  "gqa_bf16_h200": [
+    {"query": 1, "kv": 1024, "old_ms": 0.0507, "fused_ms": 0.05123, "relative_l2": 0.0},
+    {"query": 1, "kv": 2048, "old_ms": 0.07587, "fused_ms": 0.0763, "relative_l2": 0.0},
+    {"query": 1, "kv": 8192, "old_ms": 0.07565, "fused_ms": 0.07792, "relative_l2": 0.0},
+    {"query": 4, "kv": 1024, "old_ms": 0.08934, "fused_ms": 0.10934, "relative_l2": 0.0},
+    {"query": 4, "kv": 2048, "old_ms": 0.13659, "fused_ms": 0.17418, "relative_l2": 0.0},
+    {"query": 4, "kv": 8192, "old_ms": 0.42755, "fused_ms": 0.6975, "relative_l2": 0.0},
+    {"query": 16, "kv": 1024, "old_ms": 0.0897, "fused_ms": 0.106, "relative_l2": 0.0},
+    {"query": 16, "kv": 2048, "old_ms": 0.13634, "fused_ms": 0.17218, "relative_l2": 0.0},
+    {"query": 16, "kv": 8192, "old_ms": 0.4213, "fused_ms": 0.68336, "relative_l2": 0.0},
+    {"query": 32, "kv": 1024, "old_ms": 0.09165, "fused_ms": 0.10746, "relative_l2": 7.727898264420219e-06},
+    {"query": 32, "kv": 2048, "old_ms": 0.14101, "fused_ms": 0.17397, "relative_l2": 2.520095904401387e-06},
+    {"query": 32, "kv": 8192, "old_ms": 0.43906, "fused_ms": 0.63365, "relative_l2": 5.615463578578783e-06},
+    {"query": 64, "kv": 1024, "old_ms": 0.13309, "fused_ms": 0.10894, "relative_l2": 1.0112362360814586e-06},
+    {"query": 64, "kv": 2048, "old_ms": 0.22126, "fused_ms": 0.17165, "relative_l2": 4.715213435702026e-06},
+    {"query": 64, "kv": 8192, "old_ms": 0.75834, "fused_ms": 0.58957, "relative_l2": 6.172617304400774e-06},
+    {"query": 128, "kv": 1024, "old_ms": 0.1913, "fused_ms": 0.1067, "relative_l2": 1.358209647150943e-05},
+    {"query": 128, "kv": 2048, "old_ms": 0.34611, "fused_ms": 0.17229, "relative_l2": 1.755070661602076e-05},
+    {"query": 128, "kv": 8192, "old_ms": 1.31792, "fused_ms": 0.60426, "relative_l2": 5.605274509434821e-06}
+  ],
+  "demand_exchange_6gib": {
+    "parent": {"tasks": 20, "matched": 27, "interventions": 40, "changed_layout": 7, "p95_revisit_ms": 252.9},
+    "selected": {"tasks": 20, "matched": 27, "interventions": 40, "changed_layout": 7, "p95_revisit_ms": 254.01},
+    "core": {"tasks": 20, "matched": 27, "interventions": 40, "changed_layout": 7, "p95_revisit_ms": 251.52}
+  },
+  "development_set_frontiers": {
+    "inscit-sets": {
+      "deployed": {
+        "n": 40,
+        "mean_answer_quality": 0.7275,
+        "mean_sources": 0.975,
+        "different_from_deployed": 0,
+        "wins_ties_losses": [0, 40, 0],
+        "quality_by_reference_sources": {"False": [20, 0.6525000000000001], "True": [20, 0.8025]}
+      },
+      "commit": {
+        "n": 40,
+        "mean_answer_quality": 0.755,
+        "mean_sources": 1.325,
+        "different_from_deployed": 12,
+        "wins_ties_losses": [3, 35, 2],
+        "quality_by_reference_sources": {"False": [20, 0.6900000000000001], "True": [20, 0.82]}
+      },
+      "new_positive_only": {
+        "n": 40,
+        "mean_answer_quality": 0.7275,
+        "mean_sources": 0.975,
+        "different_from_deployed": 0,
+        "wins_ties_losses": [0, 40, 0],
+        "quality_by_reference_sources": {"False": [20, 0.6525000000000001], "True": [20, 0.8025]}
+      },
+      "new_penalties_only": {
+        "n": 40,
+        "mean_answer_quality": 0.745,
+        "mean_sources": 1.225,
+        "different_from_deployed": 8,
+        "wins_ties_losses": [2, 36, 2],
+        "quality_by_reference_sources": {"False": [20, 0.6900000000000001], "True": [20, 0.8]}
+      }
+    },
+    "multidoc2dial-sets": {
+      "deployed": {"n": 27, "mean_answer_quality": 0.21037020346752838, "mean_sources": 1.2222222222222223, "different_from_deployed": 0, "wins_ties_losses": [0, 27, 0]},
+      "commit": {"n": 27, "mean_answer_quality": 0.1902048908171907, "mean_sources": 2.4814814814814814, "different_from_deployed": 13, "wins_ties_losses": [5, 14, 8]},
+      "new_positive_only": {"n": 27, "mean_answer_quality": 0.21037020346752838, "mean_sources": 1.2222222222222223, "different_from_deployed": 0, "wins_ties_losses": [0, 27, 0]},
+      "new_penalties_only": {"n": 27, "mean_answer_quality": 0.19099175827072482, "mean_sources": 1.6666666666666667, "different_from_deployed": 12, "wins_ties_losses": [5, 15, 7]}
+    }
+  },
+  "stop_target_seconds": {
+    "development_trajectories": 24,
+    "states": 120,
+    "commit_changed_labels": 107,
+    "mean_abs_seconds_error": 0.155704,
+    "max_abs_seconds_error": 0.938497,
+    "retained_changed_labels": 0
+  },
+  "publication_cohort": {
+    "multidoc2dial": {
+      "historical_27155ec_first_run": {
+        "quality": 18.203,
+        "complete_p95_s": 6.879,
+        "wait_p95_s": 2.32,
+        "aux_p95_s": 1.688,
+        "prefill": 11093,
+        "output": 2597,
+        "gpu_hit": 1344,
+        "host_load": 0,
+        "sources": 21,
+        "routes": {"exact": 20},
+        "changes": 2
+      },
+      "commit": {
+        "quality": 18.868,
+        "complete_p95_s": 6.753,
+        "wait_p95_s": 2.286,
+        "aux_p95_s": 1.714,
+        "prefill": 19538,
+        "output": 2536,
+        "gpu_hit": 1472,
+        "host_load": 0,
+        "sources": 61,
+        "routes": {"exact": 20},
+        "changes": 0
+      },
+      "core": {
+        "quality": 18.91,
+        "complete_p95_s": 6.628,
+        "wait_p95_s": 1.907,
+        "aux_p95_s": 1.619,
+        "prefill": 10880,
+        "output": 2317,
+        "gpu_hit": 1024,
+        "host_load": 0,
+        "sources": 21,
+        "routes": {"exact": 20},
+        "changes": 1
+      },
+      "core_minus_historical": {
+        "quality_delta_leave_one_conversation_out": [-0.315, 1.554],
+        "prefill_direction": {"up": 7, "equal": 11, "down": 2},
+        "source_count_direction": {"up": 0, "equal": 20, "down": 0},
+        "quality_direction": {"up": 5, "equal": 11, "down": 4}
+      }
+    },
+    "mtrag": {
+      "historical_27155ec_first_run": {
+        "quality": 61.282,
+        "complete_p95_s": 8.032,
+        "wait_p95_s": 3.042,
+        "aux_p95_s": 3.033,
+        "prefill": 14425,
+        "output": 2516,
+        "gpu_hit": 1600,
+        "host_load": 0,
+        "sources": 25,
+        "routes": {"exact": 20},
+        "changes": 1
+      },
+      "commit": {
+        "quality": 61.172,
+        "complete_p95_s": 18.773,
+        "wait_p95_s": 5.934,
+        "aux_p95_s": 3.776,
+        "prefill": 55589,
+        "output": 5666,
+        "gpu_hit": 4032,
+        "host_load": 0,
+        "sources": 119,
+        "routes": {"exact": 20},
+        "changes": 4
+      },
+      "core": {
+        "quality": 60.232,
+        "complete_p95_s": 7.46,
+        "wait_p95_s": 2.951,
+        "aux_p95_s": 2.623,
+        "prefill": 15340,
+        "output": 2298,
+        "gpu_hit": 1600,
+        "host_load": 0,
+        "sources": 28,
+        "routes": {"exact": 20},
+        "changes": 1
+      },
+      "core_minus_historical": {
+        "quality_delta_leave_one_conversation_out": [-1.484, -0.701],
+        "prefill_direction": {"up": 3, "equal": 8, "down": 9},
+        "source_count_direction": {"up": 1, "equal": 19, "down": 0}
+      }
+    },
+    "versionqa": {
+      "historical_27155ec_first_run": {
+        "quality": 85.0,
+        "complete_p95_s": 13.922,
+        "wait_p95_s": 11.059,
+        "aux_p95_s": 1.896,
+        "prefill": 14474,
+        "output": 1547,
+        "gpu_hit": 2048,
+        "host_load": 0,
+        "sources": 21,
+        "routes": {"exact": 20},
+        "changes": 0
+      },
+      "commit": {
+        "quality": 90.0,
+        "complete_p95_s": 20.437,
+        "wait_p95_s": 16.743,
+        "aux_p95_s": 2.522,
+        "prefill": 48469,
+        "output": 1577,
+        "gpu_hit": 1984,
+        "host_load": 64,
+        "sources": 88,
+        "routes": {"exact": 20},
+        "changes": 2
+      },
+      "core": {
+        "quality": 85.0,
+        "complete_p95_s": 12.889,
+        "wait_p95_s": 10.324,
+        "aux_p95_s": 1.744,
+        "prefill": 15584,
+        "output": 1473,
+        "gpu_hit": 1536,
+        "host_load": 0,
+        "sources": 23,
+        "routes": {"exact": 20},
+        "changes": 0
+      },
+      "core_minus_historical": {
+        "quality_delta_leave_one_conversation_out": [0.0, 0.0],
+        "prefill_direction": {"up": 3, "equal": 15, "down": 2},
+        "source_count_direction": {"up": 2, "equal": 18, "down": 0},
+        "quality_direction": {"up": 0, "equal": 20, "down": 0}
+      }
+    },
+    "loong": {
+      "historical_27155ec_first_run": {
+        "quality": 77.25,
+        "complete_p95_s": 28.314,
+        "wait_p95_s": 23.975,
+        "aux_p95_s": 4.925,
+        "prefill": 86705,
+        "output": 1770,
+        "gpu_hit": 768,
+        "host_load": 0,
+        "sources": 449,
+        "routes": {"exact": 20},
+        "changes": 0
+      },
+      "commit": {
+        "quality": 76.75,
+        "complete_p95_s": 24.554,
+        "wait_p95_s": 21.091,
+        "aux_p95_s": 3.063,
+        "prefill": 86912,
+        "output": 1769,
+        "gpu_hit": 768,
+        "host_load": 0,
+        "sources": 450,
+        "routes": {"exact": 20},
+        "changes": 0
+      },
+      "core": {
+        "quality": 74.75,
+        "complete_p95_s": 25.178,
+        "wait_p95_s": 20.594,
+        "aux_p95_s": 2.965,
+        "prefill": 86522,
+        "output": 1842,
+        "gpu_hit": 768,
+        "host_load": 0,
+        "sources": 447,
+        "routes": {"exact": 20},
+        "changes": 0
+      },
+      "core_minus_historical": {
+        "quality_delta_leave_one_conversation_out": [-2.632, -0.526],
+        "prefill_direction": {"up": 1, "equal": 18, "down": 1},
+        "source_count_direction": {"up": 0, "equal": 18, "down": 2},
+        "quality_direction": {"up": 0, "equal": 18, "down": 2}
+      }
+    }
+  },
+  "development_set_protocol": "Replay alternatives with observed answer quality and deployed weights. For each task select the highest utility among labelled alternatives. new_positive_only uses the new positive features with the deployed penalties; new_penalties_only uses the converse."
+}

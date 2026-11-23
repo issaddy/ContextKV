@@ -96,7 +96,7 @@ class EvidenceHeads(nn.Module):
 
     @staticmethod
     def features(embeddings, relevance, selected, support, completed):
-        """Bounded information state over query-orthogonal novelty and Need coverage."""
+        """Bounded information state shared by selection and stopping."""
         selected = selected.bool()
         mask = selected.to(embeddings.dtype)
         count = mask.sum(-1, keepdim=True)
@@ -105,42 +105,27 @@ class EvidenceHeads(nn.Module):
         maximum = torch.where(count > 0, maximum, 0.)
         minimum = torch.where(count > 0, minimum, 0.)
         total = mask @ relevance[:, None]
-        raw_similarity = (embeddings @ embeddings.T).clamp(-1, 1)
-        rel_pos = relevance.clamp(0, 1)
-        orth_scale = ((1 - rel_pos.square()).clamp_min(1e-4).sqrt()[:, None]
-                      * (1 - rel_pos.square()).clamp_min(1e-4).sqrt()[None, :])
-        residual_similarity = ((raw_similarity - rel_pos[:, None] * rel_pos[None, :]) / orth_scale).clamp(0, 1)
-        residual_similarity = torch.where(raw_similarity >= 1 - 1e-5, torch.ones_like(residual_similarity),
-                                          residual_similarity)
-        eye = torch.eye(len(relevance), device=mask.device, dtype=mask.dtype)
-        residual_similarity = residual_similarity * (1 - eye)
+        similarity = (embeddings @ embeddings.T).clamp(0, 1)
         order = relevance.argsort(descending=True)
         ordered = mask[:, order]
-        previous = torch.tril(residual_similarity[order][:, order], diagonal=-1)
-        expressed = (previous[None] * ordered[:, None, :]).amax(-1)
-        novel_weights = (1 - expressed).clamp(0, 1)
-        novel = (ordered * relevance[order].clamp_min(0) * novel_weights).sum(-1, keepdim=True)
-        pairs = mask[:, :, None] * mask[:, None, :] * (1 - eye)
-        redundancy = (pairs * residual_similarity.square()).amax((1, 2))[:, None]
+        previous = torch.tril(similarity[order][:, order], diagonal=-1)
+        expressed = (previous[None]*ordered[:, None, :]).amax(-1)
+        novel = (ordered*relevance[order].clamp_min(0)*(1-expressed)).sum(-1, keepdim=True)
+        pairs = mask[:, :, None]*mask[:, None, :]*(1-torch.eye(len(relevance), device=mask.device))
+        redundancy = (pairs*similarity).amax((1, 2))[:, None]
         if support.shape[1]:
-            unit_novelty = torch.zeros_like(mask)
-            unit_novelty[:, order] = novel_weights
-            grounded = (support * relevance.clamp_min(0)[:, None]).clamp(0, 1)
-            effective = mask[:, :, None] * grounded[None] * unit_novelty[:, :, None]
-            noisy_or = 1 - (1 - effective).prod(1)
-            need_coverage = torch.maximum(noisy_or, completed[None])
-            all_noisy_or = 1 - (1 - grounded).prod(0)
-            all_coverage = torch.maximum(all_noisy_or, completed)
+            grounded = support*relevance.clamp_min(0)[:, None]
+            need_coverage = torch.maximum((mask[:, :, None]*grounded[None]).amax(1), completed[None])
+            all_coverage = torch.maximum(grounded.amax(0), completed)
             need_mean = need_coverage.mean(-1, keepdim=True)
             need_min = need_coverage.amin(-1, keepdim=True)
-            gap = (all_coverage[None] - need_coverage).clamp_min(0).mean(-1, keepdim=True)
+            gap = (all_coverage[None]-need_coverage).mean(-1, keepdim=True)
             known = completed.mean().expand_as(count)
         else:
             need_mean = need_min = known = gap = torch.zeros_like(count)
-        return torch.cat((maximum, total / count.clamp_min(1), minimum,
-            1 - (-novel).exp(), redundancy, (maximum - minimum).clamp_min(0).square(),
-            need_mean, need_min, known, gap,
-            relevance.max().clamp_min(0) - maximum.clamp_min(0), (count > 0).to(mask.dtype)), -1)
+        return torch.cat((maximum, total/count.clamp_min(1), minimum,
+            1-(-novel).exp(), redundancy, maximum-minimum, need_mean, need_min, known, gap,
+            relevance.max().clamp_min(0)-maximum.clamp_min(0), (count > 0).to(mask.dtype)), -1)
 
     def utility(self, embeddings, relevance, selected, support, completed):
         """Calibrated information gain: duplicates add no positive information."""

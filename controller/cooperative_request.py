@@ -141,10 +141,9 @@ class EvidenceCosts:
     """One owner snapshot prices all candidate sets, including valid Native prefix orders."""
 
     def __init__(self, units, source_blocks, tokenizer, snapshot, *, prompt_tokens,
-                 output_tokens, policy, mode="auto", source_headers=(), retained_sources=None):
+                 output_tokens, policy, mode="auto", source_headers=()):
         self.sources, self.lengths = {}, {}
         self.dependencies = {unit.unit_id: unit.dependencies for unit in units}
-        self.retained_sources = retained_sources or {}
         self.changed_members = False
         self.headers = tuple(source_address(block) for block in source_headers)
         self.covered_headers = {}
@@ -221,73 +220,28 @@ class EvidenceCosts:
                     result.append(units)
         return tuple(result)
 
-    def _valid_order(self, ordered, positions):
-        layout = {identity: i for i, identity in enumerate(ordered)}
-        return not any(
-            layout[dep] > layout[identity]
-            for identity in ordered
-            for dep in self.dependencies[identity]
-            if dep in positions and positions[dep] < positions[identity]
-        )
-
-    def _session_order(self, ids):
-        if not self.retained_sources or len(ids) <= 1:
-            return ids
-        positions = {identity: i for i, identity in enumerate(ids)}
-        scores = {identity: max((self.retained_sources.get(s, 0.0) for s in self.sources[identity]), default=0.0)
-                  for identity in ids}
-        if not any(score > 0 for score in scores.values()):
-            return ids
-        recurring = sorted((uid for uid in ids if scores[uid] > 0),
-                           key=lambda uid: (-scores[uid], positions[uid]))
-        front, seen = [], set()
-
-        def place(uid):
-            if uid in seen or uid not in positions:
-                return
-            for dep in self.dependencies[uid]:
-                if dep in positions and positions[dep] < positions[uid]:
-                    place(dep)
-            seen.add(uid)
-            front.append(uid)
-
-        for uid in recurring:
-            place(uid)
-        candidate = (*front, *(uid for uid in ids if uid not in seen))
-        return candidate if self._valid_order(candidate, positions) else ids
-
     def order(self, ids):
         ids = tuple(ids)
-        if len(ids) <= 1:
-            return ids
-        base = self._session_order(ids)
         if not self.snapshot["prefixes"]:
-            return base
+            return ids
+        best = ids
+        price = self.quote(ids, preserve_order=True)["milliseconds"]
         positions = {identity: i for i, identity in enumerate(ids)}
         owners = {source: identity for identity in ids for source in self.sources[identity]}
-        header_set = set(self.headers)
-        best = base
-        initial_quote = self.quote(best, preserve_order=True)
-        best_key = (initial_quote["milliseconds"], -initial_quote["gpu_tokens"], -initial_quote["host_tokens"])
-        if base != ids:
-            raw_quote = self.quote(ids, preserve_order=True)
-            raw_key = (raw_quote["milliseconds"], -raw_quote["gpu_tokens"], -raw_quote["host_tokens"])
-            if raw_key < best_key:
-                best, best_key = ids, raw_key
-        tested = {best, ids}
         for prefix in self.snapshot["prefixes"]:
-            chain = [address for address in prefix["source_ids"] if address not in header_set]
-            if chain and all(source in owners for source in chain):
+            chain = [address for address in prefix["source_ids"] if address not in self.headers]
+            if all(source in owners for source in chain):
                 front = tuple(dict.fromkeys(owners[source] for source in chain))
-                front_set = set(front)
-                ordered = (*front, *(identity for identity in base if identity not in front_set))
-                if ordered in tested or not self._valid_order(ordered, positions):
+                ordered = (*front, *(identity for identity in ids if identity not in front))
+                if ordered == ids:
                     continue
-                tested.add(ordered)
-                quote = self.quote(ordered, preserve_order=True)
-                key = (quote["milliseconds"], -quote["gpu_tokens"], -quote["host_tokens"])
-                if key < best_key:
-                    best, best_key = ordered, key
+                layout = {identity: i for i, identity in enumerate(ordered)}
+                if any(layout[dep] > layout[identity] for identity in front for dep in self.dependencies[identity]
+                       if dep in positions and positions[dep] < positions[identity]):
+                    continue
+                cost = self.quote(ordered, preserve_order=True)["milliseconds"]
+                if cost < price:
+                    best, price = ordered, cost
         return best
 
     def estimate(self, ids, *, preserve_order=False):

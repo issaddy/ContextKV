@@ -252,12 +252,8 @@ class SharedEvidenceProvider:
                     version_keys = tuple(dict.fromkeys((*version_keys, *expanded)))
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         legal_set = set(legal)
-        seen_spans = {}
-        for turn in reversed(snapshot.raw_history[-3:]):
-            for span in turn.source_spans:
-                if span.source_key in legal_set:
-                    seen_spans.setdefault((span.source_key, span.start, span.end), span)
-        previous_spans = tuple(seen_spans.values())
+        previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
+                               if span.source_key in legal_set)
         declared = supplied_blocks is not None or bool(families)
         complete_population = (coverage_scope == "all_supplied_documents"
             or any(need.scope == "all_supplied_documents" for need in query.task.needs)
@@ -317,17 +313,9 @@ class SharedEvidenceProvider:
                 pool = EvidencePool(units, corpus.resolve(keys))
             if previous_spans:
                 prior = directory.full_scope(tuple(dict.fromkeys(span.source_key for span in previous_spans)))
-                observed = []
-                seen_observed = set()
-                for span in previous_spans:
-                    for unit in prior.units:
-                        if unit.unit_id in seen_observed:
-                            continue
-                        if any(origin.source_key == span.source_key and origin.start < span.end and span.start < origin.end
-                               for origin in unit.source_spans):
-                            seen_observed.add(unit.unit_id)
-                            observed.append(unit)
-                observed = tuple(observed[:max(4, self.evidence_batch // 2)])
+                observed = tuple(unit for unit in prior.units if any(
+                    origin.source_key == span.source_key and origin.start < span.end and span.start < origin.end
+                    for origin in unit.source_spans for span in previous_spans))
                 historical_ids = tuple(unit.unit_id for unit in observed)
                 roots = (*units, *observed)
                 units = self._closure(roots, {unit.unit_id: unit for unit in (*units, *prior.units)})
@@ -522,81 +510,17 @@ class SharedEvidenceProvider:
     async def expand(self, state):
         return await run_retrieval_worker(self._expand_state, state)
 
-    @staticmethod
-    def rank_pending_units(state):
-        """Order pending units by unresolved Need terms, missing identifiers, and structural/version gaps."""
-        import re
-        from adapters.version_structure import technical_identifiers
-        if not state.pending_units:
-            return ()
-        question = state.query.task.raw_question
-        symbols = technical_identifiers(question)
-        pool_text = "\n".join(u.text for u in state.pool.units)
-        missing_pats = [
-            re.compile(r"(?<!\w)" + re.escape(s) + r"(?!\w)", re.IGNORECASE)
-            for s in symbols
-            if not re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", pool_text, re.IGNORECASE)
-        ]
-        all_sym_pats = [re.compile(r"(?<!\w)" + re.escape(s) + r"(?!\w)", re.IGNORECASE) for s in symbols]
-        open_terms = set()
-        conditions_by_id = {c.condition_id: c for c in state.query.task.conditions}
-        for need in state.open_needs:
-            for fragment in (state.query.text(need.anchor_spans), state.query.text(need.subject_refs)):
-                open_terms.update(w.lower() for w in re.findall(r"[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]{2,}", fragment))
-            for cid in need.condition_ids:
-                cond = conditions_by_id[cid]
-                for ref in (*((cond.key_span,) if cond.key_span else ()), *cond.value_spans):
-                    open_terms.update(w.lower() for w in re.findall(
-                        r"[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]{2,}", state.query.text((ref,))))
-        selected_set = set(state.selected_ids)
-        selected_docs = {
-            span.source_key
-            for u in state.pool.units if u.unit_id in selected_set
-            for span in u.source_spans
-        }
-        selected_fams = {
-            u.document_family for u in state.pool.units if u.unit_id in selected_set and u.document_family
-        }
-        selected_editions = {
-            (u.document_family, span.source_key.version)
-            for u in state.pool.units if u.unit_id in selected_set
-            for span in u.source_spans
-        }
-        want_version_diversity = state.query.task.version_intent.mode in {"compare", "history"}
-
-        def gap_priority(item):
-            idx, unit = item
-            score = 1.0 / (idx + 8.0)
-            body = unit.heading + "\n" + unit.text
-            if missing_pats:
-                score += 2.0 * sum(1 for p in missing_pats if p.search(body))
-            if all_sym_pats:
-                score += 0.35 * sum(1 for p in all_sym_pats if p.search(body))
-            if open_terms:
-                lower = body.lower()
-                score += 0.25 * min(4, sum(1 for t in open_terms if t in lower))
-            if any(span.source_key in selected_docs for span in unit.source_spans):
-                score += 0.30
-            if (want_version_diversity and unit.document_family in selected_fams
-                    and any((unit.document_family, span.source_key.version) not in selected_editions
-                            for span in unit.source_spans)):
-                score += 0.40
-            return (-score, idx)
-
-        return tuple(unit for _, unit in sorted(enumerate(state.pending_units), key=gap_priority))
-
     def _expand_state(self, state):
         existing = set(state.evidence.unit_ids)
         all_units = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
-        ranked_pending = self.rank_pending_units(state)
-        fresh = tuple(unit for unit in self._closure(ranked_pending[:self.evidence_batch], all_units)
+        fresh = tuple(unit for unit in self._closure(state.pending_units[:self.evidence_batch], all_units)
                       if unit.unit_id not in existing)
         new = self.evidence_encoder.encode(state.query, fresh)
         evidence = state.evidence.merge(new)
         units = (*state.pool.units, *fresh)
         fresh_ids = {unit.unit_id for unit in fresh}
         result = replace(state, evidence=evidence, pool=replace(state.pool, units=units), selected_ids=(), costs=None,
-                         pending_units=tuple(unit for unit in ranked_pending if unit.unit_id not in fresh_ids))
+                         pending_units=tuple(unit for unit in state.pending_units if unit.unit_id not in fresh_ids))
         self._finish_state(result)
         return result
 

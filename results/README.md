@@ -2,6 +2,7 @@
 
 | 数据 | 内容 |
 |---|---|
+| [证据选择与 KV 协同的后续对照](selection_and_kv_20261123.json) | 两套各 20 轮题单、四组开发集特征消融、6 GiB 需求干预、GQA 内核和停止成本标签 |
 | [全量题单对照](full_qa_20261123.json) | 四套最终配置的质量、完整 P95 与费用，三套同期四方对照及 VersionQA 分类得分 |
 | [MultiDoc2Dial 历史 P3 基线](full_multidoc_p3_20261116.json) | 普通 RAG、LlamaIndex 与早期 ContextKV 的 4,094 轮实际历史对照 |
 | [四项固定题单与扩大多轮会话](paired_qa_20261122.json) | 主干前后、普通 RAG、LlamaIndex 的质量、完整 P95 与分项费用 |

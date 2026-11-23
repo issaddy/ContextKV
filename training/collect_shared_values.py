@@ -182,17 +182,12 @@ async def collect(args, *, answer_plans=None):
                 encoded = await asyncio.to_thread(evidence_encoder.encode, query, units)
                 state = state_for(query, encoded, units, units, f"sets:{row['task_id']}:prepare", totals, row.get("catalogue", ()))
                 observations = []
-                import torch
                 budget, _ = controller._answer_budget(state, snapshot, state.computations)
                 sizes = {unit.unit_id: unit.body_tokens for unit in units}
-                support, known = encoded.need_support(units, tuple(n.need_id for n in query.task.needs), state.completed_needs)
                 frontier = tuple(ids for ids in encoded.frontier(units)
                                  if sum(sizes[identity] for identity in ids) <= budget)
                 await controller._select_evidence(state, snapshot, state.computations)
                 choices = candidate_sets(frontier, state.selected_ids)
-                for comp_ids in encoded.complementary_frontier(units, body_tokens=budget, support=support, known=known):
-                    if frozenset(comp_ids) not in {frozenset(c) for c in choices}:
-                        choices += (comp_ids,)
                 if row.get("paired_sets"):
                     by_id = {unit.unit_id: unit for unit in units}
                     for ids in row["paired_sets"]:
@@ -200,6 +195,8 @@ async def collect(args, *, answer_plans=None):
                         choice = tuple(block.unit_id for block in blocks)
                         if choice not in choices and sum(sizes[key] for key in choice) <= budget:
                             choices += (choice,)
+                import torch
+                support, known = encoded.need_support(units, tuple(n.need_id for n in query.task.needs), state.completed_needs)
                 masks = torch.tensor([[k in choice for k in encoded.unit_ids] for choice in choices],
                                      device=encoded.embeddings.device, dtype=torch.bool)
                 features = encoded.heads.features(encoded.embeddings, encoded.relevance, masks, support, known).tolist()
@@ -284,10 +281,6 @@ async def collect(args, *, answer_plans=None):
                 preparing = time.monotonic()
                 await controller.prepare_state(state, snapshot, complete)
                 windows[prepare_id] = preparing, time.monotonic()
-                if pending:
-                    pending = SharedEvidenceProvider.rank_pending_units(state)
-                    state.pending_units = pending
-                    batch = pending[:batch_size]
                 transition = (encode_id, prepare_id)
                 paid_seconds += sum(windows[key][1]-windows[key][0] for key in transition)
                 if states:

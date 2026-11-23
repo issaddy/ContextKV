@@ -257,7 +257,7 @@ class VersionIndex:
                                 block = self.blocks[span.source_key]
                                 base = block.span[0] if block.span else 0
                                 identity = f"version:{span.span_id}"
-                                grouped.setdefault(identity, [span, block.text[span.start - base:span.end - base], set()])
+                                grouped.setdefault(identity, [span, block.text[span.start - base:span.end - base], set(), family])
                                 members.append(identity)
                         for identity in members:
                             grouped[identity][2].update(m for m in members if m != identity)
@@ -273,7 +273,7 @@ class VersionIndex:
                 identity, (span,), text, " / ".join((family, span.source_key.version)),
                 dependencies=tuple(sorted(deps)), document_family=family,
             )
-            for identity, (span, text, deps) in grouped.items()
+            for identity, (span, text, deps, family) in grouped.items()
         )
 
     def missing_identifiers(self, question, version_keys, families):

@@ -185,108 +185,8 @@ class EvidenceEncoding:
                 sets.append(tuple(active))
         return tuple(sets)
 
-    def complementary_frontier(self, units, *, body_tokens, support, known,
-                               beam_width=3, max_steps=6):
-        """Construct non-prefix multi-hop/cross-version sets via marginal closure beam search."""
-        import torch
-        count = len(self.unit_ids)
-        if count <= 2 or body_tokens <= 0:
-            return ()
-        index_by_id = {uid: idx for idx, uid in enumerate(self.unit_ids)}
-        by_id = {unit.unit_id: unit for unit in units}
-        sizes = [by_id[uid].body_tokens for uid in self.unit_ids]
-        closures, closure_tokens = [], []
-        for idx in range(count):
-            closed, stack = set(), [idx]
-            while stack:
-                cur = stack.pop()
-                if cur not in closed:
-                    closed.add(cur)
-                    stack.extend(index_by_id[dep] for dep in by_id[self.unit_ids[cur]].dependencies)
-            frozen = frozenset(closed)
-            closures.append(frozen)
-            closure_tokens.append(sum(sizes[j] for j in frozen))
-
-        need_max = support.amax(-1) if support.shape[1] else torch.zeros_like(self.relevance)
-        priority = self.relevance + 0.5 * need_max
-        eligible = [
-            i for i in priority.argsort(descending=True).tolist()
-            if closure_tokens[i] <= body_tokens
-            and (float(self.relevance[i]) > 0.0 or float(need_max[i]) > 0.1)
-        ][:16]
-        if len(eligible) <= 1:
-            return ()
-
-        # Seed beam with top relevance, top Need-grounded, and top distinct-source closures
-        seeds, seen_seeds = [], set()
-        def add_seed(idx):
-            cl = closures[idx]
-            if cl and cl not in seen_seeds and closure_tokens[idx] <= body_tokens:
-                seen_seeds.add(cl)
-                seeds.append(cl)
-
-        add_seed(eligible[0])
-        if support.shape[1]:
-            for col in range(support.shape[1]):
-                best_col = int(support[:, col].argmax())
-                if best_col in eligible and float(support[best_col, col]) > 0.1:
-                    add_seed(best_col)
-        def doc_identity(idx):
-            sk = by_id[self.unit_ids[idx]].source_spans[0].source_key
-            return sk.corpus_id, sk.document_id, sk.version
-
-        primary_doc = doc_identity(eligible[0])
-        for idx in eligible[1:]:
-            if doc_identity(idx) != primary_doc:
-                add_seed(idx)
-                break
-        for idx in eligible[1:]:
-            if len(seeds) >= beam_width:
-                break
-            add_seed(idx)
-
-        discovered = list(seeds)
-        seen_all = set(seeds)
-        beam = seeds[:beam_width]
-        with torch.no_grad():
-            for _ in range(max_steps - 1):
-                next_sets = []
-                seen_step = set()
-                for state in beam:
-                    used = sum(sizes[j] for j in state)
-                    for idx in eligible:
-                        cl = closures[idx]
-                        if cl <= state:
-                            continue
-                        merged = state | cl
-                        if merged in seen_step:
-                            continue
-                        extra_tokens = sum(sizes[j] for j in cl - state)
-                        if used + extra_tokens <= body_tokens:
-                            seen_step.add(merged)
-                            next_sets.append(merged)
-                if not next_sets:
-                    break
-                step_masks = torch.tensor(
-                    [[j in members for j in range(count)] for members in next_sets],
-                    device=self.embeddings.device, dtype=torch.bool,
-                )
-                scores = self.heads.utility(self.embeddings, self.relevance, step_masks, support, known)
-                top_k = min(beam_width, len(next_sets))
-                winners = scores.topk(top_k).indices.tolist()
-                beam = [next_sets[w] for w in winners]
-                for state in beam:
-                    if state not in seen_all:
-                        seen_all.add(state)
-                        discovered.append(state)
-        semantic_rank = self.relevance.argsort(descending=True).tolist()
-        return tuple(
-            tuple(self.unit_ids[j] for j in semantic_rank if j in members)
-            for members in discovered
-        )
-
     def select(self, units, *, body_tokens, cost_model=None, seconds_price=0.0, need_ids=(), completed=()):
-        """Price nested, complementary, and cache-bridged frontiers under one objective."""
+        """Price semantic and cache-bridged frontiers under one objective."""
         import torch
         if not self.unit_ids or body_tokens <= 0:
             return ()
@@ -296,11 +196,6 @@ class EvidenceEncoding:
         semantic_order = frontier[-1]
         seen = {frozenset(ids) for ids in candidates}
         support, known = self.need_support(units, need_ids, completed)
-        for ids in self.complementary_frontier(units, body_tokens=body_tokens, support=support, known=known):
-            members = frozenset(ids)
-            if members not in seen and sum(sizes[i] for i in ids) <= body_tokens:
-                candidates.append(tuple(i for i in semantic_order if i in members))
-                seen.add(members)
         ordinary_count = len(candidates)
         warm = cost_model.reusable_units() if cost_model else ()
         if warm:
@@ -331,8 +226,7 @@ class EvidenceEncoding:
                              device=self.embeddings.device, dtype=torch.bool)
         with torch.no_grad():
             values = self.heads.utility(self.embeddings, self.relevance, masks, support, known)
-            utility = values.clone()
-            quotes = None
+            utility = values
             if cost_model:
                 quotes = [cost_model.quote(ids) for ids in candidates]
                 costs = values.new_tensor([q["milliseconds"] for q in quotes])
@@ -345,38 +239,7 @@ class EvidenceEncoding:
             semantic_best = int(values[:ordinary_count].argmax())
             best = int(utility[:ordinary_count].argmax())
             if len(candidates) > ordinary_count:
-                best_members = frozenset(candidates[best])
-                rel_by_id = dict(zip(self.unit_ids, self.relevance.tolist()))
-                eligible = values[ordinary_count:] >= values[best]
-                if quotes is not None and best_members:
-                    best_ms = quotes[best]["milliseconds"]
-                    best_gpu = quotes[best]["gpu_tokens"]
-                    prefill_ms = cost_model.costs.get("prefill_token_ms", 1.0)
-                    for offset, ids in enumerate(candidates[ordinary_count:]):
-                        idx = ordinary_count + offset
-                        if eligible[offset]:
-                            continue
-                        members = frozenset(ids)
-                        if best_members < members:
-                            added = members - best_members
-                            if not all(rel_by_id[uid] > 0.15 for uid in added):
-                                continue
-                            added_tokens = sum(sizes[uid] for uid in added)
-                            gpu_gain = quotes[idx]["gpu_tokens"] - best_gpu
-                            ms_delta = quotes[idx]["milliseconds"] - best_ms
-                            if quotes[idx]["milliseconds"] < best_ms:
-                                eligible[offset] = True
-                            elif (added_tokens > 0
-                                  and gpu_gain >= 0.5 * added_tokens
-                                  and ms_delta <= 0.35 * added_tokens * prefill_ms
-                                  and float(values[idx]) >= float(values[best]) - 0.02):
-                                saved_ms = gpu_gain * prefill_ms
-                                utility[idx] = max(
-                                    float(utility[idx]),
-                                    float(utility[best]) + seconds_price * (0.5 * saved_ms - max(0.0, ms_delta)) / 1000,
-                                )
-                                eligible[offset] = True
-                rivals = utility[ordinary_count:].masked_fill(~eligible, -torch.inf)
+                rivals = utility[ordinary_count:].masked_fill(values[ordinary_count:] < values[best], -torch.inf)
                 alternative = int(rivals.argmax())
                 if rivals[alternative] > utility[best]:
                     best = ordinary_count + alternative

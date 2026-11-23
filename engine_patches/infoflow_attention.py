@@ -134,9 +134,8 @@ def paged_attention(query, key_pool, value_pool, rows, cosine, sine, query_posit
     output = torch.empty_like(query)
     splits = min(32, triton.cdiv(length, 1024)) if len(query) == 1 else 1
     groups = query.shape[1] // key_pool.shape[1]
-    if splits == 1 and groups >= 2 and (groups & (groups - 1)) == 0:
-        target_m = 128 if len(query) >= 64 else 64
-        block_q = max(1, target_m // groups)
+    if len(query) >= 64 and groups >= 2 and (groups & (groups - 1)) == 0:
+        block_q = max(1, 128 // groups)
         block_m = block_q * groups
         _paged_attention_gqa[(triton.cdiv(len(query), block_q), key_pool.shape[1])](
             query, key_pool, value_pool, rows, cosine, sine, query_positions,
