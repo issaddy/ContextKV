@@ -15,7 +15,52 @@
     "auxiliary_devices": "both query and evidence on GPU 5",
     "code": "d4af354",
     "concurrent_workload": "MultiDoc2Dial generation on GPUs 6,7",
-    "cohorts": "results/cooperation_optimization.json"
+    "cohorts": {
+      "mtrag": [
+        "b4614daadceeecb400f7baf0aa48dcb8<::>1",
+        "b4614daadceeecb400f7baf0aa48dcb8<::>2",
+        "b4614daadceeecb400f7baf0aa48dcb8<::>3",
+        "b4614daadceeecb400f7baf0aa48dcb8<::>4",
+        "b4614daadceeecb400f7baf0aa48dcb8<::>5",
+        "747a810abfd6da4a9c37cdb74feec95e<::>1",
+        "747a810abfd6da4a9c37cdb74feec95e<::>2",
+        "747a810abfd6da4a9c37cdb74feec95e<::>3",
+        "747a810abfd6da4a9c37cdb74feec95e<::>4",
+        "747a810abfd6da4a9c37cdb74feec95e<::>5",
+        "4c86c8740c3d49e06b7aca9d308119fa<::>1",
+        "4c86c8740c3d49e06b7aca9d308119fa<::>2",
+        "4c86c8740c3d49e06b7aca9d308119fa<::>3",
+        "4c86c8740c3d49e06b7aca9d308119fa<::>4",
+        "4c86c8740c3d49e06b7aca9d308119fa<::>5",
+        "fdee20f7fd677e420742b09989623d68<::>1",
+        "fdee20f7fd677e420742b09989623d68<::>2",
+        "fdee20f7fd677e420742b09989623d68<::>3",
+        "fdee20f7fd677e420742b09989623d68<::>4",
+        "fdee20f7fd677e420742b09989623d68<::>5"
+      ],
+      "multidoc2dial": [
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_1",
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_3",
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_5",
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_7",
+        "3727fab5e9c5b7f9a6e1cbe7935d51bb_9",
+        "bf497c2e0c66955ed04644556da12a5c_1",
+        "bf497c2e0c66955ed04644556da12a5c_3",
+        "bf497c2e0c66955ed04644556da12a5c_5",
+        "bf497c2e0c66955ed04644556da12a5c_7",
+        "bf497c2e0c66955ed04644556da12a5c_9",
+        "6070e3dcc2ef2ec0a8bbba02f8a14233_1",
+        "6070e3dcc2ef2ec0a8bbba02f8a14233_4",
+        "6070e3dcc2ef2ec0a8bbba02f8a14233_6",
+        "6070e3dcc2ef2ec0a8bbba02f8a14233_8",
+        "6070e3dcc2ef2ec0a8bbba02f8a14233_10",
+        "b3c5d441bfed9b85c3f9ea4bd652a3bc_1",
+        "b3c5d441bfed9b85c3f9ea4bd652a3bc_4",
+        "b3c5d441bfed9b85c3f9ea4bd652a3bc_6",
+        "b3c5d441bfed9b85c3f9ea4bd652a3bc_8",
+        "b3c5d441bfed9b85c3f9ea4bd652a3bc_10"
+      ]
+    }
   },
   "benchmarks": {
     "multidoc2dial": {

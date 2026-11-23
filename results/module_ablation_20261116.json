@@ -9,7 +9,7 @@
     ],
     "concurrent_workload": "MultiDoc2Dial generation on GPUs 6,7",
     "ablation_questions_per_benchmark": 20,
-    "cohorts": "results/cooperation_optimization.json for MultiDoc2Dial/MT-RAG; deterministic Loong test sample",
+    "cohorts": "results/concurrency_20261116.json:protocol.cohorts for MultiDoc2Dial/MT-RAG; deterministic Loong test sample",
     "structured": "constructed with training.controlled_tasks.controlled_states, seed 9123, two families, first ten turns each; reference history may contain target values"
   },
   "ablation": {

@@ -58,7 +58,8 @@ class Words:
 
 
 def arguments(units, blocks, budget):
-    policy = json.loads((ROOT / "results/hotpath.json").read_text())["infoflow"]["optimized"]
+    calibration = subprocess.check_output(["git", "show", f"{BASE}:results/hotpath.json"], cwd=ROOT)
+    policy = json.loads(calibration)["infoflow"]["optimized"]
     snapshot = {"costs": {}, "sources": {}, "prefixes": [], "page_size": 64,
                 "available_tokens": 65536}
     price = EvidenceCosts(units, blocks, Words(), snapshot, prompt_tokens=256,
