@@ -207,7 +207,7 @@ MT-RAG、VersionQA 各用自己的 corpus 路径运行 `shared_index`，输出�
 
 ## 端到端评测
 
-以下命令复现 H200 的固定 20 题对照。生成引擎使用物理卡 4，两个辅助编码器共用物理卡 5。各方法使用已部署的权重和贪心解码。MultiDoc2Dial、MT-RAG 用各方法实际生成的历史（P3），VersionQA、Loong 用题目提供的历史（P1）。MT-RAG 官方评分环境由 `scoring.python` 和 `scoring.official_checkout` 指定，H200 的离线 checkout 包含作者脚本以及本地 ROUGE、BERTScore 指标。[固定题单与生成参数](../../results/paired_qa_20261122.json)
+以下命令用当前检出代码运行 H200 原固定 20 题对照。生成引擎使用物理卡 4，两个辅助编码器共用物理卡 5。各方法使用已部署的权重和贪心解码。MultiDoc2Dial、MT-RAG 用各方法实际生成的历史（P3），VersionQA、Loong 用题目提供的历史（P1）。MT-RAG 官方评分环境由 `scoring.python` 和 `scoring.official_checkout` 指定，H200 的离线 checkout 包含作者脚本以及本地 ROUGE、BERTScore 指标。[固定题单与生成参数](../../results/paired_qa_20261122.json)
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4,5 OMP_NUM_THREADS=1
@@ -245,7 +245,7 @@ for protocol in P3 P1; do
 done
 ```
 
-全量对照使用相同种子和协议，去掉 matrix 的 `cohorts`，每次用 `--datasets` 指定一个题集，以对应题数作为 `--limit-turns`。MultiDoc2Dial、MT-RAG、VersionQA 和 Loong 分别为 4,094、205、100 和 323 题。原配置使用 `cda1d04` 的 controller、SGLang 补丁及原始 KV 单价资产，当前配置使用发布版资产。每种方法从冷池开始。[全量配置与单价](../../results/full_qa_20261123.json)
+全量对照使用相同种子和协议，去掉 matrix 的 `cohorts`，每次用 `--datasets` 指定一个题集，以对应题数作为 `--limit-turns`。MultiDoc2Dial、MT-RAG、VersionQA 和 Loong 分别为 4,094、205、100 和 323 题。原配置使用 `cda1d04` 的 controller、SGLang 补丁及原始 KV 单价资产，全量主实验配置使用 `27155ec` 及该次运行的本机校准单价。每种方法从冷池开始。[全量配置与单价](../../results/full_qa_20261123.json)
 
 连续会话可在 matrix 的 `cohorts.test` 中指定真实相邻轮次；当前固定题单保存在 `results/paired_qa_20261122.json` 的 `fixed20.<dataset>.task_ids`。添加 `--cache-pair` 会在 ContextKV 生成后，保持实际证据成员、问题、已生成历史与到达偏移一致，先执行语义排序 Native 和缓存成本排列的 auto，再以 Native 重放 auto 使用的相同来源顺序，并在相同顺序下以 auto 省略未来来源需求。各路分别从冷 KV 开始，使用贪心生成并保留答案一致数。第三路直接读取已选顺序，省去在线报价时间。请求只在内存中暂存，输出 `cache_pair.json`；该配对的 P95 从输入就绪计时，完整队列的 P95 包含检索与辅助编码，质量按各 benchmark 原协议评分。
 

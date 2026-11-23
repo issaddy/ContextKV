@@ -11,7 +11,7 @@
       "parent": "5b1acb3",
       "commit": "3c40ffd",
       "selected": "Calibrated-feature ablation: restore deployed features and remove the extra prefix reward; also correct source family and GQA dispatch.",
-      "core": "Retained configuration in this revision: calibrated semantic frontier and stopping, priced resident-prefix candidates, version index, measured GQA dispatch and control-plane changes."
+      "core": "5e64d5b: calibrated semantic frontier and stopping, priced resident-prefix candidates, version index, measured GQA dispatch and control-plane changes."
     },
     "sampling": "Exclude conversations in the published fixed20. P3 uses first 2 or 3 recorded turns in 8 sessions. P1 samples proportionally by VersionQA category or Loong domain.",
     "quality_scale": "0-100 for QA panels; development set answer labels use 0-1",
@@ -532,6 +532,15 @@
     "mean_abs_seconds_error": 0.155704,
     "max_abs_seconds_error": 0.938497,
     "retained_changed_labels": 0
+  },
+  "publication_versionqa_features_only": {
+    "scope": "3c40ffd with only EvidenceHeads.features from 5b1acb3",
+    "scored": 20,
+    "quality": 85,
+    "complete_p95_s": 13.589,
+    "prefill": 18765,
+    "output": 1478,
+    "sources": 29
   },
   "publication_cohort": {
     "multidoc2dial": {
