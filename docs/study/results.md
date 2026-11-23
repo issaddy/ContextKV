@@ -155,5 +155,4 @@ MultiDoc2Dial 的重复问句主要是简短应答，例如 “yes” 和 “no�
 | 题集 | 参考历史 | 各方法实际生成历史 |
 |---|---|---|
 | MultiDoc2Dial，4,094 题 | [完整指标](../../results/full_multidoc_20261116.json) | [完整指标](../../results/full_multidoc_p3_20261116.json) |
-| MT-RAG Cloud，205 题 | [完整指标](../../results/full_mtrag_20261116.json)，普通 RAG 有 1 题缺失忠实性评分 | [完整指标](../../results/full_mtrag_p3_20261116.json)，旧版按字符串排列轮号，影响 1 个会话 |
 | Loong Set1，323 题 | [完整指标](../../results/full_loong_20261116.json) | — |
