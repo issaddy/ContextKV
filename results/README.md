@@ -13,6 +13,6 @@
 | [指定指标行的容量感知选材](range_projection_20261122.json) | 原文投影的配对结果、独立金融题单和 KV 开销 |
 | [长文标题提及与容量反馈](source_mentions_20261122.json) | 4 GiB 和 8 GiB 下的长文选材、覆盖和开销 |
 | [协同机制](crosslayer_20261118.json) | 来源驻留对选材的影响、未来需求对 Host 回载的影响 |
-| [早期连续会话原配置](cooperation.json) · [协同配置](cooperation_optimization.json) | 同题 P3 对照和固定证据的缓存配对。协同配置的对照值见原配置的 `current` |
+| [早期连续会话原配置](cooperation.json) · [协同配置](cooperation_optimization.json) | 同题 P3 和固定证据缓存配对。普通 RAG 基线见原配置的 `before`，上一版 ContextKV 见 `current` |
 
 [论文实验与结题报告](../docs/study/final_report.md) · [实验结果与数据划分](../docs/study/results.md) · [运行手册](../docs/study/final_runbook.md)

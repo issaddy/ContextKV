@@ -668,25 +668,18 @@ class SharedEvidenceEncoder:
         addresses.extend([None]*len(tail))
         return ids, tuple(addresses), doc_positions, query_position
 
-    def forward_batch(self, query, units):
+    def field_states(self, query, units):
+        """Return source-token states and their addresses for field supervision."""
         import torch
-        ids, addresses, doc_positions, query_position = self.prepare(query, units)
-        input_ids = torch.tensor([ids], device=self.model.device)
-        states = self.model.model(input_ids=input_ids, use_cache=False).last_hidden_state[0]
-        documents, scores, q = project_markers(self.model, states, doc_positions, query_position)
-        return states.float(), documents, scores, addresses, len(ids), q
-
-    def forward_evidence(self, query, units):
-        """Train on the same evidence batches and global cosine scores used online."""
-        import torch
-        outputs = [self.forward_batch(query.evidence_query, batch) for batch in self._batches(query, units)]
-        if not outputs:
-            return (torch.empty((0, self.model.config.hidden_size), device=self.model.device),
-                    torch.empty((0, 512), device=self.model.device),
-                    torch.empty(0, device=self.model.device), (), 0)
-        documents, scores, _ = merge_rankings([(item[1], item[2], item[5]) for item in outputs])
-        return (torch.cat([item[0] for item in outputs]), documents, scores,
-                tuple(address for item in outputs for address in item[3]), sum(item[4] for item in outputs))
+        chunks, sources = [], []
+        for batch in self._batches(query, units):
+            ids, addresses, _, _ = self.prepare(query.evidence_query, batch)
+            input_ids = torch.tensor([ids], device=self.model.device)
+            hidden = self.model.model(input_ids=input_ids, use_cache=False).last_hidden_state[0]
+            indices = [i for i, address in enumerate(addresses) if address is not None]
+            chunks.append(hidden[indices].float())
+            sources.extend(addresses[i] for i in indices)
+        return torch.cat(chunks), sources
 
     def _batches(self, query, units):
         units = tuple(units)

@@ -272,10 +272,7 @@ def field_loss(encoder, query, units, row):
     import torch
     from torch.nn import functional as F
     from adapters.shared_heads import FIELD_ROLES
-    states, embeddings, relevance, addresses, _ = encoder.forward_evidence(query, units)
-    source_indices = [i for i, address in enumerate(addresses) if address is not None]
-    states = states[source_indices]
-    addresses = [addresses[i] for i in source_indices]
+    states, addresses = encoder.field_states(query, units)
     positions = {n.need_id: i for i, n in enumerate(query.task.needs)}
     annotated = row["annotated_need_ids"]
     logits = encoder.heads.field_logits(states, query.need_vectors[[positions[n] for n in annotated]].to(states.device))
@@ -293,7 +290,7 @@ def field_loss(encoder, query, units, row):
         vectors.append(states[indices].mean(0))
         bindings.append(item)
     losses = ([F.cross_entropy(logits.reshape(-1, 3), targets.reshape(-1),
-                              weight=states.new_tensor([.1, 1., 1.]))] if query.task.needs and len(states) else [])
+                              weight=states.new_tensor([.1, 1., 1.]))] if len(states) else [])
     conditions = {condition.condition_id: index for index, condition in enumerate(query.task.conditions)}
     for binding, vector in zip(bindings, vectors):
         if binding.get("condition_id"):
