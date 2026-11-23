@@ -23,6 +23,37 @@
   },
   "benchmarks": {
     "mtrag": {
+      "original": {
+        "protocol": "P3",
+        "declared": 205,
+        "completed": 205,
+        "scored": 205,
+        "quality": 53.611,
+        "complete_p95_ms": 36924.356,
+        "wait_p95_ms": 30070.511,
+        "wait_at_complete_p95_ms": 29615.25,
+        "auxiliary_p95_ms": 3671.143,
+        "engine_p95_ms": 5479.024,
+        "prefill_tokens": 240413,
+        "output_tokens": 24595,
+        "gpu_hit_tokens": 18880,
+        "host_loaded_tokens": 6848,
+        "total_input_tokens": 266141,
+        "gpu_gib_seconds": 22663.83,
+        "host_gib_seconds": 6936.13,
+        "active_kv_peak_tokens": 22592,
+        "online_routes": {
+          "exact": 205,
+          "nonprefix": 0
+        },
+        "conditioned_metric_means": {
+          "RL_F": 0.723001,
+          "RB_llm": 0.634146,
+          "RB_alg": 0.379386
+        },
+        "resident_frontier_selected_turns": 4,
+        "reported_nonprefix_opportunities": 2
+      },
       "contextkv": {
         "protocol": "P3",
         "declared": 205,
@@ -31,6 +62,7 @@
         "quality": 52.523,
         "complete_p95_ms": 30970.714,
         "wait_p95_ms": 25825.661,
+        "wait_at_complete_p95_ms": 25573.159,
         "auxiliary_p95_ms": 2434.074,
         "engine_p95_ms": 5949.857,
         "prefill_tokens": 201834,
@@ -45,8 +77,13 @@
           "exact": 205,
           "nonprefix": 0
         },
+        "conditioned_metric_means": {
+          "RL_F": 0.69923,
+          "RB_llm": 0.616585,
+          "RB_alg": 0.375974
+        },
         "resident_frontier_selected_turns": 3,
-        "resident_nonprefix_opportunities": 0
+        "reported_nonprefix_opportunities": 0
       },
       "ordinary_rag": {
         "protocol": "P3",
@@ -56,6 +93,7 @@
         "quality": 48.333,
         "complete_p95_ms": 73030.57,
         "wait_p95_ms": 58850.19,
+        "wait_at_complete_p95_ms": 54794.925,
         "auxiliary_p95_ms": 1490.009,
         "engine_p95_ms": 23998.364,
         "prefill_tokens": 1103249,
@@ -69,6 +107,40 @@
         "online_routes": {
           "exact": 205,
           "nonprefix": 0
+        },
+        "conditioned_metric_means": {
+          "RL_F": 0.689416,
+          "RB_llm": 0.660976,
+          "RB_alg": 0.308307
+        }
+      },
+      "llamaindex": {
+        "protocol": "P3",
+        "declared": 205,
+        "completed": 205,
+        "scored": 205,
+        "quality": 54.017,
+        "complete_p95_ms": 74833.733,
+        "wait_p95_ms": 61092.682,
+        "wait_at_complete_p95_ms": 58367.006,
+        "auxiliary_p95_ms": 1024.535,
+        "engine_p95_ms": 20342.228,
+        "prefill_tokens": 1102585,
+        "output_tokens": 75987,
+        "gpu_hit_tokens": 18304,
+        "host_loaded_tokens": 5312,
+        "total_input_tokens": 1126201,
+        "gpu_gib_seconds": 45518.94,
+        "host_gib_seconds": 13010.23,
+        "active_kv_peak_tokens": 20160,
+        "online_routes": {
+          "exact": 205,
+          "nonprefix": 0
+        },
+        "conditioned_metric_means": {
+          "RL_F": 0.853066,
+          "RB_llm": 0.668293,
+          "RB_alg": 0.346599
         }
       }
     },
@@ -81,6 +153,7 @@
         "quality": 67,
         "complete_p95_ms": 96423.54,
         "wait_p95_ms": 92047.974,
+        "wait_at_complete_p95_ms": 92229.714,
         "auxiliary_p95_ms": 2733.046,
         "engine_p95_ms": 6088.469,
         "prefill_tokens": 100972,
@@ -94,7 +167,9 @@
         "online_routes": {
           "exact": 100,
           "nonprefix": 0
-        }
+        },
+        "resident_frontier_selected_turns": 2,
+        "reported_nonprefix_opportunities": 0
       },
       "contextkv": {
         "protocol": "P1",
@@ -104,6 +179,7 @@
         "quality": 73,
         "complete_p95_ms": 72562.954,
         "wait_p95_ms": 67696.22,
+        "wait_at_complete_p95_ms": 70546.911,
         "auxiliary_p95_ms": 1727.759,
         "engine_p95_ms": 4469.839,
         "prefill_tokens": 89253,
@@ -119,7 +195,7 @@
           "nonprefix": 0
         },
         "resident_frontier_selected_turns": 1,
-        "resident_nonprefix_opportunities": 0
+        "reported_nonprefix_opportunities": 0
       },
       "ordinary_rag": {
         "protocol": "P1",
@@ -129,6 +205,7 @@
         "quality": 75,
         "complete_p95_ms": 96528.864,
         "wait_p95_ms": 92094.765,
+        "wait_at_complete_p95_ms": 94925.86,
         "auxiliary_p95_ms": 1508.298,
         "engine_p95_ms": 7980.732,
         "prefill_tokens": 252766,
@@ -152,6 +229,7 @@
         "quality": 74,
         "complete_p95_ms": 96573.206,
         "wait_p95_ms": 93082.765,
+        "wait_at_complete_p95_ms": 95088.157,
         "auxiliary_p95_ms": 1625.391,
         "engine_p95_ms": 7117.162,
         "prefill_tokens": 254635,
