@@ -245,6 +245,108 @@
           "nonprefix": 0
         }
       }
+    },
+    "loong": {
+      "original": {
+        "protocol": "P1",
+        "declared": 323,
+        "completed": 323,
+        "scored": 323,
+        "quality": 67.068,
+        "complete_p95_ms": 668843.501,
+        "wait_p95_ms": 660352.601,
+        "wait_at_complete_p95_ms": 662927.964,
+        "auxiliary_p95_ms": 6885.016,
+        "engine_p95_ms": 19283.629,
+        "prefill_tokens": 2666051,
+        "output_tokens": 39376,
+        "gpu_hit_tokens": 8448,
+        "host_loaded_tokens": 24640,
+        "total_input_tokens": 2699139,
+        "gpu_gib_seconds": 60136.12,
+        "host_gib_seconds": 17969.69,
+        "active_kv_peak_tokens": 31040,
+        "online_routes": {
+          "exact": 323,
+          "nonprefix": 0
+        },
+        "resident_frontier_selected_turns": 0,
+        "reported_nonprefix_opportunities": 0
+      },
+      "contextkv": {
+        "protocol": "P1",
+        "declared": 323,
+        "completed": 323,
+        "scored": 323,
+        "quality": 69.591,
+        "complete_p95_ms": 564700.987,
+        "wait_p95_ms": 553193.39,
+        "wait_at_complete_p95_ms": 559096.176,
+        "auxiliary_p95_ms": 4049.57,
+        "engine_p95_ms": 18622.695,
+        "prefill_tokens": 2473818,
+        "output_tokens": 37431,
+        "gpu_hit_tokens": 20032,
+        "host_loaded_tokens": 4288,
+        "total_input_tokens": 2498138,
+        "gpu_gib_seconds": 51549.01,
+        "host_gib_seconds": 14597.79,
+        "active_kv_peak_tokens": 31488,
+        "online_routes": {
+          "exact": 323,
+          "nonprefix": 0
+        },
+        "resident_frontier_selected_turns": 0,
+        "reported_nonprefix_opportunities": 0
+      },
+      "ordinary_rag": {
+        "protocol": "P1",
+        "declared": 323,
+        "completed": 323,
+        "scored": 323,
+        "quality": 31.455,
+        "complete_p95_ms": 555687.968,
+        "wait_p95_ms": 550672.239,
+        "wait_at_complete_p95_ms": 551612.598,
+        "auxiliary_p95_ms": 9501.42,
+        "engine_p95_ms": 8597.312,
+        "prefill_tokens": 1524480,
+        "output_tokens": 33227,
+        "gpu_hit_tokens": 22656,
+        "host_loaded_tokens": 2688,
+        "total_input_tokens": 1549824,
+        "gpu_gib_seconds": 49128.65,
+        "host_gib_seconds": 13690.43,
+        "active_kv_peak_tokens": 27200,
+        "online_routes": {
+          "exact": 323,
+          "nonprefix": 0
+        }
+      },
+      "llamaindex": {
+        "protocol": "P1",
+        "declared": 323,
+        "completed": 323,
+        "scored": 323,
+        "quality": 36.495,
+        "complete_p95_ms": 551356.092,
+        "wait_p95_ms": 543963.911,
+        "wait_at_complete_p95_ms": 547020.036,
+        "auxiliary_p95_ms": 9552.146,
+        "engine_p95_ms": 8474.181,
+        "prefill_tokens": 1492234,
+        "output_tokens": 31205,
+        "gpu_hit_tokens": 24704,
+        "host_loaded_tokens": 14976,
+        "total_input_tokens": 1531914,
+        "gpu_gib_seconds": 49221.56,
+        "host_gib_seconds": 13647.49,
+        "active_kv_peak_tokens": 25152,
+        "online_routes": {
+          "exact": 323,
+          "nonprefix": 0
+        }
+      }
     }
   },
   "versionqa_vs_external_baselines": {
