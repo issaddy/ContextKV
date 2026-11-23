@@ -56,6 +56,7 @@ class SharedEvidenceState:
     title_note_budget: str = ""
     version_catalogue: dict = field(default_factory=dict)
     missing_version_identifiers: tuple[str, ...] = ()
+    symbol_version_presence: dict = field(default_factory=dict)
     costs: object = None
     computations: tuple = ()
     table_parts: tuple = ()
@@ -224,16 +225,39 @@ class SharedEvidenceProvider:
                 for family, version in versions.versions if (not families or family in families)
                 and version in wanted_versions)
             wanted_versions = tuple(dict.fromkeys((*wanted_versions, *filter(None, related)))) if intent.mode == "compare" else tuple(filter(None, related))
+        elif intent.mode == "compare" and len(wanted_versions) == 1:
+            predecessors = tuple(
+                versions.adjacent(family, version, "before")
+                for family, version in versions.versions
+                if (not families or family in families) and version in wanted_versions
+            )
+            wanted_versions = tuple(dict.fromkeys((*filter(None, predecessors), *wanted_versions)))
         # The catalogue head resolves as_of text to version IDs during the shared
         # query pass; natural-language date spans are not sortable timestamps.
-        version_keys = versions.legal_keys(families=families, versions=wanted_versions,
-            current=intent.mode == "current")
-        if intent.mode in {"explicit", "as_of"} and not wanted_versions:
+        has_catalogue_dates = any(row.get("valid_from") or row.get("valid_to") for row in catalogue)
+        if intent.mode == "as_of" and not wanted_versions and intent.time_refs and has_catalogue_dates:
             version_keys = ()
+        else:
+            restrict_current = intent.mode == "current" and not wanted_versions
+            version_keys = versions.legal_keys(families=families, versions=wanted_versions,
+                current=restrict_current)
+            if restrict_current and version_keys:
+                # If a question names specific technical symbols absent from current
+                # editions (e.g. a historical issue ID or removed symbol), include
+                # matching earlier editions within the legal family scope.
+                candidate_families = families or tuple(dict.fromkeys(f for f, _ in versions.versions))
+                missing_in_current = versions.missing_identifiers(question, version_keys, candidate_families)
+                if missing_in_current:
+                    expanded = versions.legal_keys(families=families, versions=(), current=False)
+                    version_keys = tuple(dict.fromkeys((*version_keys, *expanded)))
         legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
         legal_set = set(legal)
-        previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
-                               if span.source_key in legal_set)
+        seen_spans = {}
+        for turn in reversed(snapshot.raw_history[-3:]):
+            for span in turn.source_spans:
+                if span.source_key in legal_set:
+                    seen_spans.setdefault((span.source_key, span.start, span.end), span)
+        previous_spans = tuple(seen_spans.values())
         declared = supplied_blocks is not None or bool(families)
         complete_population = (coverage_scope == "all_supplied_documents"
             or any(need.scope == "all_supplied_documents" for need in query.task.needs)
@@ -293,9 +317,17 @@ class SharedEvidenceProvider:
                 pool = EvidencePool(units, corpus.resolve(keys))
             if previous_spans:
                 prior = directory.full_scope(tuple(dict.fromkeys(span.source_key for span in previous_spans)))
-                observed = tuple(unit for unit in prior.units if any(
-                    origin.source_key == span.source_key and origin.start < span.end and span.start < origin.end
-                    for origin in unit.source_spans for span in previous_spans))
+                observed = []
+                seen_observed = set()
+                for span in previous_spans:
+                    for unit in prior.units:
+                        if unit.unit_id in seen_observed:
+                            continue
+                        if any(origin.source_key == span.source_key and origin.start < span.end and span.start < origin.end
+                               for origin in unit.source_spans):
+                            seen_observed.add(unit.unit_id)
+                            observed.append(unit)
+                observed = tuple(observed[:max(4, self.evidence_batch // 2)])
                 historical_ids = tuple(unit.unit_id for unit in observed)
                 roots = (*units, *observed)
                 units = self._closure(roots, {unit.unit_id: unit for unit in (*units, *prior.units)})
@@ -303,15 +335,19 @@ class SharedEvidenceProvider:
         if intent.mode == "compare" and len(wanted_versions) >= 2:
             selected_spans = tuple(span for unit in units for span in unit.source_spans)
             pairs = []
-            for family in dict.fromkeys(family for family, _ in versions.versions):
-                ordered = [version for name, version in versions.versions
-                           if name == family and version in wanted_versions]
-                ordered.sort(key=lambda version: (versions.versions[family, version]["order"],
-                    versions.versions[family, version]["valid_from"] or "", version))
+            for family, editions in versions.editions.items():
+                ordered = [version for version in editions if version in wanted_versions]
                 for before, after in zip(ordered, ordered[1:]):
                     pairs.extend(versions.paired_units(family, before, after, selected_spans))
             if pairs:
                 units = tuple({unit.unit_id: unit for unit in (*pairs, *units)}.values())
+                keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
+                pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
+        elif not full and intent.mode in {"compare", "history"} and len(wanted_versions) < 2:
+            candidate_spans = tuple(span for unit in units for span in unit.source_spans)
+            evo_units = versions.evolution_units(question, candidate_spans, families=families)
+            if evo_units:
+                units = tuple({unit.unit_id: unit for unit in (*evo_units, *units)}.values())
                 keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
                 pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
         if not full:
@@ -319,7 +355,7 @@ class SharedEvidenceProvider:
             query.task = replace(query.task, effective_source_scope=tuple(block.key for block in pool.source_blocks))
         document_index = (parsed_documents if parsed_documents is not None and document_blocks == supplied_blocks
                           else DocumentIndex.from_blocks(document_blocks))
-        units = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in units)
+        units = self._with_body_tokens(units)
         usage = dict(query.usage)
         by_id = {unit.unit_id: unit for unit in units}
         initial_ids = {unit.unit_id for unit in (units if full else units[:self.evidence_batch])}
@@ -370,7 +406,7 @@ class SharedEvidenceProvider:
             fresh = tuple(replace(unit,
                 dependencies=tuple(dict.fromkeys(aliases[dependency] for dependency in unit.dependencies)))
                 for unit in (*binding_units, *outside) if aliases[unit.unit_id] == unit.unit_id)
-            fresh = tuple(replace(unit, body_tokens=len(self.template.tokenizer.encode(unit.text))) for unit in fresh)
+            fresh = self._with_body_tokens(fresh)
             evidence = replace(evidence, unit_ids=tuple(unit.unit_id for unit in retained),
                 embeddings=evidence.embeddings[positions], relevance=evidence.relevance[positions],
                 bindings=tuple(binding for binding in evidence.bindings
@@ -390,6 +426,8 @@ class SharedEvidenceProvider:
         if wanted_versions and version_keys and state.version_catalogue:
             state.missing_version_identifiers = versions.missing_identifiers(
                 question, version_keys, state.version_catalogue)
+        if state.version_catalogue and (intent.mode in {"compare", "history"} or not wanted_versions):
+            state.symbol_version_presence = versions.symbol_version_presence(question, families)
         if supplied_blocks is not None:
             state.source_headers = headers
             state.document_titles = titles
@@ -415,6 +453,17 @@ class SharedEvidenceProvider:
                         settings.get("window_tokens", 32768) - len(prompt.input_ids) - output)
         screen = available if available_kv_tokens is None else min(available, available_kv_tokens - output)
         return available, screen
+
+    def _with_body_tokens(self, units):
+        missing = [i for i, unit in enumerate(units) if not unit.body_tokens and unit.text]
+        if not missing:
+            return tuple(units)
+        texts = [units[i].text for i in missing]
+        counts = [len(ids) for ids in self.template.tokenizer(
+            texts, add_special_tokens=False, return_attention_mask=False)["input_ids"]]
+        updates = dict(zip(missing, counts))
+        return tuple(replace(unit, body_tokens=updates[i]) if i in updates else unit
+                     for i, unit in enumerate(units))
 
     @staticmethod
     def _closure(roots, by_id):
@@ -473,17 +522,81 @@ class SharedEvidenceProvider:
     async def expand(self, state):
         return await run_retrieval_worker(self._expand_state, state)
 
+    @staticmethod
+    def rank_pending_units(state):
+        """Order pending units by unresolved Need terms, missing identifiers, and structural/version gaps."""
+        import re
+        from adapters.version_structure import technical_identifiers
+        if not state.pending_units:
+            return ()
+        question = state.query.task.raw_question
+        symbols = technical_identifiers(question)
+        pool_text = "\n".join(u.text for u in state.pool.units)
+        missing_pats = [
+            re.compile(r"(?<!\w)" + re.escape(s) + r"(?!\w)", re.IGNORECASE)
+            for s in symbols
+            if not re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", pool_text, re.IGNORECASE)
+        ]
+        all_sym_pats = [re.compile(r"(?<!\w)" + re.escape(s) + r"(?!\w)", re.IGNORECASE) for s in symbols]
+        open_terms = set()
+        conditions_by_id = {c.condition_id: c for c in state.query.task.conditions}
+        for need in state.open_needs:
+            for fragment in (state.query.text(need.anchor_spans), state.query.text(need.subject_refs)):
+                open_terms.update(w.lower() for w in re.findall(r"[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]{2,}", fragment))
+            for cid in need.condition_ids:
+                cond = conditions_by_id[cid]
+                for ref in (*((cond.key_span,) if cond.key_span else ()), *cond.value_spans):
+                    open_terms.update(w.lower() for w in re.findall(
+                        r"[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]{2,}", state.query.text((ref,))))
+        selected_set = set(state.selected_ids)
+        selected_docs = {
+            span.source_key
+            for u in state.pool.units if u.unit_id in selected_set
+            for span in u.source_spans
+        }
+        selected_fams = {
+            u.document_family for u in state.pool.units if u.unit_id in selected_set and u.document_family
+        }
+        selected_editions = {
+            (u.document_family, span.source_key.version)
+            for u in state.pool.units if u.unit_id in selected_set
+            for span in u.source_spans
+        }
+        want_version_diversity = state.query.task.version_intent.mode in {"compare", "history"}
+
+        def gap_priority(item):
+            idx, unit = item
+            score = 1.0 / (idx + 8.0)
+            body = unit.heading + "\n" + unit.text
+            if missing_pats:
+                score += 2.0 * sum(1 for p in missing_pats if p.search(body))
+            if all_sym_pats:
+                score += 0.35 * sum(1 for p in all_sym_pats if p.search(body))
+            if open_terms:
+                lower = body.lower()
+                score += 0.25 * min(4, sum(1 for t in open_terms if t in lower))
+            if any(span.source_key in selected_docs for span in unit.source_spans):
+                score += 0.30
+            if (want_version_diversity and unit.document_family in selected_fams
+                    and any((unit.document_family, span.source_key.version) not in selected_editions
+                            for span in unit.source_spans)):
+                score += 0.40
+            return (-score, idx)
+
+        return tuple(unit for _, unit in sorted(enumerate(state.pending_units), key=gap_priority))
+
     def _expand_state(self, state):
         existing = set(state.evidence.unit_ids)
         all_units = {unit.unit_id: unit for unit in (*state.pool.units, *state.pending_units)}
-        fresh = tuple(unit for unit in self._closure(state.pending_units[:self.evidence_batch], all_units)
+        ranked_pending = self.rank_pending_units(state)
+        fresh = tuple(unit for unit in self._closure(ranked_pending[:self.evidence_batch], all_units)
                       if unit.unit_id not in existing)
         new = self.evidence_encoder.encode(state.query, fresh)
         evidence = state.evidence.merge(new)
         units = (*state.pool.units, *fresh)
         fresh_ids = {unit.unit_id for unit in fresh}
         result = replace(state, evidence=evidence, pool=replace(state.pool, units=units), selected_ids=(), costs=None,
-                         pending_units=tuple(unit for unit in state.pending_units if unit.unit_id not in fresh_ids))
+                         pending_units=tuple(unit for unit in ranked_pending if unit.unit_id not in fresh_ids))
         self._finish_state(result)
         return result
 

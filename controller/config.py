@@ -16,10 +16,10 @@ from .cooperative_request import SYSTEM
 
 def load_kv_policy(settings):
     asset = json.loads(Path(settings["kv_quality_asset"]).read_text())
+    seconds_price = settings.get("prices", {}).get("seconds", 0.0)
+    quality_price_ms = settings.get("quality_price_ms", 1000 / seconds_price if seconds_price > 0 else 0.0)
     return {"recompute_ratio": asset["recompute_ratio"], "quality_loss": asset["quality_loss"],
-            "costs": asset["costs"],
-            "quality_price_ms": settings["quality_price_ms"] if "quality_price_ms" in settings
-            else 1000 / settings["prices"]["seconds"]}
+            "costs": asset["costs"], "quality_price_ms": quality_price_ms}
 
 
 @dataclass(frozen=True)

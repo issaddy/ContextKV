@@ -10,8 +10,17 @@ from adapters.document_compute import DocumentIndex, _span, _unique_spans
 
 _IDENTIFIER = re.compile(
     r"(?<!\w)(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+|[A-Z]{2,}-\d+|"
-    r"[A-Z][A-Z\d]*(?:_[A-Z\d]+)+|[A-Z][a-z]+(?:[A-Z][A-Za-z\d]*)+)(?!\w)"
+    r"[A-Z][A-Z\d]*(?:_[A-Z\d]+)+|[A-Za-z][a-z]+(?:[A-Z][A-Za-z\d]*)+|"
+    r"[a-z][\w-]*\.(?:js|ts|py|java|scala|go|rs|sh|json|yaml|yml|xml|md))(?!\w)"
 )
+
+
+def technical_identifiers(text: str) -> tuple[str, ...]:
+    """Extract literal code, config, file, or issue identifiers, excluding product names like Node.js."""
+    return tuple(
+        symbol for symbol in dict.fromkeys(_IDENTIFIER.findall(text))
+        if not re.fullmatch(r"[A-Z][a-z]+\.js", symbol)
+    )
 
 
 def catalogue_versions(catalogue, families=()):
@@ -52,9 +61,43 @@ class VersionIndex:
         self.blocks, self.metadata = blocks, metadata
         self.parts, self.versions = parts, versions
         self.latest_orders = {}
-        for (family, _), info in versions.items():
+        families = {}
+        for (family, version), info in versions.items():
+            families.setdefault(family, []).append(version)
             if info["order"]:
                 self.latest_orders[family] = max(self.latest_orders.get(family, ()), info["order"])
+        self.editions = {
+            family: tuple(sorted(
+                members,
+                key=lambda ver: (versions[family, ver]["order"], versions[family, ver]["valid_from"] or "", ver),
+            ))
+            for family, members in families.items()
+        }
+        self.cumulative_families = self._detect_cumulative_families()
+
+    def _detect_cumulative_families(self):
+        cumulative = set()
+        for family, ordered in self.editions.items():
+            if len(ordered) <= 1:
+                cumulative.add(family)
+                continue
+            overlaps = []
+            for v1, v2 in zip(ordered, ordered[1:]):
+                s1 = {a for a in self.parts.get((family, v1), ())
+                      if a[0] == "section" and a not in {("section", "body"), ("section", "preamble")}}
+                s2 = {a for a in self.parts.get((family, v2), ())
+                      if a[0] == "section" and a not in {("section", "body"), ("section", "preamble")}}
+                if s1 or s2:
+                    overlaps.append(len(s1 & s2) / max(1, len(s1 | s2)))
+                else:
+                    t1 = {w.lower() for k in self.versions[family, v1]["keys"]
+                          for w in re.findall(r"[A-Za-z_]\w{3,}", self.blocks[k].text)}
+                    t2 = {w.lower() for k in self.versions[family, v2]["keys"]
+                          for w in re.findall(r"[A-Za-z_]\w{3,}", self.blocks[k].text)}
+                    overlaps.append(len(t1 & t2) / max(1, len(t1 | t2)))
+            if sum(overlaps) / len(overlaps) >= 0.50:
+                cumulative.add(family)
+        return frozenset(cumulative)
 
     @classmethod
     def from_blocks(cls, blocks, metadata=None, documents=None):
@@ -104,7 +147,7 @@ class VersionIndex:
                     continue
                 if info["valid_to"] is not None and as_of >= info["valid_to"]:
                     continue
-            if current and not versions and as_of is None:
+            if current and not versions and as_of is None and family in self.cumulative_families:
                 if info["current"] is False:
                     continue
                 if info["current"] is None:
@@ -114,10 +157,129 @@ class VersionIndex:
             selected.extend(info["keys"])
         return tuple(selected)
 
+    def _specific_symbols(self, question, family, editions):
+        """Keep technical identifiers that discriminate sections rather than naming the whole product."""
+        symbols = technical_identifiers(question)
+        fam_tokens = set(re.findall(r"[a-z\d]+", family.lower()))
+        specific = []
+        for symbol in symbols:
+            sym_parts = [p for p in re.findall(r"[a-z\d]+", symbol.lower()) if p not in {"js", "py", "md", "pdf"}]
+            if sym_parts and all(p in fam_tokens or (p + "js") in fam_tokens for p in sym_parts):
+                continue
+            literal = re.compile(r"(?<!\w)" + re.escape(symbol) + r"(?!\w)", re.IGNORECASE)
+            editions_hit = 0
+            max_passage_share = 0.0
+            for ver in editions:
+                keys = self.versions[family, ver]["keys"]
+                hits = sum(1 for k in keys if literal.search(self.blocks[k].text))
+                if hits:
+                    editions_hit += 1
+                if len(keys) >= 4:
+                    max_passage_share = max(max_passage_share, hits / len(keys))
+            if editions_hit and max_passage_share <= 0.35:
+                idf = 1.0 + len(editions) / editions_hit
+                specific.append((symbol, literal, idf))
+        return tuple(specific)
+
+    def symbol_version_presence(self, question, families=()):
+        """Report ordered supplied editions containing or preceding queried technical identifiers."""
+        target_families = set(families) if families else set(self.editions)
+        presence = {}
+        for family in sorted(target_families):
+            editions = self.editions.get(family, ())
+            if len(editions) <= 1:
+                continue
+            for symbol, literal, _ in self._specific_symbols(question, family, editions):
+                present, absent_before = [], []
+                seen_present = False
+                for ver in editions:
+                    has = any(literal.search(self.blocks[k].text) for k in self.versions[family, ver]["keys"])
+                    if has:
+                        present.append(ver)
+                        seen_present = True
+                    elif not seen_present:
+                        absent_before.append(ver)
+                if present and absent_before:
+                    presence[symbol] = {
+                        "family": family,
+                        "earliest_supplied_version": present[0],
+                        "present_versions": present,
+                        "absent_earlier_versions": absent_before,
+                    }
+        return presence
+
+    def evolution_units(self, question, candidate_spans, families=(), max_pairs=3):
+        """Locate version boundary pairs where queried symbols or retrieved sections appear or change."""
+        from controller.schema import EvidenceUnit
+        target_families = set(families) if families else set(self.cumulative_families)
+        if not target_families:
+            return ()
+        matched_addresses = {}
+        for family in sorted(target_families):
+            editions = self.editions.get(family, ())
+            if len(editions) <= 1:
+                continue
+            patterns = self._specific_symbols(question, family, editions)
+            scored_addrs = {}
+            for ver in editions:
+                for addr, part_list in self.parts.get((family, ver), {}).items():
+                    if addr[0] != "section" or addr in {("section", "body"), ("section", "preamble")}:
+                        continue
+                    for part in part_list:
+                        if len(part.text) > 4000:
+                            continue
+                        sym_score = sum(idf for _, pat, idf in patterns if pat.search(part.text))
+                        span_hits = sum(
+                            1 for src in part.spans for cand in candidate_spans[:12]
+                            if src.source_key == cand.source_key
+                            and src.start < cand.end and cand.start < src.end
+                        )
+                        if sym_score > 0 or span_hits > 0:
+                            scored_addrs[addr] = max(scored_addrs.get(addr, (0.0, 0)), (sym_score, span_hits))
+            if scored_addrs:
+                top_addrs = [a for a, _ in sorted(scored_addrs.items(), key=lambda x: x[1], reverse=True)[:2]]
+                matched_addresses[family] = (editions, top_addrs)
+
+        grouped = {}
+        pairs_added = 0
+        for family, (editions, top_addrs) in matched_addresses.items():
+            for addr in top_addrs:
+                prev_text = None
+                prev_parts = ()
+                for ver in editions:
+                    cur_parts = tuple(p for p in self.parts.get((family, ver), {}).get(addr, ()) if len(p.text) <= 4000)
+                    cur_text = "\n".join(re.sub(r"\s+", " ", p.text.strip()) for p in cur_parts) if cur_parts else None
+                    if cur_text is not None and cur_text != prev_text:
+                        chosen_parts = (*prev_parts[:1], *cur_parts[:1])
+                        members = []
+                        for part in chosen_parts:
+                            for span in part.spans:
+                                block = self.blocks[span.source_key]
+                                base = block.span[0] if block.span else 0
+                                identity = f"version:{span.span_id}"
+                                grouped.setdefault(identity, [span, block.text[span.start - base:span.end - base], set()])
+                                members.append(identity)
+                        for identity in members:
+                            grouped[identity][2].update(m for m in members if m != identity)
+                        pairs_added += 1
+                        if pairs_added >= max_pairs:
+                            break
+                    if cur_text is not None:
+                        prev_text, prev_parts = cur_text, cur_parts
+                if pairs_added >= max_pairs:
+                    break
+        return tuple(
+            EvidenceUnit(
+                identity, (span,), text, " / ".join((family, span.source_key.version)),
+                dependencies=tuple(sorted(deps)), document_family=family,
+            )
+            for identity, (span, text, deps) in grouped.items()
+        )
+
     def missing_identifiers(self, question, version_keys, families):
         """Find named symbols documented in the family but absent from the requested editions."""
         missing = []
-        for symbol in dict.fromkeys(_IDENTIFIER.findall(question)):
+        for symbol in technical_identifiers(question):
             literal = re.compile(r"(?<!\w)" + re.escape(symbol) + r"(?!\w)", re.IGNORECASE)
             if any(literal.search(self.blocks[key].text) for key in version_keys):
                 continue

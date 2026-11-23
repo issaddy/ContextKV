@@ -18,7 +18,7 @@
 
 `start/end` 是实际输入 token 的半开区间，块只包含稳定原文。来源 ID 由文档、版本和原文地址组成。需求随会话的下一次提交更新；`/context/session/close` 在会话结束时释放该会话的需求优先级。当前编译的原文顺序与后续需求共享字面前缀时，需求附带 `native_prefix_end`，同时登记 Native 的前缀消费者。
 
-`/context/evidence/state` 同步会话的保留来源，一次接收当前候选地址，返回独立块的 GPU/Host 驻留、可用 Native 前缀顺序和实测费用系数。接口不编译提示或分配 KV。控制器用同一快照为候选集合计价，SGLang 在实际提交时按当前驻留完成执行选择。
+`/context/evidence/state` 一次接收当前候选地址，返回独立块的 GPU/Host 驻留、可用 Native 前缀的连续驻留页数、排队深度和实测费用系数，并为当前会话登记短期软租约。控制器用同一快照为候选集合计价，SGLang 在请求提交时按当前驻留选择执行路径并移交等待队列保护优先级。
 
 相同 `cache_scope` 内，独立块按实际 token 前缀共享原生页；训练冷分支使用独立 scope，暖分支共用预建块所在的 scope。请求私有重算不会写回这些共享页。
 
@@ -33,7 +33,7 @@
 - agent 和引擎共用 `kv_cost.py`。自动执行先检查 Native 前缀以外是否有完整驻留的独立块，再按当前请求的成本决定是否复用。未来来源需求影响分层保留。两条路径共用的输出长度估计取自正常结束的生成。
 - Native 预填充在模型执行器上计时，每个纯 Native 扩展批累计一次 CUDA 耗时和实际执行的 token 数，覆盖 CUDA Graph 与 eager 路径。HiCache 回载按已完成的搬运时间和 KV token 数计价。选材与停止决策共用这两项单价，冷启动评测时清空累计值。
 
-`meta_info.contextkv_compute` 返回真实输入/输出 token、prefill、GPU 命中、Host 回载、完整服务耗时及必要费用均值。内部工作段长度与语义输入长度分别计量；不记录正文或逐 token 轨迹。
+`meta_info.contextkv_compute` 返回真实输入/输出 token、prefill、GPU 命中、Host 回载、完整服务耗时及必要费用均值。内部工作段长度与语义输入长度分别计量。
 
 ## 准备
 

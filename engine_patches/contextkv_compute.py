@@ -32,6 +32,10 @@ class ComputeRuntime:
         # Each source has one independent block (None) and zero or more (salt, prefix) layouts.
         self.source_layouts = {}
         self.prioritized_nodes = set()
+        self.highest_demand_priority = 0
+        self.quote_leases = {}
+        self.lease_ttl = 0.5
+        self.extend_steps = 0
         self.gpu_token_seconds = self.host_token_seconds = 0.0
         self.observed_at = time.monotonic()
         self.pool_used = self._pool_used()
@@ -60,29 +64,59 @@ class ComputeRuntime:
         if action == 'evidence_state':
             scope = data.get('cache_scope', 'shared')
             wanted = set(data['source_ids'])
+            page = self.cache.page_size
             sources, prefixes = {}, []
+            leased_candidates = []
             for address in wanted:
                 source_id = scope, address
                 layouts = self.source_layouts.get(source_id, {})
                 node, _ = layouts.get(None, (None, 0))
-                sources[address] = self._pages(node)
-                for layout, (node, end) in layouts.items():
+                src_pages = self._pages(node)
+                sources[address] = src_pages
+                if src_pages['gpu_tokens'] > 0 and node is not None:
+                    leased_candidates.append((src_pages['gpu_tokens'], node))
+                for layout, (node, end) in tuple(layouts.items()):
                     if layout is None:
+                        continue
+                    if self.cache.tree_core._node_arena.get(node) is None:
+                        del layouts[layout]
                         continue
                     namespace, chain = layout
                     if namespace == data.get('cache_namespace') and wanted.issuperset(chain):
-                        pages = self._pages(node)
-                        gpu = min(pages['gpu_tokens'], end)
-                        host = min(pages['host_tokens'], end-gpu)
-                        if gpu + host and gpu + host >= end // self.cache.page_size * self.cache.page_size:
+                        aligned_end = end // page * page
+                        if aligned_end <= 0:
+                            continue
+                        pages = self._pages(node, limit=aligned_end)
+                        gpu = pages['gpu_tokens']
+                        host = pages['host_tokens']
+                        if gpu + host > 0:
                             prefixes.append(dict(source_ids=chain, gpu_tokens=gpu, host_tokens=host,
                                                  unpinned_nodes=pages['unpinned_nodes']))
+                            if gpu > 0:
+                                leased_candidates.append((gpu, node))
+            lease_owner = data.get('session_id') or data.get('cache_namespace')
+            now = time.monotonic()
+            expired = [k for k, (exp, _) in self.quote_leases.items() if exp <= now]
+            dirty = bool(expired)
+            for k in expired:
+                del self.quote_leases[k]
+            if leased_candidates and lease_owner is not None:
+                leased_candidates.sort(key=lambda item: item[0], reverse=True)
+                self.quote_leases[scope, lease_owner] = (now + self.lease_ttl,
+                                                         {nid for _, nid in leased_candidates[:4]})
+                dirty = True
+            if dirty:
+                self._refresh_priorities()
             return dict(sources=sources, prefixes=prefixes, costs=dict(self.costs),
                         queue_depth=len(self.scheduler.waiting_queue),
-                        page_size=self.cache.page_size, gpu_capacity_tokens=self.allocator.size,
+                        page_size=page, gpu_capacity_tokens=self.allocator.size,
                         available_tokens=self.allocator.available_size()+self.cache.evictable_size())
         if action == 'close_session':
-            if self.demands.pop(data['session_id'], None):
+            removed_demand = self.demands.pop(data['session_id'], None) is not None
+            removed_leases = [k for k in self.quote_leases if k[1] == data['session_id']]
+            for k in removed_leases:
+                del self.quote_leases[k]
+            if removed_demand or removed_leases:
                 self._refresh_priorities()
             if (scope := data.get('host_scope')) is not None:
                 self._demote_scope(scope)
@@ -101,6 +135,9 @@ class ComputeRuntime:
                 self.demands.clear()
                 self.source_layouts.clear()
                 self.prioritized_nodes.clear()
+                self.quote_leases.clear()
+                self.highest_demand_priority = 0
+                self.extend_steps = 0
                 self.gpu_token_seconds = self.host_token_seconds = 0.0
                 self.observed_at, self.pool_used = time.monotonic(), self._pool_used()
                 self.gpu_peak_used_tokens = self.pool_used[0]
@@ -120,21 +157,32 @@ class ComputeRuntime:
     def _key(self, source_id, ids):
         return RadixKey(array('q', ids), cache_salt=BLOCK_NAMESPACE + source_id[0])
 
-    def _pages(self, node_id):
-        """Count physical residency and identify reclaimable pages on one Radix path."""
+    def _pages(self, node_id, limit=None):
+        """Count contiguous physical residency from root to node and identify reclaimable pages."""
         node = self.cache.tree_core._node_arena.get(node_id)
+        path = []
+        while node is not None and node.parent is not None:
+            path.append(node)
+            node = node.parent
         gpu = host = 0
         unpinned_nodes, host_nodes = {}, {}
-        while node is not None and node.parent is not None:
-            component = node.component_data[0]
-            if component.value is not None:
-                gpu += len(component.value)
+        in_host = False
+        for current in reversed(path):
+            if limit is not None and gpu + host >= limit:
+                break
+            component = current.component_data[0]
+            if not in_host and component.value is not None:
+                span = len(component.value)
+                gpu += span if limit is None else min(span, limit - gpu)
                 if component.lock_ref == 0:
-                    unpinned_nodes[node.id] = len(component.value)
-            elif component.host_value is not None and node.write_through_pending_id is None:
-                host_nodes[node.id] = len(component.host_value)
-                host += host_nodes[node.id]
-            node = node.parent
+                    unpinned_nodes[current.id] = span
+            elif component.host_value is not None and current.write_through_pending_id is None:
+                in_host = True
+                span = len(component.host_value)
+                host += span if limit is None else min(span, limit - gpu - host)
+                host_nodes[current.id] = span
+            else:
+                break
         return dict(gpu_tokens=gpu, host_tokens=host, unpinned_nodes=unpinned_nodes, host_nodes=host_nodes)
 
     def _match(self, source_id, ids):
@@ -215,7 +263,8 @@ class ComputeRuntime:
             allocation = page_tokens(work + output_limit, page) + len(host_pages) + new_gpu_pins
             if work > self.scheduler.max_req_input_len or allocation > self.allocator.available_size() + self.cache.evictable_size():
                 mode = 'exact'
-        state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool)
+        state = RequestState(req.rid, metadata, ids, [], mode, req, self.pool,
+                             extend_epoch_at_prefill=self.extend_steps)
         state.route_costs = {"exact": exact, "infoflow": approximate, "nonprefix_opportunity": beyond_prefix}
         state.runtime = self
         state.events = []
@@ -405,12 +454,35 @@ class ComputeRuntime:
             if priority:
                 highest = max(highest, priority)
                 self.prioritized_nodes.add(node_id)
+        now = time.monotonic()
+        for k in [k for k, (exp, _) in self.quote_leases.items() if exp <= now]:
+            del self.quote_leases[k]
+        if self.quote_leases:
+            lease_priority = max(1, highest) + 1
+            arena = self.cache.tree_core._node_arena
+            for _, leaf_ids in self.quote_leases.values():
+                for leaf_id in leaf_ids:
+                    node = arena.get(leaf_id)
+                    while node is not None and node.parent is not None:
+                        if node.priority < lease_priority:
+                            node.priority = lease_priority
+                        self.prioritized_nodes.add(node.id)
+                        node = node.parent
+            highest = max(highest, lease_priority)
+        self.highest_demand_priority = highest
 
         # Committed reads are nearer than predicted reuse. Their pages remain reclaimable.
         for request in self.scheduler.waiting_queue:
-            node = self.cache.tree_core._node_arena.get(getattr(request, 'contextkv_committed_node', None))
+            self.protect_waiting_nodes(getattr(request, 'contextkv_committed_nodes', ()))
+
+    def protect_waiting_nodes(self, node_ids):
+        floor = self.highest_demand_priority + 1
+        arena = self.cache.tree_core._node_arena
+        for node_id in node_ids:
+            node = arena.get(node_id)
             while node is not None and node.parent is not None:
-                node.priority = highest + 1
+                if node.priority < floor:
+                    node.priority = floor
                 self.prioritized_nodes.add(node.id)
                 node = node.parent
 
@@ -465,12 +537,17 @@ class ComputeRuntime:
         self.publish_blocks(state)
         self.unpin(state)
         phase_ms = {}
+        decode_step_ms, decode_steps = 0.0, 0
         for phase, first, last, tokens in state.events:
             elapsed = first.elapsed_time(last)
             if phase == 'batch_prefill':
                 self.native_prefill_tokens += tokens
                 self.native_prefill_ms += elapsed
                 self.costs['prefill_token_ms'] = self.native_prefill_ms / self.native_prefill_tokens
+                continue
+            if phase == 'infoflow_decode_step':
+                decode_step_ms += elapsed
+                decode_steps += max(1, tokens)
                 continue
             phase_ms[phase] = phase_ms.get(phase, 0.0) + elapsed
             if tokens:
@@ -487,8 +564,13 @@ class ComputeRuntime:
             self.costs[name] = .8 * self.costs.get(name, output_count) + .2 * output_count
         if output_count > 1:
             name = state.mode + '_decode_token_ms'
-            measured = (stats.completion_time - stats.prefill_finished_time) * 1000 / (output_count - 1)
-            self.costs[name] = .8 * self.costs.get(name, measured) + .2 * measured
+            if state.mode == 'infoflow' and decode_steps > 0:
+                measured = decode_step_ms / decode_steps
+                self.costs[name] = .8 * self.costs.get(name, measured) + .2 * measured
+            else:
+                if self.extend_steps == state.extend_epoch_at_prefill or name not in self.costs:
+                    measured = (stats.completion_time - stats.prefill_finished_time) * 1000 / (output_count - 1)
+                    self.costs[name] = .8 * self.costs.get(name, measured) + .2 * measured
         if state.mode == 'exact':
             scope = state.metadata.get('cache_scope', 'shared')
             prefix = []
@@ -534,17 +616,45 @@ def admit_compute(scheduler, recv, req):
     metadata = recv.contextkv_compute
     req.contextkv_compute_metadata = metadata
     req.contextkv_native_cache_salt = req.cache_salt
-    if metadata is None or metadata.get('mode') == 'infoflow':
+    if metadata is None:
         return
-    layouts = get_compute_runtime(scheduler).source_layouts
+    runtime = get_compute_runtime(scheduler)
     scope = metadata.get('cache_scope', 'shared')
-    chain = tuple(block['source_id'] for block in metadata.get('blocks', ()))
-    while chain:
-        record = layouts.get((scope, chain[-1]), {}).get((req.cache_salt, chain))
-        if record is not None:
-            req.contextkv_committed_node = record[0]
-            break
-        chain = chain[:-1]
+    arena = runtime.cache.tree_core._node_arena
+    mode = metadata.get('mode', 'auto')
+    committed = []
+    if mode != 'infoflow':
+        chain = tuple(block['source_id'] for block in metadata.get('blocks', ()))
+        while chain:
+            record = runtime.source_layouts.get((scope, chain[-1]), {}).get((req.cache_salt, chain))
+            if record is not None and arena.get(record[0]) is not None:
+                committed.append(record[0])
+                break
+            chain = chain[:-1]
+        if not committed and req.origin_input_ids:
+            match = runtime.cache.match_prefix(MatchPrefixParams(key=RadixKey(
+                array('q', req.origin_input_ids), req.extra_key, cache_salt=req.cache_salt)))
+            if match.device_prefix_len + match.host_hit_length and arena.get(match.best_match_node) is not None:
+                committed.append(match.best_match_node)
+    if mode != 'exact':
+        for block in metadata.get('blocks', ()):
+            record = runtime.source_layouts.get((scope, block['source_id']), {}).get(None)
+            if record is not None and arena.get(record[0]) is not None:
+                committed.append(record[0])
+    if committed:
+        req.contextkv_committed_nodes = tuple(dict.fromkeys(committed))
+    now = time.monotonic()
+    released = False
+    for lease_key in ((scope, metadata.get('session_id')), (scope, req.cache_salt)):
+        if lease_key[1] is not None and runtime.quote_leases.pop(lease_key, None) is not None:
+            released = True
+    for k in [k for k, (exp, _) in runtime.quote_leases.items() if exp <= now]:
+        del runtime.quote_leases[k]
+        released = True
+    if released:
+        runtime._refresh_priorities()
+    if committed:
+        runtime.protect_waiting_nodes(req.contextkv_committed_nodes)
 
 
 def prepare_compute_request(scheduler, req):
@@ -595,14 +705,18 @@ def attach_compute_batch(forward_batch, batch, model_runner):
     forward_batch.contextkv_translator = model_runner.kv_index_translator
     forward_batch.contextkv_states = tuple(getattr(req, 'contextkv_compute_state', None) for req in batch.reqs)
     forward_batch.contextkv_rows = batch.req_to_token_pool.req_to_token[batch.req_pool_indices]
-    runtime = None
-    lengths = forward_batch.extend_seq_lens_cpu if forward_batch.forward_mode.is_extend() else [1]*forward_batch.batch_size
+    is_extend = forward_batch.forward_mode.is_extend()
+    runtime = next((s.runtime for s in forward_batch.contextkv_states if s is not None), None)
+    if runtime is not None and is_extend:
+        runtime.extend_steps += 1
+    lengths = forward_batch.extend_seq_lens_cpu if is_extend else [1]*forward_batch.batch_size
     for index, (state, length) in enumerate(zip(forward_batch.contextkv_states, lengths)):
         if state is not None:
-            runtime = state.runtime
-            first = (forward_batch.extend_prefix_lens_cpu[index] if forward_batch.forward_mode.is_extend()
+            if is_extend:
+                state.extend_epoch_at_prefill = state.runtime.extend_steps
+            first = (forward_batch.extend_prefix_lens_cpu[index] if is_extend
                      else int(forward_batch.seq_lens_cpu[index])-1)
-            page = runtime.cache.page_size
+            page = state.runtime.cache.page_size
             state.counters['new_compute_kv_pages'] += math.ceil((first+length)/page)-math.ceil(first/page)
     if runtime is not None:
         runtime.observe_pool()
@@ -776,7 +890,10 @@ def forward_qwen(model, native_forward, input_ids, positions, batch, input_embed
             native = _native_decode_batch(batch, native_decode)
             active_positions = torch.cat((native.positions, active_positions))
         indices = torch.tensor(native_decode + decode_offsets, device=input_ids.device)
-        result[indices] = driver.decode_many(decode_states, input_ids[indices], active_positions, native)
+        result[indices] = _measure(
+            decode_states[0], 'infoflow_decode_step', 1,
+            lambda: driver.decode_many(decode_states, input_ids[indices], active_positions, native),
+        )
     return result
 
 

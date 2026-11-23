@@ -2,7 +2,7 @@
 
 Each trajectory contains the shared feature vector, a real STOP answer score
 and complete STOP cost at every state, plus the work paid to reach the next
-state. Source texts and model token states are not copied into training rows.
+state.
 """
 from __future__ import annotations
 
@@ -24,27 +24,32 @@ def observed_values(row, device):
 
 @torch.no_grad()
 def lambda_targets(model, trajectory, prices, trace_lambda):
-    """STOP ends now; CONTINUE pays one transition and follows the next decision."""
+    """STOP ends now; CONTINUE pays one transition and follows the learned policy."""
     rows = trajectory["states"]
     features = torch.tensor([row["features"] for row in rows], device=model.mean.device)
     predicted, tails = model(features)
     count = len(rows)
     observed = torch.stack([observed_values(row["stop"], model.mean.device) for row in rows])
-    previous, previous_tails = predicted.clone(), tails.clone()
     if "plan" in rows[0]:
         groups = defaultdict(list)
         for index, row in enumerate(rows):
             groups[row["plan"]].append(index)
         for indices in groups.values():
-            observed[indices, 0] = observed[indices, 0].mean()
+            observed[indices] = observed[indices].mean(0)
+    mask = torch.tensor([[True, index < count - 1] for index in range(count)], device=model.mean.device)
+    chosen = prices.utility(predicted, tails).masked_fill(~mask, -torch.inf).argmax(-1)
+    previous = observed[:, None, :].repeat(1, 2, 1)
+    previous[:, 1] = (observed + (predicted[:, 1] - predicted[:, 0])).clamp_min(0.0)
+    previous[:, 1, 0] = previous[:, 1, 0].clamp_max(1.0)
+    previous_tails = observed[:, 1:2].repeat(1, 2)
+    previous_tails[:, 1] = (observed[:, 1] + (tails[:, 1] - tails[:, 0])).clamp_min(0.0)
+    if "plan" in rows[0]:
         # STOP quality is known throughout the last run of identical answer plans.
         # CONTINUE reaches that run from the immediately preceding decision too.
         first = count - 1
-        while first > 0 and rows[first-1]["plan"] == rows[-1]["plan"]:
+        while first > 0 and rows[first - 1]["plan"] == rows[-1]["plan"]:
             first -= 1
-        previous[first:, 0, 0] = observed[-1, 0]
-        previous[max(0, first-1):-1, 1, 0] = observed[-1, 0]
-    mask = torch.tensor([[True, index < count-1] for index in range(count)], device=model.mean.device)
+        previous[max(0, first - 1):-1, 1, 0] = observed[-1, 0]
     target = torch.zeros_like(predicted)
     target[:, 0] = observed
     realised_seconds = torch.zeros_like(tails)
@@ -52,31 +57,26 @@ def lambda_targets(model, trajectory, prices, trace_lambda):
     previous[-1, 0], previous_tails[-1, 0] = observed[-1], observed[-1, 1]
     steps = [observed_values({"quality": 0.0, **row["transition"]}, model.mean.device)
              for row in rows[:-1]]
-    # Each backup depth takes its own maximum over STOP and CONTINUE before
-    # the forward-view lambda mixture (Stop-RAG equations 3--11).
     for depth in range(1, count):
         current, current_tails = previous.clone(), previous_tails.clone()
         current[:, 0], current_tails[:, 0] = observed, observed[:, 1]
-        utilities = prices.utility(previous, previous_tails).masked_fill(~mask, -torch.inf)
-        chosen = utilities.argmax(-1)
         for index, step in enumerate(steps):
-            action = chosen[index+1]
-            current[index, 1] = step + previous[index+1, action]
-            current_tails[index, 1] = step[1] + previous_tails[index+1, action]
-            horizon = count-1-index
+            action = chosen[index + 1]
+            current[index, 1] = step + previous[index + 1, action]
+            current_tails[index, 1] = step[1] + previous_tails[index + 1, action]
+            horizon = count - 1 - index
             if depth <= horizon:
-                weight = trace_lambda ** (depth-1)
+                weight = trace_lambda ** (depth - 1)
                 if depth < horizon:
-                    weight *= 1-trace_lambda
+                    weight *= 1 - trace_lambda
                 target[index, 1] += weight * current[index, 1]
-                if depth == horizon:
-                    realised_seconds[index, 1] = current_tails[index, 1]
+                realised_seconds[index, 1] += weight * current_tails[index, 1]
         previous, previous_tails = current, current_tails
     return features, target, realised_seconds, mask
 
 
 def fit(trajectories, *, epochs=40, learning_rate=1e-3, trace_lambda=0.8,
-        prices=ValuePrices(), device="cpu"):
+        prices=ValuePrices(), device="cpu", weight_decay=1e-2):
     model = StopValueHead().to(device)
     features = torch.tensor([row["features"] for trajectory in trajectories
                              for row in trajectory["states"]], device=device)
@@ -84,7 +84,7 @@ def fit(trajectories, *, epochs=40, learning_rate=1e-3, trace_lambda=0.8,
     scale = features.std(0, unbiased=False)
     model.scale.copy_(torch.where(scale > 0, scale, torch.ones_like(scale)))
     model.active.copy_((scale > 0).to(model.active.dtype))
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     for _ in range(epochs):
         for trajectory in trajectories:
             x, targets, seconds, mask = lambda_targets(model, trajectory, prices, trace_lambda)

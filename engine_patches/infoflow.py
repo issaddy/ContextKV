@@ -15,14 +15,7 @@ import torch.nn.functional as F
 from sglang.srt.managers.infoflow_attention import paged_attention, segmented_decode, pack_decode_rows
 
 
-def relocate_keys(keys, local_positions, global_positions, rotary):
-    """Undo the stored local RoPE and apply the actual request's RoPE."""
-    cache = rotary.cos_sin_cache.to(device=keys.device, dtype=torch.float32)
-    old_cos, old_sin = cache[local_positions].chunk(2, dim=-1)
-    new_cos, new_sin = cache[global_positions].chunk(2, dim=-1)
-    denominator = old_cos.square() + old_sin.square()
-    cosine = (new_cos * old_cos + new_sin * old_sin) / denominator
-    sine = (new_sin * old_cos - new_cos * old_sin) / denominator
+def apply_relative_rope(keys, cosine, sine, rotary):
     cosine, sine = cosine[:, None, :], sine[:, None, :]
     rotary_dim = cosine.shape[-1] * 2
     value, tail = keys[..., :rotary_dim], keys[..., rotary_dim:]
@@ -106,6 +99,7 @@ class RequestState:
     decode_lengths: tuple = ()
     decode_offsets: tuple = ()
     complete: bool = False
+    extend_epoch_at_prefill: int = 0
     counters: dict = field(default_factory=lambda: dict(
         cold_tokens=0, reused_tokens=0, recomputed_tokens=0, replay_tokens=0, score_tokens=0,
         host_load_tokens=0, device_hit_tokens=0, private_tokens=0, new_compute_kv_pages=0))
@@ -113,8 +107,8 @@ class RequestState:
     def scoring_keys(self, layer_id, rotary, length):
         """Restore global keys for importance scoring without copying values."""
         keys, _ = self.pool.get_kv_buffer(layer_id)
-        return relocate_keys(keys[self.row[:length]], self.local_positions[:length],
-                             torch.arange(length, device=self.row.device), rotary)
+        return apply_relative_rope(keys[self.row[:length]],
+                                   self.position_cosine[:length], self.position_sine[:length], rotary)
 
 
 class QwenInfoFlow:
@@ -146,15 +140,19 @@ class QwenInfoFlow:
             out = tensor_model_parallel_all_reduce(out)
         return hidden + out
 
-    def _attend(self, state, layer, query, positions, length):
-        keys, values = state.pool.get_kv_buffer(layer.self_attn.attn.layer_id)
+    @staticmethod
+    def _ensure_rope(state, rotary):
         if state.position_cosine is None:
-            cache = layer.self_attn.rotary_emb.cos_sin_cache
+            cache = rotary.cos_sin_cache
             local_cos, local_sin = cache[state.local_positions].float().chunk(2, -1)
             global_cos, global_sin = cache[:len(state.row)].float().chunk(2, -1)
             norm = local_cos.square()+local_sin.square()
             state.position_cosine = (global_cos*local_cos+global_sin*local_sin)/norm
             state.position_sine = (global_sin*local_cos-global_cos*local_sin)/norm
+
+    def _attend(self, state, layer, query, positions, length):
+        keys, values = state.pool.get_kv_buffer(layer.self_attn.attn.layer_id)
+        self._ensure_rope(state, layer.self_attn.rotary_emb)
         return paged_attention(query, keys, values, state.row, state.position_cosine, state.position_sine,
                                positions, layer.self_attn.rotary_emb, length, state.attention_workspace)
 
@@ -197,7 +195,8 @@ class QwenInfoFlow:
             q, k, v = self._qkv(layer, hidden, prompt)
             keys, values = state.pool.get_kv_buffer(layer_id)
             keys[state.row[prompt]], values[state.row[prompt]] = k, v
-            if index >= len(self.layers) - 2 and count > query_start:
+            if index >= len(self.layers) - 2 and count > query_start and bool(query_rows.any()):
+                self._ensure_rope(state, layer.self_attn.rotary_emb)
                 all_k = state.scoring_keys(layer_id, layer.self_attn.rotary_emb, count)
                 state.scores[index-len(self.layers)+2, :count] += attention_norm_squared(
                     q[query_rows], all_k, prompt[query_rows])

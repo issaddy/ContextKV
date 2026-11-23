@@ -1,8 +1,4 @@
-"""Compare baseline population selection with single-quote selection on CPU.
-
-Synthetic vectors and the production EvidenceCosts are used; these measurements
-exclude model inference and are not end-to-end or answer-quality estimates.
-"""
+"""Compare baseline population selection with single-quote selection on CPU."""
 from __future__ import annotations
 
 import ast

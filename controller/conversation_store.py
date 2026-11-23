@@ -79,9 +79,16 @@ class ConversationStore:
     def load_document_set(self, document_set_id):
         sources, metadata = self.db.execute("SELECT sources,metadata FROM qa_documents WHERE document_set_id=?",
                                             (document_set_id,)).fetchone()
-        blocks = tuple(decode(EvidenceBlock, json.loads(self.db.execute(
-            "SELECT block FROM qa_sources WHERE address=?", (address,)).fetchone()[0]))
-            for address in json.loads(sources))
+        address_list = json.loads(sources)
+        if address_list:
+            placeholders = ",".join("?" for _ in address_list)
+            rows = dict(self.db.execute(
+                f"SELECT address, block FROM qa_sources WHERE address IN ({placeholders})",
+                address_list,
+            ).fetchall())
+            blocks = tuple(decode(EvidenceBlock, json.loads(rows[address])) for address in address_list)
+        else:
+            blocks = ()
         from .schema import EvidenceKey
         source_metadata = tuple((decode(EvidenceKey, key), value) for key, value in json.loads(metadata))
         return RegisteredDocuments(document_set_id, document_set_id, blocks, source_metadata)
@@ -97,11 +104,14 @@ class ConversationStore:
         return json.loads(row[0]) if row else None
 
     def commit(self, session_id, request_id, query, answer, *, evidence, task, facts, metrics):
-        snapshot = self.get_snapshot(session_id)
-        turn = TurnRecord(snapshot.version + 1, query, answer, evidence_keys=tuple(b.key for b in evidence),
-            source_spans=tuple(SourceSpan(source_address(b), b.key, *(b.span or (0, len(b.text)))) for b in evidence),
-                          query_context=QueryContext(query, "shared", task_state=task))
         with self.db:
+            next_turn = self.db.execute(
+                "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM qa_turns WHERE session_id=?",
+                (session_id,),
+            ).fetchone()[0]
+            turn = TurnRecord(next_turn, query, answer, evidence_keys=tuple(b.key for b in evidence),
+                source_spans=tuple(SourceSpan(source_address(b), b.key, *(b.span or (0, len(b.text)))) for b in evidence),
+                              query_context=QueryContext(query, "shared", task_state=task))
             self.db.execute("INSERT INTO qa_turns VALUES(?,?,?,?,?)", (
                 session_id, turn.turn_id, request_id, dumps(turn), dumps(facts)))
             self.db.execute("INSERT OR REPLACE INTO qa_results VALUES(?,?,?)", (

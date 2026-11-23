@@ -360,10 +360,14 @@ def train_evidence(args):
                 empty = tensor([not item["unit_ids"] for item in choices]).bool()
                 encoded[row["split"]].append((features, completed, target, empty))
             optimizer = torch.optim.AdamW([heads.set_weights, heads.set_bias], lr=args.learning_rate)
+
             def gain_loss(example):
                 features, completed, target, empty = example
                 return heads.gain_loss(heads.utility_from_features(features, completed), target, empty)
-            for _ in range(args.epochs):
+
+            best_dev_loss, best_epoch = float("inf"), args.epochs
+            best_params = None
+            for epoch_idx in range(1, args.epochs + 1):
                 for example in encoded["train"]:
                     optimizer.zero_grad(set_to_none=True)
                     loss = gain_loss(example)
@@ -371,6 +375,17 @@ def train_evidence(args):
                     optimizer.step()
                     total += loss.item()
                     steps += 1
+                if encoded["dev"]:
+                    with torch.no_grad():
+                        dev_loss = sum(float(gain_loss(x)) for x in encoded["dev"]) / len(encoded["dev"])
+                        if dev_loss < best_dev_loss:
+                            best_dev_loss = dev_loss
+                            best_epoch = epoch_idx
+                            best_params = (heads.set_weights.detach().clone(), heads.set_bias.detach().clone())
+            if best_params is not None:
+                with torch.no_grad():
+                    heads.set_weights.copy_(best_params[0])
+                    heads.set_bias.copy_(best_params[1])
             with torch.no_grad():
                 chosen_qualities, fact_recalls = [], []
                 for (features, completed, _, _), row in zip(encoded["dev"], (r for r in data if r["split"]=="dev")):
@@ -383,7 +398,7 @@ def train_evidence(args):
                 if encoded["dev"]:
                     selection["dev_chosen_quality"] = sum(chosen_qualities)/len(chosen_qualities)
                     selection["dev_loss"] = sum(float(gain_loss(x)) for x in encoded["dev"])/len(encoded["dev"])
-            selection.update(dev_states=len(encoded["dev"]), epoch=args.epochs,
+            selection.update(dev_states=len(encoded["dev"]), epoch=args.epochs, best_epoch=best_epoch,
                              fact_labelled_states=sum(
                                  "covered_facts" in r["sets"][0] or "supported_facts" in r["sets"][0] for r in data))
         else:
@@ -476,7 +491,9 @@ def train_coverage(args):
             return result
         before = evaluate()
         optimizer = torch.optim.AdamW([*head.parameters(), *scope.parameters()], lr=args.learning_rate)
-        for _ in range(args.epochs):
+        has_dev = bool((~train).any())
+        best_key, best_state, best_epoch = None, None, args.epochs
+        for epoch_idx in range(1, args.epochs + 1):
             logits = head(features)
             loss = F.cross_entropy(logits[train], labels[train])
             loss += F.binary_cross_entropy_with_logits(route_margin(logits)[train], labels[train].float())
@@ -485,6 +502,22 @@ def train_coverage(args):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if has_dev:
+                with torch.no_grad():
+                    dev_logits = head(features)
+                    dev_margins = route_margin(dev_logits)[~train]
+                    routed_ok = int(((dev_margins > 0) == labels[~train]).sum())
+                    dev_loss = float(F.cross_entropy(dev_logits[~train], labels[~train])
+                                     + F.binary_cross_entropy_with_logits(dev_margins, labels[~train].float()))
+                    key = (routed_ok, -dev_loss)
+                    if best_key is None or key > best_key:
+                        best_key = key
+                        best_epoch = epoch_idx
+                        best_state = ({k: v.detach().clone() for k, v in head.state_dict().items()},
+                                      {k: v.detach().clone() for k, v in scope.state_dict().items()})
+        if best_state is not None:
+            head.load_state_dict(best_state[0])
+            scope.load_state_dict(best_state[1])
         output = Path(args.output)
         output.mkdir(parents=True, exist_ok=True)
         initial = Path(args.init_asset)
@@ -493,7 +526,7 @@ def train_coverage(args):
         torch.save(encoder.heads.state_dict(), output/"heads.pt")
         metadata = json.loads((initial/"training.json").read_text())
         metadata["coverage"] = {"train": int(train.sum()), "before": before, "after": evaluate(),
-                                "epoch": args.epochs}
+                                "epoch": args.epochs, "best_epoch": best_epoch}
         (output/"training.json").write_text(json.dumps(metadata, indent=2)+"\n")
         print(json.dumps(metadata["coverage"]))
     finally:

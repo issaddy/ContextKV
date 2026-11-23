@@ -69,10 +69,84 @@ def _paged_attention(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT, LSE,
         tl.store(LSE + lse_offsets, (maximum+tl.log2(denominator))*0.6931471805599453, valid_rows)
 
 
+@triton.jit
+def _paged_attention_gqa(Q, K, V, ROWS, COSINE, SINE, POSITIONS, OUT,
+                         queries, length, qs0: tl.constexpr, qs1: tl.constexpr,
+                         ks0: tl.constexpr, ks1: tl.constexpr,
+                         vs0: tl.constexpr, vs1: tl.constexpr,
+                         os0: tl.constexpr, os1: tl.constexpr,
+                         position_stride: tl.constexpr, GROUPS: tl.constexpr,
+                         HEAD_DIM: tl.constexpr, ROTARY_DIM: tl.constexpr,
+                         NEOX: tl.constexpr, SCALE: tl.constexpr,
+                         BLOCK_Q: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    """Share each paged KV load across all GQA query heads and BLOCK_Q query positions."""
+    query_block, kv_head = tl.program_id(0), tl.program_id(1)
+    dimensions = tl.arange(0, HEAD_DIM)
+    rows = tl.arange(0, BLOCK_M)
+    q_pos = query_block * BLOCK_Q + rows // GROUPS
+    head = kv_head * GROUPS + rows % GROUPS
+    valid_rows = q_pos < queries
+    q = tl.load(Q + q_pos[:, None] * qs0 + head[:, None] * qs1 + dimensions[None, :],
+                valid_rows[:, None], other=0)
+    positions = tl.load(POSITIONS + q_pos, valid_rows, other=-1)
+    output_offsets = q_pos[:, None] * os0 + head[:, None] * os1 + dimensions[None, :]
+    maximum = tl.full((BLOCK_M,), -float('inf'), tl.float32)
+    denominator = tl.zeros((BLOCK_M,), tl.float32)
+    accumulated = tl.zeros((BLOCK_M, HEAD_DIM), tl.float32)
+    if NEOX:
+        pair = (dimensions + ROTARY_DIM // 2) % ROTARY_DIM
+        frequency = dimensions % (ROTARY_DIM // 2)
+        sign = tl.where(dimensions < ROTARY_DIM // 2, -1., 1.)
+    else:
+        pair = dimensions ^ 1
+        frequency = dimensions // 2
+        sign = tl.where(dimensions % 2 == 0, -1., 1.)
+    available = tl.minimum(length, tl.max(positions, 0) + 1)
+    for first in range(0, tl.cdiv(available, BLOCK_N)):
+        columns = first * BLOCK_N + tl.arange(0, BLOCK_N)
+        slots = tl.load(ROWS + columns, columns < available, other=0)
+        key = tl.load(K + slots[:, None] * ks0 + kv_head * ks1 + dimensions[None, :],
+                      columns[:, None] < available, other=0).to(tl.float32)
+        paired = tl.load(K + slots[:, None] * ks0 + kv_head * ks1 + pair[None, :],
+                         columns[:, None] < available, other=0).to(tl.float32)
+        valid = (columns[:, None] < available) & (dimensions[None, :] < ROTARY_DIM)
+        cosine = tl.load(COSINE + columns[:, None] * position_stride + frequency[None, :], valid, other=1)
+        sine = tl.load(SINE + columns[:, None] * position_stride + frequency[None, :], valid, other=0)
+        key = (key * cosine + paired * sign[None, :] * sine).to(q.dtype)
+        logits = tl.dot(q, tl.trans(key)) * (SCALE * 1.4426950408889634)
+        valid_attention = (columns[None, :] < length) & (columns[None, :] <= positions[:, None])
+        logits = tl.where(valid_attention, logits, -float('inf'))
+        updated_maximum = tl.maximum(maximum, tl.max(logits, axis=1))
+        normalizer = tl.where(updated_maximum == -float('inf'), 0., updated_maximum)
+        correction = tl.exp2(maximum - normalizer)
+        probabilities = tl.exp2(logits - normalizer[:, None])
+        value = tl.load(V + slots[:, None] * vs0 + kv_head * vs1 + dimensions[None, :],
+                        columns[:, None] < available, other=0)
+        accumulated = accumulated * correction[:, None] + tl.dot(probabilities.to(value.dtype), value)
+        denominator = denominator * correction + tl.sum(probabilities, axis=1)
+        maximum = updated_maximum
+    result = tl.where(denominator[:, None] > 0, accumulated / denominator[:, None], 0.)
+    tl.store(OUT + output_offsets, result, valid_rows[:, None])
+
+
 def paged_attention(query, key_pool, value_pool, rows, cosine, sine, query_positions,
                     rotary, length, workspace):
     output = torch.empty_like(query)
     splits = min(32, triton.cdiv(length, 1024)) if len(query) == 1 else 1
+    groups = query.shape[1] // key_pool.shape[1]
+    if splits == 1 and groups >= 2 and (groups & (groups - 1)) == 0:
+        target_m = 128 if len(query) >= 64 else 64
+        block_q = max(1, target_m // groups)
+        block_m = block_q * groups
+        _paged_attention_gqa[(triton.cdiv(len(query), block_q), key_pool.shape[1])](
+            query, key_pool, value_pool, rows, cosine, sine, query_positions,
+            output, len(query), length,
+            query.stride(0), query.stride(1), key_pool.stride(0), key_pool.stride(1),
+            value_pool.stride(0), value_pool.stride(1), output.stride(0), output.stride(1),
+            cosine.stride(0), groups, query.shape[-1], rotary.cos_sin_cache.shape[-1],
+            rotary.is_neox_style, query.shape[-1] ** -.5,
+            block_q, block_m, 64, num_warps=8 if block_m >= 128 else 4, num_stages=2)
+        return output
     if splits > 1:
         from sglang.kernels.ops.attention.decode_attention import _fwd_kernel_stage2
         shape = (1, query.shape[1], splits, query.shape[-1])

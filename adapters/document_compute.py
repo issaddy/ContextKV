@@ -326,21 +326,42 @@ class DocumentIndex:
                 records.append(record)
         return tuple(records)
 
-    def outside_tables(self, units):
-        output, replacements = [], {}
-        table_ranges = {}
+    def _table_ranges(self):
+        ranges = {}
         for table in self.tables.values():
-            table_ranges.setdefault(table.source.source_key, set()).add((table.source.start, table.source.end))
+            ranges.setdefault(table.source.source_key, set()).add((table.source.start, table.source.end))
             for row in table.rows:
                 for cell in row:
                     for source in cell.qualifiers:
-                        table_ranges.setdefault(source.source_key, set()).add((source.start, source.end))
+                        ranges.setdefault(source.source_key, set()).add((source.start, source.end))
+        return {key: sorted(spans) for key, spans in ranges.items()}
+
+    @staticmethod
+    def _outside_parts(unit, table_ranges):
+        source = unit.source_spans[0]
+        parts = [(source.start, source.end)]
+        for left, right in table_ranges.get(source.source_key, ()):
+            parts = [(start, end) for first, last in parts
+                     for start, end in ((first, min(last, left)), (max(first, right), last)) if start < end]
+        return source, parts
+
+    def has_outside_prose(self, units):
+        if not units:
+            return False
+        if not self.tables:
+            return any(unit.text.strip() for unit in units)
+        table_ranges = self._table_ranges()
         for unit in units:
-            source = unit.source_spans[0]
-            parts = [(source.start, source.end)]
-            for left, right in sorted(table_ranges.get(source.source_key, ())):
-                parts = [(start, end) for first, last in parts
-                         for start, end in ((first, min(last, left)), (max(first, right), last)) if start < end]
+            source, parts = self._outside_parts(unit, table_ranges)
+            if any(unit.text[start - source.start:end - source.start].strip() for start, end in parts):
+                return True
+        return False
+
+    def outside_tables(self, units):
+        output, replacements = [], {}
+        table_ranges = self._table_ranges()
+        for unit in units:
+            source, parts = self._outside_parts(unit, table_ranges)
             replacements[unit.unit_id] = []
             for start, end in parts:
                 text = unit.text[start-source.start:end-source.start]
