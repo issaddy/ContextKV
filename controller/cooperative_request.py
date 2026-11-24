@@ -278,8 +278,9 @@ class EvidenceCosts:
             if ready and address not in prefix_sources:
                 nonprefix_opportunity = True
             if ready:
-                gpu += min(length, resident["gpu_tokens"])
-                host += min(max(0, length - gpu), resident["host_tokens"])
+                block_gpu = min(length, resident["gpu_tokens"])
+                gpu += block_gpu
+                host += min(length - block_gpu, resident["host_tokens"])
                 pins.update(resident.get("unpinned_nodes", {}))
                 host_nodes.update(resident.get("host_nodes", {}))
             else:

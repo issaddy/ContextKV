@@ -84,10 +84,10 @@ class BM25SRetriever:
         self._initialize_runtime(cpu_threads)
         if not corpus:
             raise ValueError("corpus must not be empty")
-        self._ids = tuple(sorted(str(pid) for pid in corpus))
+        self.passage_ids = tuple(sorted(str(pid) for pid in corpus))
         self._contexts = tuple(OnlineContext(pid, str(corpus[pid]["text"]),
                               str(corpus[pid].get("source") or ""),
-                              str(corpus[pid].get("title") or "")) for pid in self._ids)
+                              str(corpus[pid].get("title") or "")) for pid in self.passage_ids)
         self.corpus_snapshot_id = corpus_snapshot_id
         self.manifest = {**RETRIEVAL_CONFIG, **self.runtime_versions, "corpus_snapshot_id": corpus_snapshot_id,
                          "cpu_threads": cpu_threads,
@@ -120,7 +120,7 @@ class BM25SRetriever:
         result._initialize_runtime(cpu_threads)
         result._contexts = tuple(OnlineContext(**json.loads(line)) for line in
                                  (directory / "passages.jsonl").read_text().splitlines() if line)
-        result._ids = tuple(c.document_id for c in result._contexts)
+        result.passage_ids = tuple(c.document_id for c in result._contexts)
         result.corpus_snapshot_id = manifest["corpus_snapshot_id"]
         result.manifest = {**{k: v for k, v in manifest.items() if k not in {"files", "passage_order_sha256", "corpus_sha256"}},
                            "runtime_versions": result.runtime_versions,
@@ -143,7 +143,7 @@ class BM25SRetriever:
         if legal_ids is None:
             order = deterministic_top_k(scores, top_k, self._np)
         else:
-            positions = self._np.asarray([i for i, identity in enumerate(self._ids) if identity in legal_ids], dtype=int)
+            positions = self._np.asarray([i for i, identity in enumerate(self.passage_ids) if identity in legal_ids], dtype=int)
             order = positions[deterministic_top_k(scores[positions], top_k, self._np)]
         return tuple(replace(self._contexts[int(i)], score=float(scores[i])) for i in order)
 

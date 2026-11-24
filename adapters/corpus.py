@@ -37,6 +37,7 @@ class CorpusIndex:
         self.corpus_id, self.snapshot_id = corpus_id, snapshot_id
         self._blocks = {block.key: block for block in blocks}
         self.source_metadata = source_metadata or {}
+        self.has_applicability = any(row.get("applicability") for row in self.source_metadata.values())
         self._retrieval_texts = retrieval_texts or {}
         self._source_document_ids = source_document_ids or {}
         self._passages: dict[str, list[EvidenceKey]] = {}

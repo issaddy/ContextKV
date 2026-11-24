@@ -402,7 +402,7 @@ def literal_versions(question, catalogue):
     import re
     return tuple(dict.fromkeys(row["version"] for row in catalogue
         if re.search(r"(?<![\w.])"+(r"v?" if row["version"][:1].isdigit() else "")
-                     +re.escape(row["version"])+r"(?![\w.])", question, re.IGNORECASE)))
+                     +re.escape(row["version"])+r"(?!\w|\.\w)", question, re.IGNORECASE)))
 
 
 def query_input(tokenizer, history, question, current_turn_id, catalogue=(), max_length=32768,

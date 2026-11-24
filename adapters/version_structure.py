@@ -256,7 +256,7 @@ class VersionIndex:
                             for span in part.spans:
                                 block = self.blocks[span.source_key]
                                 base = block.span[0] if block.span else 0
-                                identity = f"version:{span.span_id}"
+                                identity = span.span_id
                                 grouped.setdefault(identity, [span, block.text[span.start - base:span.end - base], set(), family])
                                 members.append(identity)
                         for identity in members:
@@ -332,7 +332,7 @@ class VersionIndex:
                 for span in part.spans:
                     block = self.blocks[span.source_key]
                     base = block.span[0] if block.span else 0
-                    identity = f"version:{span.span_id}"
+                    identity = span.span_id
                     grouped.setdefault(identity, [span, block.text[span.start-base:span.end-base], set()])
                     members.append(identity)
             for identity in members:

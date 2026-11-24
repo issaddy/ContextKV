@@ -132,6 +132,9 @@ class SharedEvidenceProvider:
             self.corpus_snapshot_id = self.sparse.corpus_snapshot_id
             self.corpus = CorpusIndex.from_jsonl(retrieval["corpus_path"], corpus_id=retrieval["corpus_id"],
                                                 snapshot_id=self.corpus_snapshot_id)
+            passage_ids = {block.key.passage_id for block in self.corpus.blocks}
+            self.indexes_in_scope = (passage_ids.issuperset(self.sparse.passage_ids)
+                                     and passage_ids.issuperset(self.dense.by_id))
         else:
             self.sparse = self.dense = None
             self.corpus_snapshot_id = "supplied"
@@ -241,7 +244,7 @@ class SharedEvidenceProvider:
             restrict_current = intent.mode == "current" and not wanted_versions
             version_keys = versions.legal_keys(families=families, versions=wanted_versions,
                 current=restrict_current)
-            if restrict_current and version_keys:
+            if restrict_current and 0 < len(version_keys) < len(versions.blocks):
                 # If a question names specific technical symbols absent from current
                 # editions (e.g. a historical issue ID or removed symbol), include
                 # matching earlier editions within the legal family scope.
@@ -250,8 +253,11 @@ class SharedEvidenceProvider:
                 if missing_in_current:
                     expanded = versions.legal_keys(families=families, versions=(), current=False)
                     version_keys = tuple(dict.fromkeys((*version_keys, *expanded)))
-        legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
-        legal_set = set(legal)
+        legal = version_keys
+        if corpus.has_applicability and query.task.conditions:
+            legal = tuple(key for key in version_keys if self._matches_scope(query, corpus.source_metadata.get(key, {})))
+        whole_corpus = len(legal) == len(versions.blocks)
+        legal_set = versions.blocks if whole_corpus else set(legal)
         previous_spans = tuple(span for turn in snapshot.raw_history[-1:] for span in turn.source_spans
                                if span.source_key in legal_set)
         declared = supplied_blocks is not None or bool(families)
@@ -289,10 +295,10 @@ class SharedEvidenceProvider:
                     document_tokens += sum(tokens for _, tokens in batches)
                     cached["dense"] = DenseIndex(contexts, np.concatenate([vectors for vectors, _ in batches]), {})
                 sparse, dense = cached["sparse"], cached["dense"]
-                legal_ids = {unit.unit_id for unit in directory.units_by_id.values()
-                             if unit.source_spans[0].source_key in legal_set}
+                legal_ids = None if whole_corpus else {unit.unit_id for unit in directory.units_by_id.values()
+                                                       if unit.source_spans[0].source_key in legal_set}
             else:
-                legal_ids = {key.passage_id for key in legal}
+                legal_ids = None if whole_corpus and self.indexes_in_scope else {key.passage_id for key in legal}
             vectors = torch.cat((query.query_vector[None, :], query.need_vectors)).cpu().numpy()
             dense_rows = dense.search_vectors(vectors, legal_ids=legal_ids, top_k=self.candidate_k)
             sparse_rows = [sparse.retrieve([text], legal_ids=legal_ids, top_k=self.candidate_k)
@@ -320,24 +326,26 @@ class SharedEvidenceProvider:
                 roots = (*units, *observed)
                 units = self._closure(roots, {unit.unit_id: unit for unit in (*units, *prior.units)})
                 pool = EvidencePool(units, tuple({b.key: b for b in (*pool.source_blocks, *prior.source_blocks)}.values()))
+        pairs = []
         if intent.mode == "compare" and len(wanted_versions) >= 2:
             selected_spans = tuple(span for unit in units for span in unit.source_spans)
-            pairs = []
             for family, editions in versions.editions.items():
                 ordered = [version for version in editions if version in wanted_versions]
                 for before, after in zip(ordered, ordered[1:]):
                     pairs.extend(versions.paired_units(family, before, after, selected_spans))
-            if pairs:
-                units = tuple({unit.unit_id: unit for unit in (*pairs, *units)}.values())
-                keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
-                pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
-        elif not full and intent.mode in {"compare", "history"} and len(wanted_versions) < 2:
+        elif not full and intent.mode == "compare":
             candidate_spans = tuple(span for unit in units for span in unit.source_spans)
-            evo_units = versions.evolution_units(question, candidate_spans, families=families)
-            if evo_units:
-                units = tuple({unit.unit_id: unit for unit in (*evo_units, *units)}.values())
-                keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
-                pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
+            pairs = versions.evolution_units(question, candidate_spans, families=families)
+        if pairs:
+            merged = {}
+            for unit in (*pairs, *units):
+                previous = merged.get(unit.unit_id)
+                if previous is not None:
+                    unit = replace(unit, dependencies=tuple(dict.fromkeys((*previous.dependencies, *unit.dependencies))))
+                merged[unit.unit_id] = unit
+            units = tuple(merged.values())
+            keys = tuple(dict.fromkeys(span.source_key for unit in units for span in unit.source_spans))
+            pool = replace(pool, units=units, source_blocks=corpus.resolve(keys))
         if not full:
             document_blocks = pool.source_blocks
             query.task = replace(query.task, effective_source_scope=tuple(block.key for block in pool.source_blocks))
@@ -414,7 +422,7 @@ class SharedEvidenceProvider:
         if wanted_versions and version_keys and state.version_catalogue:
             state.missing_version_identifiers = versions.missing_identifiers(
                 question, version_keys, state.version_catalogue)
-        if state.version_catalogue and (intent.mode in {"compare", "history"} or not wanted_versions):
+        if state.version_catalogue and (intent.mode == "compare" or not wanted_versions):
             state.symbol_version_presence = versions.symbol_version_presence(question, families)
         if supplied_blocks is not None:
             state.source_headers = headers

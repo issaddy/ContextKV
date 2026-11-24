@@ -9,6 +9,7 @@ import re
 import unicodedata
 from typing import Any
 
+from adapters.evidence_pool import unit_identity
 from adapters.table_relations import _SEPARATOR, extract_table_relations
 from controller.schema import EvidenceBlock, EvidenceClaim, EvidenceUnit, SourceSpan
 from controller.source_windows import numbered_text
@@ -172,7 +173,7 @@ def _literal_unit(relation):
 def _span(block, start, end):
     base = block.span[0] if block.span else 0
     key = block.key
-    identity = f"{key.corpus_id}:{key.document_id}:{key.passage_id}:{key.version}:{base+start}:{base+end}"
+    identity = unit_identity(key, base+start, base+end)
     return SourceSpan(identity, key, base+start, base+end)
 
 
