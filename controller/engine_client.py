@@ -54,16 +54,18 @@ class SGLangEngineClient:
     async def close_session(self, session_id, *, host_scope=None):
         return await self._post("/context/session/close", {"session_id": session_id, "host_scope": host_scope})
 
-    async def evidence_state(self, source_ids, *, cache_scope="shared", cache_namespace=None, session_id=None):
+    async def evidence_state(self, source_ids, *, cache_scope="shared", cache_namespace=None, session_id=None,
+                             use_lease=True, recent_layout_only=False):
         return await self._post("/context/evidence/state", {
             "source_ids": list(source_ids), "cache_scope": cache_scope,
             "cache_namespace": cache_namespace, "session_id": session_id,
+            "use_lease": use_lease, "recent_layout_only": recent_layout_only,
         })
 
     async def compute(self, request, *, session_id, request_id, max_new_tokens,
                       mode="auto", recompute_ratio=0.15, quality_loss=0.0,
                       quality_price_ms=0.0, response_schema=None, cache_namespace=None,
-                      cache_scope="shared", costs=None):
+                      cache_scope="shared", costs=None, protect_waiting=True, eager_demote=False):
         """One native submission carries the chosen input and future source demand."""
         sampling = {**self._sampling_params, "max_new_tokens": max_new_tokens}
         if response_schema is not None:
@@ -80,6 +82,7 @@ class SGLangEngineClient:
                 "query_span": list(request.query_span),
                 "recompute_ratio": recompute_ratio, "quality_loss": quality_loss,
                 "quality_price_ms": quality_price_ms, "costs": costs or {},
+                "protect_waiting": protect_waiting, "eager_demote": eager_demote,
             },
         }
         try:

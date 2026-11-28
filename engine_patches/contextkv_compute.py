@@ -64,6 +64,8 @@ class ComputeRuntime:
         if action == 'evidence_state':
             scope = data.get('cache_scope', 'shared')
             wanted = set(data['source_ids'])
+            recent_layout_only = bool(data.get('recent_layout_only', False))
+            use_lease = bool(data.get('use_lease', True))
             page = self.cache.page_size
             sources, prefixes = {}, []
             leased_candidates = []
@@ -75,12 +77,17 @@ class ComputeRuntime:
                 sources[address] = src_pages
                 if src_pages['gpu_tokens'] > 0 and node is not None:
                     leased_candidates.append((src_pages['gpu_tokens'], node))
+                live_layouts = []
                 for layout, (node, end) in tuple(layouts.items()):
                     if layout is None:
                         continue
                     if self.cache.tree_core._node_arena.get(node) is None:
                         del layouts[layout]
                         continue
+                    live_layouts.append((layout, node, end))
+                if recent_layout_only:
+                    live_layouts = live_layouts[-1:]
+                for layout, node, end in live_layouts:
                     namespace, chain = layout
                     if namespace == data.get('cache_namespace') and wanted.issuperset(chain):
                         aligned_end = end // page * page
@@ -100,7 +107,7 @@ class ComputeRuntime:
             dirty = bool(expired)
             for k in expired:
                 del self.quote_leases[k]
-            if leased_candidates and lease_owner is not None:
+            if use_lease and leased_candidates and lease_owner is not None:
                 leased_candidates.sort(key=lambda item: item[0], reverse=True)
                 self.quote_leases[scope, lease_owner] = (now + self.lease_ttl,
                                                          {nid for _, nid in leased_candidates[:4]})
@@ -507,11 +514,14 @@ class ComputeRuntime:
                 node = node.parent
         return gpu, host
 
-    def _demote_scope(self, scope):
-        """Place an isolated profiling branch on Host before its paired revisit."""
+    def _demote_scope(self, scope=None):
+        """Place unprioritized backed-up pages on Host (scoped when scope is given)."""
         tree = self.cache.tree_core
-        salts = {scope, BLOCK_NAMESPACE + scope}
-        pending = [node for node in tree.evictable_device_leaves if node.key.cache_salt in salts]
+        if scope is None:
+            pending = list(tree.evictable_device_leaves)
+        else:
+            salts = {scope, BLOCK_NAMESPACE + scope}
+            pending = [node for node in tree.evictable_device_leaves if node.key.cache_salt in salts]
         tracker = {component: 0 for component in self.cache.tree_components}
         started = time.perf_counter()
         while pending:
@@ -557,6 +567,7 @@ class ComputeRuntime:
         state.events.clear()
         stats = req.time_stats
         elapsed = (stats.completion_time - stats.scheduler_recv_time) * 1000
+        ttft_ms = max(0.0, (stats.prefill_finished_time - stats.scheduler_recv_time) * 1000)
         output_count = len(req.output_ids_through_stop)
         # A length-capped prefill/warmup is a censored sample, not a short answer.
         if req.finished_reason.to_json()['type'] == 'stop':
@@ -581,11 +592,15 @@ class ComputeRuntime:
                 if match.device_prefix_len + match.host_hit_length:
                     source_id = scope, item['source_id']
                     layout = req.cache_salt, tuple(prefix)
-                    self.source_layouts.setdefault(source_id, {})[layout] = match.best_match_node, item['end']
+                    layouts = self.source_layouts.setdefault(source_id, {})
+                    layouts.pop(layout, None)
+                    layouts[layout] = match.best_match_node, item['end']
         self._refresh_priorities()
+        if state.metadata.get('eager_demote') and state.metadata.get('mode') == 'auto':
+            self._demote_scope(None)
         host_pool = self.cache.cache_controller.mem_pool_host if self.cache.cache_controller else None
         receipt = dict(mode=state.mode, route_cost_ms=state.route_costs, input_tokens=len(state.input_ids),
-            output_tokens=output_count, elapsed_ms=elapsed,
+            output_tokens=output_count, elapsed_ms=elapsed, ttft_ms=ttft_ms,
             **state.counters, **{name + '_ms': value for name, value in phase_ms.items()},
             gpu_available_tokens=self.allocator.available_size(),
             host_available_tokens=host_pool.available_size() if host_pool else 0,
@@ -622,8 +637,9 @@ def admit_compute(scheduler, recv, req):
     scope = metadata.get('cache_scope', 'shared')
     arena = runtime.cache.tree_core._node_arena
     mode = metadata.get('mode', 'auto')
+    protect_waiting = bool(metadata.get('protect_waiting', True))
     committed = []
-    if mode != 'infoflow':
+    if protect_waiting and mode != 'infoflow':
         chain = tuple(block['source_id'] for block in metadata.get('blocks', ()))
         while chain:
             record = runtime.source_layouts.get((scope, chain[-1]), {}).get((req.cache_salt, chain))
@@ -636,7 +652,7 @@ def admit_compute(scheduler, recv, req):
                 array('q', req.origin_input_ids), req.extra_key, cache_salt=req.cache_salt)))
             if match.device_prefix_len + match.host_hit_length and arena.get(match.best_match_node) is not None:
                 committed.append(match.best_match_node)
-    if mode != 'exact':
+    if protect_waiting and mode != 'exact':
         for block in metadata.get('blocks', ()):
             record = runtime.source_layouts.get((scope, block['source_id']), {}).get(None)
             if record is not None and arena.get(record[0]) is not None:

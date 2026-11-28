@@ -30,6 +30,42 @@ datasets:
     max_passages: 10
     sparse_index: data/indexes/mtrag/sparse
     dense_index: data/indexes/mtrag/dense
+  mtrag_clapnq:
+    evaluation_only: true
+    inputs:
+      test: data/mtrag/RAG.jsonl
+    corpus_path: data/mtrag-official/clapnq.jsonl
+    corpus_id: mtrag_clapnq
+    domain: mt-rag-clapnq-elser-512-100-20240503
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10
+    sparse_index: data/indexes/mtrag_clapnq/sparse
+    dense_index: data/indexes/mtrag_clapnq/dense
+  mtrag_govt:
+    evaluation_only: true
+    inputs:
+      test: data/mtrag/RAG.jsonl
+    corpus_path: data/mtrag-official/govt.jsonl
+    corpus_id: mtrag_govt
+    domain: mt-rag-govt-elser-512-100-20240611
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10
+    sparse_index: data/indexes/mtrag_govt/sparse
+    dense_index: data/indexes/mtrag_govt/dense
+  mtrag_fiqa:
+    evaluation_only: true
+    inputs:
+      test: data/mtrag/RAG.jsonl
+    corpus_path: data/mtrag-official/fiqa.jsonl
+    corpus_id: mtrag_fiqa
+    domain: mt-rag-fiqa-beir-elser-512-100-20240501
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10
+    sparse_index: data/indexes/mtrag_fiqa/sparse
+    dense_index: data/indexes/mtrag_fiqa/dense
   versionqa:
     inputs:
       test: data/evaluation/versionqa/references.jsonl

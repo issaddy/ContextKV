@@ -93,8 +93,17 @@ def _cost_summary(rows):
     completed = [row for row in rows if row["status"] == "completed"]
     timings = [_number(row.get("cost", {}).get("complete_ms")) for row in completed]
     complete_timings = bool(timings) and all(value is not None for value in timings)
-    result = {"mean_complete_ms": statistics.fmean(timings) if complete_timings else None,
-        "p95_complete_ms": _quantile(timings, .95) if complete_timings else None}
+    ttfts = [_number(row.get("cost", {}).get("ttft_ms")) for row in completed]
+    complete_ttfts = bool(ttfts) and all(value is not None for value in ttfts)
+    waits = [_number(row.get("cost", {}).get("slot_wait_ms")) for row in completed]
+    complete_waits = bool(waits) and all(value is not None for value in waits)
+    result = {
+        "mean_complete_ms": statistics.fmean(timings) if complete_timings else None,
+        "p95_complete_ms": _quantile(timings, .95) if complete_timings else None,
+        "p99_complete_ms": _quantile(timings, .99) if complete_timings else None,
+        "p95_ttft_ms": _quantile(ttfts, .95) if complete_ttfts else None,
+        "p95_slot_wait_ms": _quantile(waits, .95) if complete_waits else None,
+    }
     for name in ("total_input_tokens", "total_output_tokens", "online_compute_ms",
                  "actual_prefill_tokens", "actual_device_hit_tokens",
                  "actual_host_loaded_tokens"):
@@ -103,6 +112,11 @@ def _cost_summary(rows):
     batches = [json.loads(path.read_text()) for directory in {
         row["generation_dir"] for row in rows if "generation_dir" in row}
         if (path := Path(directory)/"batch_cost.json").exists()]
+    duration = sum(batch["duration_seconds"] for batch in batches if "duration_seconds" in batch) if batches else None
+    result["duration_seconds"] = duration if duration and duration > 0 else None
+    result["throughput_turns_per_sec"] = (
+        len(completed) / result["duration_seconds"] if result["duration_seconds"] else None
+    )
     for tier in ("gpu", "host"):
         field = tier + "_gib_seconds"
         result[field] = sum(batch[field] for batch in batches) if batches else None
@@ -166,11 +180,14 @@ def declared_queue_summary(rows, spec, task_ids):
     cost["p95_delivered_ms"] = cost["p95_complete_ms"]
     timings = sorted(row["cost"]["complete_ms"] for row in completed
                      if _number(row.get("cost", {}).get("complete_ms")) is not None)
-    position = (len(expected)-1)*.95
-    right = math.ceil(position)
-    cost["p95_complete_ms"] = (timings[math.floor(position)]
-        +(timings[right]-timings[math.floor(position)])*(position-math.floor(position))
-        if expected and len(timings) == len(completed) and right < len(timings) else None)
+    for label, prob in (("p95_complete_ms", .95), ("p99_complete_ms", .99)):
+        position = (len(expected) - 1) * prob
+        right = math.ceil(position)
+        cost[label] = (
+            timings[math.floor(position)]
+            + (timings[right] - timings[math.floor(position)]) * (position - math.floor(position))
+            if expected and len(timings) == len(completed) and right < len(timings) else None
+        )
     return {"declared": len(expected), "recorded": len(selected), "completed": len(completed),
         "scored": len(scored), "completion_rate": len(completed)/len(expected) if expected else None,
         "missing_execution_task_ids": sorted(missing_execution), "unresolved_task_ids": sorted(unresolved),

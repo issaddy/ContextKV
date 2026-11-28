@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
 import os
@@ -101,8 +102,15 @@ def method_config(config, method, dataset, split):
     return merge_config(value, method.get("overrides", {}))
 
 
+@asynccontextmanager
+async def _noop_slot():
+    yield
+
+
 async def run_dataset(config, matrix, method, dataset_name, split, directory, *, concurrency=1,
-                      limit_conversations=None, limit_turns=20, cache_pair=False, record_answer=None):
+                      limit_conversations=None, limit_turns=20, cache_pair=False, record_answer=None,
+                      arrival_rate=None, turn_think_ms=0.0, engine_url=None, aux_device=None,
+                      gpu_devices=None):
     from adapters.providers import create_evidence_provider
     from bench.study_resources import StudyResourceSampler, integrate_physical, listening_processes
     from controller.evidence import make_evidence
@@ -127,10 +135,16 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     expected = [row["task_id"] for row in selected]
     protocol = spec.get("protocol", matrix.get("protocol", "P3"))
     config = method_config(config, method, spec, split)
+    if aux_device and "shared" in config:
+        config = merge_config(config, {
+            "shared": {"query": {"device": aux_device}, "evidence": {"device": aux_device}},
+        })
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     run = replace(apply_study_config(load_config(config["generation"]["run_config"]), config),
                   state_dir=str(directory/"state"))
+    if engine_url:
+        run = replace(run, engine=replace(run.engine, base_url=engine_url))
     if "answer_system_prompt" in spec:
         run = replace(run, context=replace(run.context, system_prompt=spec["answer_system_prompt"]))
     service = create_controller(run)
@@ -179,12 +193,13 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     if config["execution"].get("cache_start", "cold") == "cold":
         await service.engine.profile_prepare()
     resource_settings = matrix["resources"]
-    devices = tuple(resource_settings["gpu_devices"])
+    devices = tuple(gpu_devices) if gpu_devices is not None else tuple(resource_settings["gpu_devices"])
     process_ids = tuple(sorted({os.getpid(), *listening_processes((urlparse(run.engine.base_url).port,)),
                                *resource_settings.get("process_ids", ())}))
     write_json(directory/"generation_manifest.json", {"method": method, "dataset": dataset_name,
         "split": split, "protocol": protocol, "task_ids": expected,
-        "concurrency": concurrency, "retrieval": provider.manifest,
+        "concurrency": concurrency, "arrival_rate": arrival_rate, "turn_think_ms": turn_think_ms,
+        "retrieval": provider.manifest,
         "measurement_kind": "hardware",
         "resource_scope": {"gpu_devices": devices, "process_roots": process_ids, "gpu_accounting": "device_memory"}})
     catalogue_path = spec.get("supplied_source_catalogue")
@@ -193,7 +208,15 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
     for name in ("official.jsonl", "results.jsonl"):
         (directory/name).write_text("")
     results, references = {}, {}
-    semaphore = asyncio.Semaphore(concurrency)
+    semaphore = None if arrival_rate is not None else asyncio.Semaphore(concurrency)
+    session_offsets = {}
+    if arrival_rate is not None:
+        arrival_rng = random.Random(matrix.get("seed", 42))
+        cursor = 0.0
+        for index, sid in enumerate(grouped):
+            if index > 0:
+                cursor += arrival_rng.expovariate(arrival_rate)
+            session_offsets[sid] = cursor
     physical = StudyResourceSampler(devices, process_ids)
     await physical.start()
     measured_start = time.monotonic()
@@ -203,8 +226,14 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
             stream.write(dumps(row)+"\n")
 
     async def conversation(sid, turns):
+        if arrival_rate is not None:
+            delay = measured_start + session_offsets[sid] - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
         session_id = f"study:{method['id']}:{dataset_name}:{split}:{sid}"
-        for row in turns:
+        for turn_index, row in enumerate(turns):
+            if arrival_rate is not None and turn_index > 0 and turn_think_ms > 0:
+                await asyncio.sleep(turn_think_ms / 1000.0)
             task_id = row["task_id"]
             request_id = task_id
             snapshot = service.store.read_snapshot(session_id, provider.corpus_snapshot_id)
@@ -224,7 +253,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                 "measurement_kind": "hardware", "metrics": {}, "generation_dir": str(directory.resolve())}
             try:
                 queued_at = time.monotonic()
-                async with semaphore:
+                slot = semaphore if semaphore is not None else _noop_slot()
+                async with slot:
                     slot_wait_ms = (time.monotonic() - queued_at) * 1000
                     supplied, metadata = None, None
                     if row.get("coverage_mode") or spec.get("supplied_documents", False):
@@ -244,7 +274,10 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
                     tuple(OnlineContext(block.key.passage_id, block.text, block.source_uri, block.title)
                           for block in response.evaluation_evidence), protocol, query_context=response.query_context)
                 append("official.jsonl", official_record(turn, response.assistant_text))
+                decode_ms = max(0.0, response.engine_elapsed_ms - response.engine_ttft_ms)
+                ttft_ms = max(0.0, response.complete_ms - decode_ms)
                 cost = {"complete_ms": response.complete_ms, "slot_wait_ms": slot_wait_ms,
+                    "ttft_ms": ttft_ms, "engine_ttft_ms": response.engine_ttft_ms,
                     "total_input_tokens": response.total_input_tokens,
                     "total_output_tokens": response.total_output_tokens, "auxiliary_ms": response.auxiliary_model_ms,
                     "online_compute_ms": response.engine_elapsed_ms + response.auxiliary_model_ms,
@@ -302,7 +335,8 @@ async def run_dataset(config, matrix, method, dataset_name, split, directory, *,
 
 
 async def evaluate(config, matrix, output, *, split, methods=None, datasets=None,
-                   concurrency=1, limit_conversations=None, limit_turns=20, score=True, cache_pair=False):
+                   concurrency=1, limit_conversations=None, limit_turns=20, score=True, cache_pair=False,
+                   arrival_rate=None, turn_think_ms=0.0, engine_url=None, aux_device=None, gpu_devices=None):
     from bench.study_scoring import score_dataset
 
     output = Path(output)
@@ -315,7 +349,9 @@ async def evaluate(config, matrix, output, *, split, methods=None, datasets=None
         for name, dataset in _track_specs(matrix, split, datasets).items():
             directory = output/method["id"]/name
             rows = await run_dataset(config, matrix, method, name, split, directory,
-                concurrency=concurrency, limit_conversations=limit_conversations, limit_turns=limit_turns, cache_pair=cache_pair)
+                concurrency=concurrency, limit_conversations=limit_conversations, limit_turns=limit_turns,
+                cache_pair=cache_pair, arrival_rate=arrival_rate, turn_think_ms=turn_think_ms,
+                engine_url=engine_url, aux_device=aux_device, gpu_devices=gpu_devices)
             generated.append((name, dataset, directory, rows))
 
     results = []
@@ -338,7 +374,12 @@ def report(matrix, rows, directory, *, split="test"):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     methods = {method["id"]: method for method in matrix["methods"]}
-    labels = {"ordinary_rag": "普通文档问答", "contextkv": "ContextKV", "llamaindex": "LlamaIndex"}
+    labels = {
+        "ordinary_rag": "普通文档问答", "standard_rag": "普通文档问答",
+        "engine_kv_only": "仅下层 KV", "ranked_selection": "排序选材",
+        "context_only": "仅上层上下文", "context_kv_directory": "上层+KV目录截断",
+        "contextkv": "ContextKV", "llamaindex": "LlamaIndex",
+    }
     summaries, comparisons = [], []
     text = ["# ContextKV benchmark 结果", "", "每个 benchmark 独立报告。完整响应包含排队、检索、辅助编码、计算与最终生成。", ""]
 
@@ -358,10 +399,18 @@ def report(matrix, rows, directory, *, split="test"):
             summary = declared_queue_summary(selected, spec, [row["task_id"] for row in selected])
             cost = summary["cost"]
             p95 = cost["p95_complete_ms"]
+            p99 = cost.get("p99_complete_ms")
+            p95_ttft = cost.get("p95_ttft_ms")
+            p95_wait = cost.get("p95_slot_wait_ms")
             item = {"dataset": dataset, "method": method, "metric": spec["primary_metric"],
                 "completed": summary["completed"], "requested": summary["declared"],
                 "quality": summary["queue_primary_score"], "metrics": summary["benchmark_metrics"],
                 "p95_seconds": p95 / 1000 if p95 is not None else None,
+                "p99_seconds": p99 / 1000 if p99 is not None else None,
+                "p95_ttft_seconds": p95_ttft / 1000 if p95_ttft is not None else None,
+                "p95_slot_wait_seconds": p95_wait / 1000 if p95_wait is not None else None,
+                "duration_seconds": cost.get("duration_seconds"),
+                "throughput_turns_per_sec": cost.get("throughput_turns_per_sec"),
                 **{key: cost[key] for key in ("total_input_tokens", "total_output_tokens", "gpu_gib_seconds",
                     "host_gib_seconds", "gpu_peak_gib", "host_peak_gib", "actual_device_hit_tokens",
                     "actual_host_loaded_tokens", "actual_prefill_tokens", "new_compute_kv_pages",
@@ -401,12 +450,20 @@ def main(argv=None):
     parser.add_argument("--methods", nargs="+")
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--arrival-rate", type=float, help="Open-loop Poisson session arrival rate (sessions/s)")
+    parser.add_argument("--turn-think-ms", type=float, default=0.0, help="Delay between turns in a session for open-loop runs")
+    parser.add_argument("--engine-url", help="Override generation SGLang base URL (for multi-GPU parallel runs)")
+    parser.add_argument("--judge-url", help="Override scoring judge base URL")
+    parser.add_argument("--aux-device", help="Override shared query/evidence encoder CUDA device (e.g. cuda:1)")
+    parser.add_argument("--gpu-devices", type=int, nargs="+", help="Override physical GPU IDs sampled for batch_cost.json")
     parser.add_argument("--limit-conversations", type=int)
     parser.add_argument("--limit-turns", type=int, default=20, help="Questions per benchmark and method")
     parser.add_argument("--unscored", action="store_true")
     parser.add_argument("--cache-pair", action="store_true", help="Pair Native and cooperative cache on identical generated request inputs")
     args = parser.parse_args(argv)
     config = yaml.safe_load(Path(args.config).read_text())
+    if args.judge_url:
+        config.setdefault("generation", {})["teacher_url"] = args.judge_url
     matrix = yaml.safe_load(Path(args.matrix).read_text())
     root = Path(config["study"]["output_dir"])
     if args.command == "evaluate":
@@ -414,7 +471,10 @@ def main(argv=None):
         write_json(output/"matrix.json", matrix)
         rows = asyncio.run(evaluate(config, matrix, output, split=args.split,
             methods=args.methods, datasets=args.datasets, concurrency=args.concurrency,
-            limit_conversations=args.limit_conversations, limit_turns=args.limit_turns, score=not args.unscored, cache_pair=args.cache_pair))
+            limit_conversations=args.limit_conversations, limit_turns=args.limit_turns,
+            score=not args.unscored, cache_pair=args.cache_pair,
+            arrival_rate=args.arrival_rate, turn_think_ms=args.turn_think_ms,
+            engine_url=args.engine_url, aux_device=args.aux_device, gpu_devices=args.gpu_devices))
         result = report(matrix, rows, output, split=args.split)
     else:
         source = Path(args.results or root/args.split)

@@ -1,0 +1,98 @@
+study_config: configs/study.yaml
+seed: 20261119
+protocol: P3
+resources:
+  gpu_devices:
+  - 4
+  - 5
+datasets:
+  multidoc2dial:
+    inputs:
+      test: data/multidoc2dial/test/tasks.jsonl
+    corpus_path: data/multidoc2dial/test/passages.jsonl
+    primary_metric: f1
+    normalization: 1.0
+    sparse_index: data/indexes/multidoc2dial/sparse
+    dense_index: data/indexes/multidoc2dial/dense
+  mtrag:
+    inputs:
+      test: data/mtrag/RAG.jsonl
+    corpus_path: data/mtrag-official/cloud.jsonl
+    corpus_id: mtrag
+    domain: mt-rag-ibmcloud-elser-512-100-20240502
+    primary_metric: mtrageval_harmonic
+    normalization: 1.0
+    max_passages: 10
+    sparse_index: data/indexes/mtrag/sparse
+    dense_index: data/indexes/mtrag/dense
+methods:
+- id: standard_rag
+  overrides:
+    execution:
+      dialogue_mode: rag
+    shared:
+      runtime:
+        ordinary_kv_hints: false
+        kv_protect_waiting: false
+- id: engine_kv_only
+  overrides:
+    execution:
+      dialogue_mode: rag
+    shared:
+      runtime:
+        ordinary_kv_hints: true
+        kv_mode: auto
+        kv_send_demand: true
+        kv_protect_waiting: true
+- id: ranked_selection
+  overrides:
+    execution:
+      dialogue_mode: contextkv
+    shared:
+      runtime:
+        evidence_selection: ranked
+        continuation_policy: expand
+        kv_mode: exact
+        kv_use_catalogue: false
+        kv_send_demand: false
+        kv_protect_waiting: false
+        kv_use_lease: false
+- id: context_only
+  overrides:
+    execution:
+      dialogue_mode: contextkv
+    shared:
+      runtime:
+        evidence_selection: utility
+        continuation_policy: value
+        kv_mode: exact
+        kv_use_catalogue: false
+        kv_send_demand: false
+        kv_protect_waiting: false
+        kv_use_lease: false
+- id: context_kv_directory
+  overrides:
+    execution:
+      dialogue_mode: contextkv
+    shared:
+      runtime:
+        evidence_selection: utility
+        continuation_policy: value
+        kv_mode: auto
+        kv_use_catalogue: true
+        kv_send_demand: false
+        kv_protect_waiting: false
+        kv_use_lease: false
+- id: contextkv
+  overrides:
+    execution:
+      dialogue_mode: contextkv
+    shared:
+      runtime:
+        evidence_selection: utility
+        continuation_policy: value
+        kv_mode: auto
+        kv_use_catalogue: true
+        kv_send_demand: true
+        kv_protect_waiting: true
+        kv_use_lease: true

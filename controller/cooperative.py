@@ -45,6 +45,7 @@ class AnswerResult:
     native: dict = field(default_factory=dict)
     evaluation_evidence: tuple = ()
     new_compute_kv_pages: int = 0
+    engine_ttft_ms: float = 0.0
 
 
 def selected_blocks(state):
@@ -87,6 +88,9 @@ class CooperativeController:
             self.prices = ValuePrices(**settings.get("prices", {}))
             from .config import load_kv_policy
             self.kv_policy = load_kv_policy(settings)
+        elif settings.get("ordinary_kv_hints", False) and "kv_quality_asset" in settings:
+            from .config import load_kv_policy
+            self.kv_policy = load_kv_policy(settings)
 
     async def start(self):
         if self.engine_info is None:
@@ -116,9 +120,12 @@ class CooperativeController:
                                 remaining-len(request.input_ids)-answer_output)
             if output_tokens <= 0:
                 raise ValueError("the request input exhausts the remaining token budget")
+            use_kv_mode = self.dialogue_mode == "contextkv" or self.settings.get("ordinary_kv_hints", False)
+            mode = self.settings.get("kv_mode", "auto") if use_kv_mode else "exact"
+            protect_waiting = self.settings.get("kv_protect_waiting", use_kv_mode)
             result = await self.engine.compute(request, session_id=session_id,
                 request_id=f"{request_id}:{totals['calls']}:{name}", max_new_tokens=output_tokens,
-                mode=self.settings.get("kv_mode", "auto") if self.dialogue_mode == "contextkv" else "exact",
+                mode=mode, protect_waiting=protect_waiting,
                 **self.kv_policy, response_schema=schema, cache_scope=cache_scope, cache_namespace=cache_namespace)
             meta = result["meta"]
             native = meta["contextkv_compute"]
@@ -287,7 +294,7 @@ class CooperativeController:
         request = compile_request(self.template, state.query.task.raw_question, snapshot.raw_history, selected,
             results=state.computations, system_prompt=self.policy.system_prompt or SYSTEM,
             instruction=self._answer_instruction(state) + title_note)
-        if not request.blocks:
+        if not request.blocks or not self.settings.get("kv_send_demand", True):
             return request
         open_ids = {need.need_id for need in state.open_needs}
         open_spans = [binding.source_span for binding in state.evidence.bindings if binding.need_id in open_ids]
@@ -547,9 +554,12 @@ class CooperativeController:
         units = () if closed else state.pool.units
         blocks = blocks_for_units(units, state.pool.source_blocks)
         available_sources = {source_address(block) for block in (*state.source_headers, *blocks)}
+        use_catalogue = self.settings.get("kv_use_catalogue", True)
+        use_lease = use_catalogue and self.settings.get("kv_use_lease", True)
         native = (state.costs.snapshot if state.costs is not None else
-            await self.engine.evidence_state(tuple(available_sources),
-                cache_scope=state.cache_scope, cache_namespace=state.cache_namespace, session_id=snapshot.session_id))
+            await self.engine.evidence_state(tuple(available_sources) if use_catalogue else (),
+                cache_scope=state.cache_scope, cache_namespace=state.cache_namespace,
+                session_id=snapshot.session_id if use_lease else None, use_lease=use_lease))
         def select():
             costs = EvidenceCosts(units, state.pool.source_blocks, self.template.tokenizer,
                 native, prompt_tokens=prompt_tokens, output_tokens=self.policy.max_new_tokens,
@@ -614,9 +624,32 @@ class CooperativeController:
 
         async def generate(call):
             nonlocal last_request, last_result
-            rendered = self.template.render(call.messages)
-            last_request = CompiledRequest(rendered.input_ids, call.messages, call.source_blocks,
-                call.evidence_spans, call.reference_map, (), ())
+            if self.settings.get("ordinary_kv_hints", False) and call.evidence_spans:
+                rendered = self.template.render(call.messages, with_offsets=True)
+                eos = self.template.tokenizer.eos_token
+                body_end = rendered.text.rindex(eos) if eos and eos in rendered.text else len(rendered.text)
+                content = call.messages[-1].content
+                content_start = rendered.text.rindex(content, 0, body_end)
+                blocks, cursor = [], 0
+                for block, span in zip(call.source_blocks, call.evidence_spans):
+                    first, last = content_start + span.start, content_start + span.end
+                    while cursor < len(rendered.offsets) and rendered.offsets[cursor][1] <= first:
+                        cursor += 1
+                    token_start = cursor
+                    while cursor < len(rendered.offsets) and rendered.offsets[cursor][0] < last:
+                        cursor += 1
+                    if token_start < cursor:
+                        blocks.append({"source_id": source_address(block), "start": token_start, "end": cursor})
+                last_request = CompiledRequest(rendered.input_ids, call.messages, call.source_blocks,
+                    call.evidence_spans, call.reference_map, tuple(blocks), ())
+                if blocks and self.settings.get("kv_send_demand", True):
+                    demand = [{"source_id": blk["source_id"], "uses": round(0.97 ** idx, 6)}
+                              for idx, blk in enumerate(blocks)]
+                    last_request = with_source_demand(last_request, demand)
+            else:
+                rendered = self.template.render(call.messages)
+                last_request = CompiledRequest(rendered.input_ids, call.messages, call.source_blocks,
+                    call.evidence_spans, call.reference_map, (), ())
             last_result = await complete(last_request, call.step_id)
             return last_result["text"]
 
@@ -641,6 +674,7 @@ class CooperativeController:
             read_count=totals["calls"]-1, reduce_count=len(computations),
             truncated=meta["finish_reason"]["type"] == "length", computations=computations, native=native,
             new_compute_kv_pages=totals["new_compute_kv_pages"],
+            engine_ttft_ms=float(native.get("ttft_ms", 0.0)),
             evaluation_evidence=tuple({(block.key, block.span): block
                 for block in (*request.evidence, *calculation_sources)}.values()))
         self.store.commit(snapshot.session_id, request_id, query, final["text"], evidence=response.evaluation_evidence,
